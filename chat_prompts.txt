@@ -1,0 +1,26 @@
+
+There is an empty repo that requires implement the codes from scratch. Are you ready? There are one PDF file that states the core idea of the research, and there are two following ppt recording follow-up discussions . Please first inspect the ideas.
+
+good. before we start, lets see the ideas carefully. Do you agree with the discussions in the following ppt, or do you have better ideas? this project is at very early stage, so everything might change, if there is a better solution.
+
+okay. good. please add a markdown file named 'idea_polish.md' at the repo, recording your understanding of the ideas. Includes the idea basics, method, and your comments
+
+okay, maybe we need more formal 'formulation' of the idea. you may output your words in another markdown file named 'idea_formulation.md'. Be sure to handle the math expressions carefully so that we may see the correct forms appear if we use other markdown softwares (like obsidian, notion, etc), these formula may appear correctly.
+
+good. I copied the texts in the latter md file and already see the correctly rendered formula. Please fix the previous md file so that I can see them too.
+
+I am a newcomer of llm and i am not familar with the setups. Please first extract the desgin notes of which llm we are about to use, and more importantly,teach me how do i get the model and datasets onto the server from internet. Be sure to give a very detailed tutorial.
+
+Good. Then, since I am a novice of llm research, could you please teach me on what our codebase will look like once fully implemented? what we are going to implement? give me a detailed instruction on the steps
+
+that is helpful. so, write a md file named 'TODO.md' at the root, and more detailedly output all following steps into the file. to be very explicit, clear, and understandable from a senior software engineer's view.
+
+Actually,the BCR project is another ongoing research project hosted by another group. I learn from them that their code might not be released until their paper comes out. That would be very late. We discussed that their ideas have flaws and decided to use ours method, as stated in the .pptx files. So, our dev path might be different. We should not rely on their codes. Knowing this, state what to do next, and compose another 'TODO_ours.md', with the same requirements
+
+we plan to create a md file at the root named 'progress_detailed.md' Once you modified any code, write a changelog automatically into the file at the beginning, so that new changes appear on the top. Each change should begin with a timestep. Breaking changes, if applicable, should be marked as caution. The file should be maintained by you. If it is just a pure chat, no code is modified, you are not required to add logs into it.
+
+we plan to maintain a md file at the root named 'chat_system_prompts.md', the file would contain all the 'system-prompt' level requirements that you should keep in mind in every single chat, every code modification. This file should be explicitly ordered to change by me. You are only allowed to write a new requirement into the file under my instruction. You do not need to check the file at every chat begin. Instead, you are only required to check the file under my explicit instruction. If the file is modified since you checked last time and you are not yet requested to check it again, you ignore the changes, and keep the requirements that you should follow the same, as if no changes happen. 
+Now, regard the this prompt and last prompt as 'system prompts', and you summarize them, write into the file.
+
+remember I once ask you to help me with the math formula expressions to be properly rendered in Notion and Obsidian? This is another 'system_prompt'. You summarize this and add to the "system_prompt" file, and begin to follow it.
+
