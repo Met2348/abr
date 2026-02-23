@@ -44,12 +44,12 @@ The script includes fallbacks for datasets whose old IDs are invalid or disabled
 
 - The prompts since the very beginning of the project, can all be found at `chat_prompts.txt`. 
 
-## [Dev] What does the two `TODO` files mean?
+## [Dev] What do the two `TODO` files mean?
 
 - The `TODO.md` assumes the BCR codes are released so that we may build upon their codes.
 - However, since no codes are released, we decide to build our own codebase from scratch.
-- The `TODO_ours.md` describes what we are going to do at each step, without the assitance of BCR.
+- The `TODO_ours.md` describes what we are going to do at each step, without the assistance of BCR.
 
-## [Dev] What does the two `idea` files mean?
+## [Dev] What do the two `idea` files mean?
 - The `idea_polish.md` contains ideas extracted from the original BCR idea and two following discussions.
 - The `idea_formulation.md` is the file that explicitly expressed the ideas with math formula. The format is KaTeX friendly, so it can be properly rendered in Obsidian and Notion.

@@ -2,6 +2,34 @@
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
 
+## 2026-02-23 15:36:11 +08 (+0800)
+- Type: Feature / Docs / Test
+- Summary: Implemented first milestone data pipeline scaffold (`schema`, `loaders`, `check_data` CLI, and starter tests) for the independent OURS track.
+- Details:
+  - Added canonical schema with strong validation and dict coercion helpers.
+  - Added multi-dataset loader module with a unified entry point and beginner-friendly error messages.
+  - Added `scripts/check_data.py` to validate schema, preview samples, and verify dataset readiness before training.
+  - Added starter test suite (`unit` + `integration`) including graceful skip behavior when parquet runtime is unavailable.
+  - Ran verification:
+    - `python3 -m py_compile ...` on all newly added files.
+    - `python3 scripts/check_data.py --datasets strategyqa --split train --limit 2` (success).
+    - `conda run -n bcr python scripts/check_data.py --datasets gsm8k --split train --limit 2 --gsm8k-config main` (success).
+    - `pytest -q tests/unit/test_data_schema.py tests/integration/test_data_loaders.py` -> `4 passed, 1 skipped`.
+- Files changed:
+  - `src/ours/__init__.py`
+  - `src/ours/data/__init__.py`
+  - `src/ours/data/schema.py`
+  - `src/ours/data/loaders.py`
+  - `scripts/check_data.py`
+  - `tests/conftest.py`
+  - `tests/unit/test_data_schema.py`
+  - `tests/integration/test_data_loaders.py`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+---
+
 ## 2026-02-23 14:55:42 +08 (+0800)
 - Type: Docs / Process
 - Summary: Added persistent system rule for Markdown math rendering compatibility with Notion and Obsidian.

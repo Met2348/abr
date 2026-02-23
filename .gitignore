@@ -9,6 +9,8 @@ __pycache__/
 # running
 *.safetensors
 .gitattributes
+*.pptx
+*.pdf
 # result/
 # log/
 # kit/

@@ -17,10 +17,19 @@ that is helpful. so, write a md file named 'TODO.md' at the root, and more detai
 
 Actually,the BCR project is another ongoing research project hosted by another group. I learn from them that their code might not be released until their paper comes out. That would be very late. We discussed that their ideas have flaws and decided to use ours method, as stated in the .pptx files. So, our dev path might be different. We should not rely on their codes. Knowing this, state what to do next, and compose another 'TODO_ours.md', with the same requirements
 
-we plan to create a md file at the root named 'progress_detailed.md' Once you modified any code, write a changelog automatically into the file at the beginning, so that new changes appear on the top. Each change should begin with a timestep. Breaking changes, if applicable, should be marked as caution. The file should be maintained by you. If it is just a pure chat, no code is modified, you are not required to add logs into it.
+we plan to create a md file at the root named 'progress_detailed.md' Once you modified any code, write a changelog automatically into the file at the beginning, so that new changes appear on the top. Each change should begin with a timestamp. Breaking changes, if applicable, should be marked as caution. The file should be maintained by you. If it is just a pure chat, no code is modified, you are not required to add logs into it.
 
 we plan to maintain a md file at the root named 'chat_system_prompts.md', the file would contain all the 'system-prompt' level requirements that you should keep in mind in every single chat, every code modification. This file should be explicitly ordered to change by me. You are only allowed to write a new requirement into the file under my instruction. You do not need to check the file at every chat begin. Instead, you are only required to check the file under my explicit instruction. If the file is modified since you checked last time and you are not yet requested to check it again, you ignore the changes, and keep the requirements that you should follow the same, as if no changes happen. 
 Now, regard the this prompt and last prompt as 'system prompts', and you summarize them, write into the file.
 
 remember I once ask you to help me with the math formula expressions to be properly rendered in Notion and Obsidian? This is another 'system_prompt'. You summarize this and add to the "system_prompt" file, and begin to follow it.
+
+Since i am a novice, teach me what to do next? should we beign to look into the 'data pipeline'? or what else? You , as a very tolerant experienced coding master, teach me on building my first research project.
+
+# ==== start building data pipeline ====
+
+Okay, please build these files very carefully, add comprehensive notes that are novice-friendly. Explain the codes very detailedly.
+
+# == begin asking about the impl of data pipeline
+could you explain what is 'canonical' mean? I inspect the loaders.py and see a lot of vars and modules begin or end with 'canonical' and do not know what does it mean. 
 
