@@ -1,19 +1,35 @@
-# BCR local setup notes
+# OURS Research Project (Independent from external BCR code)
 
-## Model files
+This repository is building an in-house reasoning-faithfulness pipeline from scratch.
 
-Please manually put the ~15 GiB, 4 `*.safetensors` files into:
+Current milestone status:
+- First data-pipeline milestone is complete:
+  - canonical schema
+  - multi-dataset loaders
+  - data validation CLI
+  - starter unit/integration tests
+
+Primary roadmap:
+- `TODO_ours.md`
+
+Context files:
+- `idea_polish.md`
+- `idea_formulation.md`
+- `readme_dev.md`
+
+## 1. Model files
+
+Please manually place the 4 model shard files in:
 
 `assets/models/Qwen2.5-7B-Instruct`
 
-Expected names:
-
+Expected filenames:
 - `model-00001-of-00004.safetensors`
 - `model-00002-of-00004.safetensors`
 - `model-00003-of-00004.safetensors`
 - `model-00004-of-00004.safetensors`
 
-## Dataset downloads
+## 2. Dataset downloads
 
 Use:
 
@@ -21,35 +37,86 @@ Use:
 bash download_datasets.sh
 ```
 
-or with explicit target dir:
+or:
 
 ```bash
 bash download_datasets.sh assets/datasets
 ```
 
-The script includes fallbacks for datasets whose old IDs are invalid or disabled.
+Why this script exists:
+- it uses valid, namespaced HF dataset IDs
+- it includes fallbacks for datasets with moved/disabled repos
 
-### Why some old commands fail
+## 3. Quick Start (Novice-Friendly)
 
-- `logiqa`, `strategyqa`, `proofwriter`, `bigbench_hard` without namespace:
-  these IDs are not valid dataset repos on HF Hub.
-- `hendrycks/competition_math`:
-  this repo is currently disabled (403). Use `EleutherAI/hendrycks_math` instead.
+```bash
+cd /home/zling/y/bcr/ref
+conda activate bcr
+export HF_HOME=$PWD/assets/hf_cache
+export HF_DATASETS_CACHE=$PWD/assets/hf_cache/datasets
+export PYTHONPATH=$PWD/src
+```
 
-## [Dev] How to recover the Codex dev context at a new chat?
+### 3.1 Run data checks (first priority)
 
-- Locate the file named `chat_system_prompts.md` at the root, and Order Codex to read it so it may restore the requirements that it should strictly follow at each singe chat.
+Core datasets first:
 
-## [Dev] Where are the previous chats?
+```bash
+python scripts/check_data.py --datasets gsm8k strategyqa --split train --limit 5
+```
 
-- The prompts since the very beginning of the project, can all be found at `chat_prompts.txt`. 
+Additional datasets:
 
-## [Dev] What do the two `TODO` files mean?
+```bash
+python scripts/check_data.py --datasets drop proofwriter --split train --limit 5
+python scripts/check_data.py --datasets bbh --split test --limit 5 --bbh-task boolean_expressions
+python scripts/check_data.py --datasets hendrycks_math --split train --limit 5 --hendrycks-subset algebra
+python scripts/check_data.py --datasets logiqa --split train --limit 5
+```
 
-- The `TODO.md` assumes the BCR codes are released so that we may build upon their codes.
-- However, since no codes are released, we decide to build our own codebase from scratch.
-- The `TODO_ours.md` describes what we are going to do at each step, without the assistance of BCR.
+Expected success signal:
+- `Result: SUCCESS`
+- non-empty `question` and `answer` counts
+- sensible sample preview
 
-## [Dev] What do the two `idea` files mean?
-- The `idea_polish.md` contains ideas extracted from the original BCR idea and two following discussions.
-- The `idea_formulation.md` is the file that explicitly expressed the ideas with math formula. The format is KaTeX friendly, so it can be properly rendered in Obsidian and Notion.
+### 3.2 Run tests
+
+Preferred command:
+
+```bash
+python -m pytest -q tests/unit/test_data_schema.py tests/integration/test_data_loaders.py
+```
+
+If you see `No module named pytest` in `bcr` environment:
+
+```bash
+python -m pip install -U pytest
+```
+
+## 4. Implemented Data Pipeline Files
+
+- `src/ours/data/schema.py`: canonical sample contract + validation
+- `src/ours/data/loaders.py`: per-dataset normalization to canonical schema
+- `scripts/check_data.py`: CLI for readiness checks and sample previews
+- `tests/unit/test_data_schema.py`: schema unit tests
+- `tests/integration/test_data_loaders.py`: loader smoke tests
+
+## 5. Common Failure Cases
+
+1. `Repository not found` on HF:
+- Usually wrong dataset repo ID (use `download_datasets.sh`).
+
+2. `403 DisabledRepoError` for old competition math repo:
+- Use `EleutherAI/hendrycks_math` fallback (already in script).
+
+3. `pyarrow` / `datasets` runtime mismatch:
+- Activate a clean env (recommended: `bcr`) and reinstall compatible versions.
+
+4. Permission error under default HF cache:
+- Ensure `HF_HOME` and `HF_DATASETS_CACHE` point to writable project paths.
+
+## 6. What to do next
+
+Next milestone:
+- implement `step_builder.py` and preprocessing scripts for step-level reasoning units,
+- then move to baseline SFT/value training.

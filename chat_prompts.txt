@@ -31,5 +31,17 @@ Since i am a novice, teach me what to do next? should we beign to look into the 
 Okay, please build these files very carefully, add comprehensive notes that are novice-friendly. Explain the codes very detailedly.
 
 # == begin asking about the impl of data pipeline
+
 could you explain what is 'canonical' mean? I inspect the loaders.py and see a lot of vars and modules begin or end with 'canonical' and do not know what does it mean. 
+
+explain the next 5 key loader terms in your file: split, cache_dir, fallback, metadata, and coerce
+
+OK. make walk line-by-line through load_gsm8k
+
+# -- begin validating code working
+
+Now,please instruct me on how to manipulate current code, to get meaningful results.
+
+
+okay, maybe we have made the very first milestone. please: 1. write all code changes appended to "progress_detailed.md', 2. update readme.md 
 

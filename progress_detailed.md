@@ -2,6 +2,22 @@
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
 
+## 2026-02-24 02:04:36 +08 (+0800)
+- Type: Docs
+- Summary: Finalized first-milestone documentation pass and refreshed root README with an actionable runbook.
+- Details:
+  - Updated `readme.md` from setup-only notes to a full novice-friendly project guide.
+  - Added explicit quick-start commands (env setup, data checks, test command, pytest fix).
+  - Added sections describing implemented pipeline files and common failure cases.
+  - Added a clear "what to do next" section pointing to step-level preprocessing as next milestone.
+- Files changed:
+  - `readme.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+---
+
 ## 2026-02-23 15:36:11 +08 (+0800)
 - Type: Feature / Docs / Test
 - Summary: Implemented first milestone data pipeline scaffold (`schema`, `loaders`, `check_data` CLI, and starter tests) for the independent OURS track.
