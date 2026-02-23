@@ -45,3 +45,4 @@ Now,please instruct me on how to manipulate current code, to get meaningful resu
 
 okay, maybe we have made the very first milestone. please: 1. write all code changes appended to "progress_detailed.md', 2. update readme.md 
 
+So, how do we change the loader logic? and impl your suggestions on the Hendrycks dataset? Please implement your ‘to-do-next' with comments and explain to me about how do your impl work.

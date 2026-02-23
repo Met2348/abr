@@ -21,7 +21,7 @@ __pycache__/
 # save/
 # t2m/
 # checkpoints/
-assets/hf_cache/.check_for_update_done
+assets/hf_cache/*
 
 # Distribution / packaging
 .Python

@@ -2,6 +2,36 @@
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
 
+## 2026-02-24 02:25:04 +08 (+0800)
+- Type: Feature / Test
+- Summary: Improved dataset loader logic for DROP/ProofWriter context handling and Hendrycks final-answer extraction; added targeted helper tests.
+- Details:
+  - Updated `load_drop` to build `question` from both passage and question (`Passage: ...\\nQuestion: ...`) so reading-comprehension context is not lost.
+  - Updated `load_proofwriter` to build `question` from both theory and question (`Theory: ...\\nQuestion: ...`) and preserved additional metadata (`QDep`, `QLen`).
+  - Updated `load_hendrycks_math` to:
+    - store full solution in `cot`,
+    - extract concise final answer into `answer` (prefer last `\\boxed{...}`),
+    - record extraction strategy in metadata (`answer_extraction_method`).
+  - Added helper functions with inline comments:
+    - `_build_drop_question`
+    - `_build_proofwriter_question`
+    - `_extract_hendrycks_final_answer`
+    - `_extract_last_boxed_content` (supports nested braces).
+  - Added unit tests in `tests/unit/test_data_loader_helpers.py` for prompt builders and Hendrycks extraction logic.
+  - Validation run results:
+    - `python3 -m py_compile ...` passed
+    - `python3 -m pytest -q tests/unit/test_data_loader_helpers.py tests/unit/test_data_schema.py` -> `9 passed`
+    - `conda run -n bcr python scripts/check_data.py --datasets drop proofwriter hendrycks_math --split train --limit 2 --hendrycks-subset algebra` -> success
+- Files changed:
+  - `src/ours/data/loaders.py`
+  - `tests/unit/test_data_loader_helpers.py`
+  - `progress_detailed.md`
+- Breaking changes:
+  - [CAUTION] Canonical `question` for `drop` and `proofwriter` now includes context prefixes (`Passage:`/`Theory:`). Any downstream code that expected raw question-only text must adapt (use `metadata.raw_question` if needed).
+  - [CAUTION] Canonical `hendrycks_math.answer` now holds extracted final answer (when possible) instead of full solution; full solution moved to `cot`.
+
+---
+
 ## 2026-02-24 02:04:36 +08 (+0800)
 - Type: Docs
 - Summary: Finalized first-milestone documentation pass and refreshed root README with an actionable runbook.

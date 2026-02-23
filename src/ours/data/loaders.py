@@ -200,18 +200,22 @@ def load_drop(
 
     samples: list[CanonicalSample] = []
     for idx, row in enumerate(rows):
+        passage = _as_clean_str(row.get("passage", ""))
+        raw_question = _as_clean_str(row.get("question", ""))
         answer = _extract_drop_answer(row.get("answers_spans"))
         samples.append(
             CanonicalSample(
                 id=f"drop:{split}:{idx}",
                 dataset="drop",
-                question=_as_clean_str(row.get("question", "")),
+                # DROP is reading-comprehension style: the model needs passage + question.
+                question=_build_drop_question(passage=passage, question=raw_question),
                 answer=answer,
                 cot=None,
                 metadata={
                     "section_id": row.get("section_id"),
                     "query_id": row.get("query_id"),
-                    "passage": row.get("passage"),
+                    "raw_question": raw_question,
+                    "passage": passage,
                     "source_split": split,
                     "requested_split": requested_split,
                 },
@@ -235,18 +239,24 @@ def load_proofwriter(
 
     samples: list[CanonicalSample] = []
     for idx, row in enumerate(rows):
+        theory = _as_clean_str(row.get("theory", ""))
+        raw_question = _as_clean_str(row.get("question", ""))
         samples.append(
             CanonicalSample(
                 id=f"proofwriter:{split}:{_as_clean_str(row.get('id', str(idx)))}",
                 dataset="proofwriter",
-                question=_as_clean_str(row.get("question", "")),
+                # ProofWriter questions depend on the theory/premise context.
+                question=_build_proofwriter_question(theory=theory, question=raw_question),
                 answer=_as_clean_str(row.get("answer", "")),
                 cot=_as_optional_clean_str(row.get("allProofs")),
                 metadata={
-                    "theory": row.get("theory"),
+                    "theory": theory,
+                    "raw_question": raw_question,
                     "maxD": row.get("maxD"),
                     "NFact": row.get("NFact"),
                     "NRule": row.get("NRule"),
+                    "QDep": row.get("QDep"),
+                    "QLen": row.get("QLen"),
                     "config": row.get("config"),
                     "source_split": split,
                 },
@@ -324,19 +334,22 @@ def load_hendrycks_math(
     samples: list[CanonicalSample] = []
     for idx, row in enumerate(rows):
         solution = _as_clean_str(row.get("solution", ""))
+        final_answer, extraction_method = _extract_hendrycks_final_answer(solution)
+        # Keep "answer" concise (final answer when available) and preserve full
+        # worked solution in `cot` for process-oriented experiments.
+        answer = final_answer if final_answer else solution
         samples.append(
             CanonicalSample(
                 id=f"hendrycks_math:{subset}:{split}:{idx}",
                 dataset="hendrycks_math",
                 question=_as_clean_str(row.get("problem", "")),
-                # Dataset has rich worked solutions but no easy final-answer-only field.
-                # For now we keep full solution in answer and store details in metadata.
-                answer=solution,
-                cot=None,
+                answer=answer,
+                cot=solution if solution else None,
                 metadata={
                     "subset": subset,
                     "level": row.get("level"),
                     "type": row.get("type"),
+                    "answer_extraction_method": extraction_method,
                     "source_split": split,
                     "requested_split": requested_split,
                 },
@@ -489,6 +502,91 @@ def _extract_drop_answer(answers_spans: Any) -> str:
     return ""
 
 
+def _build_drop_question(passage: str, question: str) -> str:
+    """Build a model-ready DROP prompt from passage + question."""
+    passage = _as_clean_str(passage)
+    question = _as_clean_str(question)
+    if passage and question:
+        return f"Passage: {passage}\nQuestion: {question}"
+    if question:
+        return question
+    if passage:
+        return f"Passage: {passage}"
+    return ""
+
+
+def _build_proofwriter_question(theory: str, question: str) -> str:
+    """Build a model-ready ProofWriter prompt from theory + question."""
+    theory = _as_clean_str(theory)
+    question = _as_clean_str(question)
+    if theory and question:
+        return f"Theory: {theory}\nQuestion: {question}"
+    if question:
+        return question
+    if theory:
+        return f"Theory: {theory}"
+    return ""
+
+
+def _extract_hendrycks_final_answer(solution: str) -> tuple[str, str]:
+    """Extract final answer from a Hendrycks solution.
+
+    Returns
+    -------
+    tuple[str, str]
+        (answer_text, extraction_method)
+        extraction_method is one of:
+        - "boxed"            : extracted from the last ``\\boxed{...}``
+        - "last_line"        : extracted from last solution line
+        - "full_solution_fallback"
+    """
+    text = _as_clean_str(solution)
+    if not text:
+        return "", "full_solution_fallback"
+
+    boxed = _extract_last_boxed_content(text)
+    if boxed:
+        return boxed, "boxed"
+
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if lines:
+        candidate = lines[-1]
+        candidate = re.sub(r"^[Tt]herefore,?\s*", "", candidate)
+        candidate = re.sub(r"^[Tt]hus,?\s*", "", candidate)
+        candidate = re.sub(r"^[Ss]o,?\s*", "", candidate)
+        candidate = candidate.strip().strip("$").strip()
+        if candidate:
+            return candidate, "last_line"
+
+    return text, "full_solution_fallback"
+
+
+def _extract_last_boxed_content(text: str) -> str | None:
+    """Extract content of the last ``\\boxed{...}`` expression.
+
+    Handles nested braces, for example ``\\boxed{\\frac{1}{2}}``.
+    """
+    marker = "\\boxed"
+    pos = text.rfind(marker)
+    while pos != -1:
+        brace_start = text.find("{", pos)
+        if brace_start != -1:
+            depth = 0
+            for i in range(brace_start, len(text)):
+                ch = text[i]
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        content = text[brace_start + 1 : i].strip()
+                        if content:
+                            return content
+                        break
+        pos = text.rfind(marker, 0, pos)
+    return None
+
+
 def _rows_to_logiqa_samples(rows: list[dict[str, Any]], split: str) -> list[CanonicalSample]:
     samples: list[CanonicalSample] = []
     for idx, row in enumerate(rows):
@@ -590,4 +688,3 @@ def _as_optional_clean_str(value: Any) -> str | None:
 def _note(message: str) -> None:
     # Explicit note helper keeps warning style consistent across loaders.
     print(f"[data-loader note] {message}")
-
