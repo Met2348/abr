@@ -22,6 +22,8 @@ __pycache__/
 # t2m/
 # checkpoints/
 assets/hf_cache/*
+assets/artifacts/*
+.vscode/*
 
 # Distribution / packaging
 .Python

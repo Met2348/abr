@@ -26,7 +26,11 @@ remember I once ask you to help me with the math formula expressions to be prope
 
 Since i am a novice, teach me what to do next? should we beign to look into the 'data pipeline'? or what else? You , as a very tolerant experienced coding master, teach me on building my first research project.
 
-# ==== start building data pipeline ====
+
+
+# ==== Moving towards milestone 1: start building data pipeline ====
+
+
 
 Okay, please build these files very carefully, add comprehensive notes that are novice-friendly. Explain the codes very detailedly.
 
@@ -46,3 +50,33 @@ Now,please instruct me on how to manipulate current code, to get meaningful resu
 okay, maybe we have made the very first milestone. please: 1. write all code changes appended to "progress_detailed.md', 2. update readme.md 
 
 So, how do we change the loader logic? and impl your suggestions on the Hendrycks dataset? Please implement your ‘to-do-next' with comments and explain to me about how do your impl work.
+
+
+tell me how to test your latest impl and see the differences
+
+ok, lets move back to our research task. What shall we do now, to realize our BCR/ABR method? 
+
+Before you start building the two files, describe what are planned to include in Creating step_builder.py. and Creating preprocess_steps.py.
+
+explain: in step_builder.py:: 1. why we need Determinism controls 2. why we need :optional include question as step 0  and 
+optional include final answer as terminal step, in Dataset-aware helper 3. in Step splitting function, since the datasets are very commonly used, why there are potentially whitespace  and empty fragments? is it caused by dataset quality, or by our segmentation? how could it be? ;;; explain in preprocess_steps.py :: 1. why should we Batch-run? 2. what will the 'artifacts' be, or look like? And, how can they help with training and eval? 3. what is jsonl, how is it different with json? 4. how much disk space we will use in this step? 5. Once we finished running this code for the first time, if we run this a second time, will the artifacts, or outcomes of this code persist and still reusable for a second run, or we have to re-generate the files?
+
+
+
+
+
+# ---- moving towards milestone 2 -----
+
+
+
+
+OK, impl the two files. Remember you are building the research project and meanwhile, teaching a novice of llm. In your code, you should make it very clear and readable for a novice. You should add a lot of comments,docstring, explicit type defs,..., and whatever beneficial for teaching purpose. After impl, give very comprehensive instructions on how to use your codes
+
+one quick question: what is .safetensors format file. how is it 'safe'? what are the diffs and usage of .safetensors, .pth, .ckpt, .pkl, .npy and other data storage file formats used in llm research? how do we choose between them?
+
+please show me 3 examples of unsafe scenario, and in constrast, what the safe scenario will be like, to help me understand this concept
+
+
+oh, maybe i misunderstand the safety meaning. I wonder, if we want to limit the llm to output safe contents, how can we do? does these pretrained weights i downloaded already have the abiity to reject to produce malicious outputs?
+
+write your code change history and new instructs to readme.md, progress_detailed.md, to make novice understand your changes

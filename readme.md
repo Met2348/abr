@@ -3,11 +3,13 @@
 This repository is building an in-house reasoning-faithfulness pipeline from scratch.
 
 Current milestone status:
-- First data-pipeline milestone is complete:
+- First and second data-pipeline milestones are complete:
   - canonical schema
   - multi-dataset loaders
   - data validation CLI
   - starter unit/integration tests
+  - step-level builder (`step_builder.py`)
+  - preprocessing artifact CLI (`preprocess_steps.py`)
 
 Primary roadmap:
 - `TODO_ours.md`
@@ -97,9 +99,12 @@ python -m pip install -U pytest
 
 - `src/ours/data/schema.py`: canonical sample contract + validation
 - `src/ours/data/loaders.py`: per-dataset normalization to canonical schema
+- `src/ours/data/step_builder.py`: deterministic canonical-sample -> step-sequence builder
 - `scripts/check_data.py`: CLI for readiness checks and sample previews
+- `scripts/preprocess_steps.py`: batch preprocessing CLI that writes reusable artifacts
 - `tests/unit/test_data_schema.py`: schema unit tests
 - `tests/integration/test_data_loaders.py`: loader smoke tests
+- `tests/unit/test_step_builder.py`: step-builder behavior tests
 
 ## 5. Common Failure Cases
 
@@ -118,5 +123,103 @@ python -m pip install -U pytest
 ## 6. What to do next
 
 Next milestone:
-- implement `step_builder.py` and preprocessing scripts for step-level reasoning units,
+- run step-level preprocessing to generate reusable artifacts,
 - then move to baseline SFT/value training.
+
+### 6.1 Build step-level artifacts
+
+Use this command for a first smoke run:
+
+```bash
+python scripts/preprocess_steps.py \
+  --datasets gsm8k strategyqa \
+  --split train \
+  --limit 200 \
+  --batch-size 64
+```
+
+Outputs are written under:
+
+`assets/artifacts/steps/<dataset>/<split__variant__fingerprint>/`
+
+Key files:
+- `sample_sequences.jsonl`: one JSON object per sample, containing full step sequence.
+- `flat_steps.jsonl`: one JSON object per step (easy for direct model ingestion).
+- `summary.json`: aggregate counters and averages for the run.
+- `manifest.json`: exact run configuration and deterministic fingerprint.
+- `errors.jsonl`: sample-level preprocessing failures (empty if all good).
+
+Resume behavior:
+- rerunning the same command will reuse existing artifacts (`--resume` default true).
+- use `--overwrite` to force regeneration.
+
+### 6.2 How to read preprocessing outputs
+
+After one run, inspect:
+
+```bash
+ls -lah assets/artifacts/steps/strategyqa
+ls -lah assets/artifacts/steps/strategyqa/<run_folder>
+```
+
+Then verify content:
+
+```bash
+sed -n '1,2p' assets/artifacts/steps/strategyqa/<run_folder>/sample_sequences.jsonl
+sed -n '1,20p' assets/artifacts/steps/strategyqa/<run_folder>/summary.json
+sed -n '1,20p' assets/artifacts/steps/strategyqa/<run_folder>/manifest.json
+```
+
+What each file means:
+- `sample_sequences.jsonl`: one line per original sample, containing ordered steps.
+- `flat_steps.jsonl`: one line per step across all samples (easy for step-level model input).
+- `summary.json`: counts (samples, steps, role distribution, averages).
+- `manifest.json`: exact run config and fingerprint for reproducibility.
+- `errors.jsonl`: per-sample failures (should be empty for clean runs).
+
+## 7. Change History (Novice Digest)
+
+This section summarizes the most recent engineering changes in plain language.
+
+### 7.1 Loader improvements
+- DROP and ProofWriter now include context in the canonical `question` field:
+  - DROP: `Passage: ...` + `Question: ...`
+  - ProofWriter: `Theory: ...` + `Question: ...`
+- Hendrycks MATH now separates:
+  - `cot`: full worked solution
+  - `answer`: extracted final answer (prefer last `\\boxed{...}`)
+
+Why this matters:
+- Better training signal quality for reasoning tasks.
+- Less information loss from dataset-specific formats.
+
+### 7.2 New step preprocessing pipeline
+- Added step builder with deterministic step IDs and configurable splitting:
+  - split modes: `auto`, `newline`, `sentence`
+  - optional question step 0
+  - optional answer terminal step
+- Added preprocessing CLI that writes reusable artifacts and supports:
+  - `--resume` (default reuse)
+  - `--overwrite` (force regeneration)
+  - `--strict` (fail fast on bad samples)
+
+Why this matters:
+- You preprocess once and reuse outputs across experiments.
+- You can compare experiments fairly because run fingerprints are stable.
+
+## 8. Recommended Next Commands
+
+1. Run a tiny smoke test:
+```bash
+python scripts/preprocess_steps.py --datasets strategyqa --split train --limit 20 --batch-size 8
+```
+
+2. Run broader preprocessing:
+```bash
+python scripts/preprocess_steps.py --datasets gsm8k strategyqa drop proofwriter --split train --limit 2000 --batch-size 128
+```
+
+3. Run tests to confirm pipeline stability:
+```bash
+python -m pytest -q
+```

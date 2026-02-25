@@ -2,6 +2,65 @@
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
 
+## 2026-02-26 01:25:56 +08 (+0800)
+- Type: Docs
+- Summary: Expanded novice-facing documentation with explicit change history and step-preprocessing usage instructions.
+- Details:
+  - Updated `readme.md` milestone status to include second data-pipeline milestone (`step_builder.py` and `preprocess_steps.py`).
+  - Expanded implemented-file list to include:
+    - `src/ours/data/step_builder.py`
+    - `scripts/preprocess_steps.py`
+    - `tests/unit/test_step_builder.py`
+  - Added a new section explaining how to inspect and interpret preprocessing artifacts:
+    - `sample_sequences.jsonl`
+    - `flat_steps.jsonl`
+    - `summary.json`
+    - `manifest.json`
+    - `errors.jsonl`
+  - Added a novice digest section summarizing what changed in loader logic and why it matters.
+  - Added a concise “recommended next commands” section for immediate execution.
+- Files changed:
+  - `readme.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+---
+
+## 2026-02-25 15:53:33 +08 (+0800)
+- Type: Feature / Docs / Test
+- Summary: Implemented step-level preprocessing pipeline (`step_builder.py` + `preprocess_steps.py`) with deterministic artifacts, resume controls, and beginner-focused documentation/comments.
+- Details:
+  - Added `src/ours/data/step_builder.py`:
+    - Introduced typed dataclasses: `StepBuildConfig`, `ReasoningStep`, `StepSequence`.
+    - Added deterministic sequence construction via `build_step_sequence` / `build_step_sequences`.
+    - Added CoT splitting logic (`auto`, `newline`, `sentence`) with whitespace normalization and list-marker cleanup.
+    - Added stable config signature and deterministic step IDs for reproducibility.
+  - Added `scripts/preprocess_steps.py`:
+    - Implemented batch preprocessing CLI from canonical samples to step artifacts.
+    - Wrote reusable artifacts per run: `sample_sequences.jsonl`, `flat_steps.jsonl`, `errors.jsonl`, `summary.json`, `manifest.json`.
+    - Added run fingerprinting + `--resume` / `--overwrite` behavior.
+    - Added explicit dataset-specific argument handling (`gsm8k`, `bbh`, `hendrycks_math`).
+  - Exported step-builder APIs in `src/ours/data/__init__.py`.
+  - Added unit tests in `tests/unit/test_step_builder.py`.
+  - Updated `readme.md` with preprocessing command examples and artifact explanations.
+  - Validation results:
+    - `python3 -m py_compile src/ours/data/step_builder.py scripts/preprocess_steps.py src/ours/data/__init__.py tests/unit/test_step_builder.py` passed.
+    - `python3 -m pytest -q tests/unit/test_step_builder.py tests/unit/test_data_schema.py tests/unit/test_data_loader_helpers.py` -> `15 passed`.
+    - `python3 scripts/preprocess_steps.py --datasets strategyqa --split train --limit 5 --batch-size 2` succeeded and produced artifacts.
+    - Re-running same command correctly skipped due to matching artifacts (`--resume` default behavior).
+- Files changed:
+  - `src/ours/data/step_builder.py`
+  - `scripts/preprocess_steps.py`
+  - `src/ours/data/__init__.py`
+  - `tests/unit/test_step_builder.py`
+  - `readme.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+---
+
 ## 2026-02-24 02:25:04 +08 (+0800)
 - Type: Feature / Test
 - Summary: Improved dataset loader logic for DROP/ProofWriter context handling and Hendrycks final-answer extraction; added targeted helper tests.
