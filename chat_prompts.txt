@@ -95,3 +95,209 @@ please elaborate: 1. what is - Dataset-agnostic prompt builder, why? 2.what is p
 please start the very careful impl of  stage A, a critical milestone. keep code readable to a novice. also maintain the readme and changelog. and finally, give concrete instructions
 
 
+
+please detailedly describe: 1. what is in contract.py? why need this? what is a 'contract'? 2. what is inside prompt_builder.py? what are they doing? how these builders work? 3. in splitting.py, the heading comment "If the same sample can jump between train/validation/test across runs,
+metrics become noisy and hard to trust. We use stable hash-based split." I did not understand how it could be. and why not trustable. 4. does the answer_extraction.py use a substring searching paradigm for finding correct answer? is it good enough? 5.what are the algorithms used in evaluator.py? is it by statistics? what about semantic similarity?
+
+how do i Create prediction file (from your model inference)?
+
+
+instruct me what these run outputs tell us, are there also glitches?: (bcr) zling@zling-U2003:~/y/bcr/ref$ python - <<'PY'
+import json
+from pathlib import Path
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
+IN_PATH = Path("assets/artifacts/phase_a_prepared/strategyqa/21095d3c688a/validation.jsonl")
+OUT_PATH = Path("assets/artifacts/phase_a_prepared/strategyqa/21095d3c688a/predictions_qwen_validation.jsonl")
+MODEL_PATH = "assets/models/Qwen2.5-7B-Instruct"
+tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=False)
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_PATH,
+    torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+    device_map="auto",
+)
+model.eval()
+pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+with IN_PATH.open("r", encoding="utf-8") as fin, OUT_PATH.open("w", encoding="utf-8") as fout:
+    for line in fin:
+        row = json.loads(line)
+print(f"Wrote: {OUT_PATH}")ps(pred_row, ensure_ascii=False) + "\n")ue).strip()
+PY
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading weights: 100%|████| 339/339 [00:03<00:00, 99.34it/s, Materializing param=model.norm.weight]
+The following generation flags are not valid and may be ignored: ['temperature', 'top_p', 'top_k']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Wrote: assets/artifacts/phase_a_prepared/strategyqa/21095d3c688a/predictions_qwen_validation.jsonl       =====     (bcr) zling@zling-U2003:~/y/bcr/ref$ python scripts/phase_a_eval_predictions.py \
+  --predictions "$OUT_PATH" \
+  --run-name qwen_strategyqa_val
+========================================================================================
+Phase A: Evaluation Result
+========================================================================================
+input_file       : assets/artifacts/phase_a_prepared/strategyqa/21095d3c688a/predictions_qwen_validation.jsonl
+n_total          : 17
+accuracy         : 0.6471
+parse_error_rate : 0.1176
+output_dir       : assets/artifacts/phase_a_eval/qwen_strategyqa_val_20260226T064729Z
+========================================================================================
+
+
+
+okay, give a python script rather than cmd lines, and instruct me on how to run the same exp again to see the diff
+
+
+The conda run command gives a visual glitch on my terminal, and not giving results, like this: Loading weights:  99%|█████████▉| 337/339 [00:03<00:00, 101.48it/s, Materializing param=model.layers.27.self_attn.v_proj.bias]  
+Loading weights:  99%|█████████▉| 337/339 [00:03<00:00, 101.48it/s, Materializing param=model.layers.27.self_attn.v_proj.bias]
+Loading weights: 100%|█████████▉| 338/339 [00:03<00:00, 101.48it/s, Materializing param=model.layers.27.self_attn.v_proj.weight]
+Loading weights: 100%|█████████▉| 338/339 [00:03<00:00, 101.48it/s, Materializing param=model.layers.27.self_attn.v_proj.weight]
+Loading weights: 100%|██████████| 339/339 [00:03<00:00, 101.48it/s, Materializing param=model.norm.weight]                      
+Loading weights: 100%|██████████| 339/339 [00:03<00:00, 101.48it/s, Materializing param=model.norm.weight]
+Loading weights: 100%|██████████| 339/339 [00:03<00:00, 101.34it/s, Materializing param=model.norm.weight]
+(bcr) zling@zling-U2003:~/y/bcr/ref$
+
+
+The result. What can we learn from it, from every aspect? (bcr) zling@zling-U2003:~/y/bcr/ref$ python -u scripts/phase_a_generate_and_eval.py \
+  --input-jsonl assets/artifacts/phase_a_prepared/strategyqa/21095d3c688a/validation.jsonl \
+  --run-name qwen_strategyqa_val \
+  --no-do-sample \
+  --seed 42 \
+  --max-new-tokens 64
+========================================================================================
+Phase A: Generate + Evaluate
+========================================================================================
+input_jsonl : assets/artifacts/phase_a_prepared/strategyqa/21095d3c688a/validation.jsonl
+model_path  : assets/models/Qwen2.5-7B-Instruct
+run_dir     : assets/artifacts/phase_a_runs/qwen_strategyqa_val_20260226T070404Z
+seed        : 42
+gen_config  : {'max_new_tokens': 64, 'do_sample': False, 'temperature': 1.0, 'top_p': 1.0, 'top_k': 50}
+num_inputs  : 17
+Loading weights: 100%|███| 339/339 [00:03<00:00, 100.92it/s, Materializing param=model.norm.weight]
+----------------------------------------------------------------------------------------
+accuracy         : 0.6471
+parse_error_rate : 0.1176
+compared_with    : assets/artifacts/phase_a_runs/qwen_strategyqa_val_20260226T070029Z/metrics.json
+delta_accuracy   : +0.0000
+delta_parse_err  : +0.0000
+changed_samples  : 0
+metrics_path     : assets/artifacts/phase_a_runs/qwen_strategyqa_val_20260226T070404Z/metrics.json
+========================================================================================
+
+tell me how to do exps on larger size, and compare the two variants, and tighten compliance and keep no sample during benchmarking. step by step hands-on instruction
+
+the  command: "(bcr) zling@zling-U2003:~/y/bcr/ref$ python -u scripts/phase_a_generate_and_eval.py   --input-jsonl "$A_PREP/validation.jsonl"   --run-name strat_vA_direct   --no-do-sample   --seed 42   --max-new-tokens 128" has been running at this server for 15min, and still has no outputs, no console updates. why this exp run so long? could you make it verbose more so i may know the status? inspect the server and estimate how long it would take for it to finish
+
+the server has 4 A100 GPU available, then why are our code running on cpu inference? why not util GPU?
+
+Is now running normal? (bcr) zling@zling-U2003:~/y/bcr/ref$ python - <<'PY'
+import torch
+print(torch.cuda.is_available(), torch.cuda.device_count(), torch.version.cuda)
+PY
+True 4 12.8    ===  ```bash
+(bcr) zling@zling-U2003:~/y/bcr/ref$ nvidia-smi -L
+GPU 0: NVIDIA A100 80GB PCIe (UUID: GPU-0cfa2ec8-0123-2f20-8079-0824503fd44c)
+GPU 1: NVIDIA A100 80GB PCIe (UUID: GPU-37e66b97-ff7d-c967-87bf-cb1536159ea4)
+GPU 2: NVIDIA A100 80GB PCIe (UUID: GPU-3dadcd92-638b-0475-ae5e-4e62130a92e2)
+GPU 3: NVIDIA A100 80GB PCIe (UUID: GPU-f7556ae0-816d-1f08-5773-960940b4dd82)   ==== (bcr) zling@zling-U2003:~/y/bcr/ref$ python -u scripts/phase_a_generate_and_eval.py \
+  --input-jsonl "$A_PREP/validation.jsonl" \
+  --run-name strat_vA_direct \
+  --require-cuda \
+  --no-do-sample \
+  --seed 42 \
+  --max-new-tokens 128 \
+  --log-every 1
+========================================================================================
+Phase A: Generate + Evaluate
+========================================================================================
+input_jsonl : assets/artifacts/phase_a_prepared/strategyqa/f3e476b514c3/validation.jsonl
+model_path  : assets/models/Qwen2.5-7B-Instruct
+run_dir     : assets/artifacts/phase_a_runs/strat_vA_direct_20260226T090829Z
+seed        : 42
+gen_config  : {'max_new_tokens': 128, 'do_sample': False, 'temperature': 1.0, 'top_p': 1.0, 'top_k': 50}
+log_every   : 1
+torch       : 2.10.0+cu128 (build CUDA=12.8)
+cuda_avail  : True
+cuda_count  : 4
+cuda_names  : ['NVIDIA A100 80GB PCIe', 'NVIDIA A100 80GB PCIe', 'NVIDIA A100 80GB PCIe', 'NVIDIA A100 80GB PCIe']
+num_inputs  : 193
+Loading weights: 100%|██████████████| 339/339 [00:12<00:00, 28.25it/s, Materializing param=model.norm.weight]
+first_param : cuda:0
+hf_device_map: {'model.embed_tokens': 0, 'model.layers.0': 0, 'model.layers.1': 0, 'model.layers.2': 0, 'model.layers.3': 0, 'model.layers.4': 1, 'model.layers.5': 1, 'model.layers.6': 1, 'model.layers.7': 1, 'model.layers.8': 1, 'model.layers.9': 1, 'model.layers.10': 1, 'model.layers.11': 1, 'model.layers.12': 1, 'model.layers.13': 2, 'model.layers.14': 2, 'model.layers.15': 2, 'model.layers.16': 2, 'model.layers.17': 2, 'model.layers.18': 2, 'model.layers.19': 2, 'model.layers.20': 2, 'model.layers.21': 2, 'model.layers.22': 3, 'model.layers.23': 3, 'model.layers.24': 3, 'model.layers.25': 3, 'model.layers.26': 3, 'model.layers.27': 3, 'model.norm': 3, 'model.rotary_emb': 3, 'lm_head': 3}
+generation  : starting 193 samples
+generation  : 1/193 (0.5%) | elapsed=00:00:07 | rate=0.129 sample/s | eta=00:24:48
+generation  : 2/193 (1.0%) | elapsed=00:00:14 | rate=0.135 sample/s | eta=00:23:36
+generation  : 3/193 (1.6%) | elapsed=00:00:21 | rate=0.138 sample/s | eta=00:22:55
+generation  : 4/193 (2.1%) | elapsed=00:00:28 | rate=0.140 sample/s | eta=00:22:26
+generation  : 5/193 (2.6%) | elapsed=00:00:36 | rate=0.139 sample/s | eta=00:22:34
+generation  : 6/193 (3.1%) | elapsed=00:00:42 | rate=0.141 sample/s | eta=00:22:10
+
+
+this run is still on, last run's result, what can we learn from it? (bcr) zling@zling-U2003:~/y/bcr/ref$ python -u scripts/phase_a_generate_and_eval.py   --input-jsonl "$A_PREP/validation.jsonl"   --run-name strat_vA_direct   --no-do-sample   --seed 42   --max-new-tokens 128
+========================================================================================
+Phase A: Generate + Evaluate
+========================================================================================
+input_jsonl : assets/artifacts/phase_a_prepared/strategyqa/f3e476b514c3/validation.jsonl
+model_path  : assets/models/Qwen2.5-7B-Instruct
+run_dir     : assets/artifacts/phase_a_runs/strat_vA_direct_20260226T084052Z
+seed        : 42
+gen_config  : {'max_new_tokens': 128, 'do_sample': False, 'temperature': 1.0, 'top_p': 1.0, 'top_k': 50}
+num_inputs  : 193
+Loading weights: 100%|██████████████| 339/339 [00:13<00:00, 25.52it/s, Materializing param=model.norm.weight]
+----------------------------------------------------------------------------------------
+accuracy         : 0.1036
+parse_error_rate : 0.8497
+metrics_path     : assets/artifacts/phase_a_runs/strat_vA_direct_20260226T084052Z/metrics.json
+========================================================================================
+
+give me better run args and commands, for me to learn the reality and how to diagnose
+
+
+can you make all those runs of data pipeline prep and inference-eval tasks into one sh file so that it is easier to exec in CLI?
+
+
+
+t256's result, what can we learn? do we need more exp settings? if so, give their param setting and commands ==(bcr) zling@zling-U2003:~/y/bcr/ref$ CUDA_VISIBLE_DEVICES=3 python -u scripts/phase_a_generate_and_eval.py \
+  --input-jsonl "$PREP_COT" \
+  --model-path "$MODEL" \
+  --run-name strat_cot_t256 \
+  --require-cuda \
+  --dtype bfloat16 \
+  --device-map auto \
+  --no-do-sample \
+  --seed 42 \
+  --max-new-tokens 256 \
+  --log-every 5 \
+  --no-compare-latest-same-name
+========================================================================================
+Phase A: Generate + Evaluate
+========================================================================================
+input_jsonl : assets/artifacts/phase_a_prepared/strategyqa/f3e476b514c3/validation.jsonl
+model_path  : assets/models/Qwen2.5-7B-Instruct
+run_dir     : assets/artifacts/phase_a_runs/strat_cot_t256_20260226T095906Z
+seed        : 42
+gen_config  : {'max_new_tokens': 256, 'do_sample': False, 'temperature': 1.0, 'top_p': 1.0, 'top_k': 50}
+log_every   : 5
+torch       : 2.10.0+cu128 (build CUDA=12.8)
+cuda_avail  : True
+cuda_count  : 1
+cuda_names  : ['NVIDIA A100 80GB PCIe']
+num_inputs  : 193
+Loading weights: 100%|█| 339/339 [00:12<00:00, 26.25
+first_param : cuda:0
+generation  : starting 193 samples
+generation  : 5/193 (2.6%) | elapsed=00:00:34 | rate=0.145 sample/s | eta=00:21:32
+...
+generation  : 193/193 (100.0%) | elapsed=00:21:55 | rate=0.147 sample/s | eta=00:00:00
+----------------------------------------------------------------------------------------
+accuracy         : 0.4974
+parse_error_rate : 0.3212
+metrics_path     : assets/artifacts/phase_a_runs/strat_cot_t256_20260226T095906Z/metrics.json
+========================================================================================
+ 
+
+please init a result_records.md file to cover all prev exp meaningful results with timestamp,to make it clear not for me, but possible future teammates new to our proj so that they may know what happened before they come
+
+
+i am now running your recommended sweeping suggestions 123. I expect you may integrate different exp settings into 'param groups' with a name like 'A1',..., in a sh file.  you need to explain in the comment why this group exist(the intention), what to observe for their result(attention paied to where), and expected result(expectations), these param groups are used for replicating old exps without manually copy-paste command lines. It should be a 'one-click' design - I change the param group configured from, say A1 to A2, save the file, rerun the sh file.  
+
+
+tell me that at current situation, do we need more runs? 
+
+

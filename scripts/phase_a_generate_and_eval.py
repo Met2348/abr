@@ -21,6 +21,7 @@ import argparse
 import json
 import random
 import sys
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -97,6 +98,15 @@ def parse_args() -> argparse.Namespace:
         help="HuggingFace device_map argument (default: auto).",
     )
     parser.add_argument(
+        "--require-cuda",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Fail fast if CUDA is unavailable. "
+            "Use this in benchmark runs to prevent accidental CPU fallback."
+        ),
+    )
+    parser.add_argument(
         "--max-samples",
         type=int,
         default=None,
@@ -114,6 +124,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--top-k", type=int, default=50)
+    parser.add_argument(
+        "--log-every",
+        type=int,
+        default=10,
+        help=(
+            "Print generation progress every N samples. "
+            "Use 1 for per-sample logging."
+        ),
+    )
 
     # Comparison controls
     parser.add_argument(
@@ -164,6 +183,24 @@ def main() -> int:
     print(f"run_dir     : {run_dir}")
     print(f"seed        : {args.seed}")
     print(f"gen_config  : {asdict(gen_cfg)}")
+    print(f"log_every   : {args.log_every}")
+    print(f"torch       : {torch.__version__} (build CUDA={torch.version.cuda})")
+    cuda_available = torch.cuda.is_available()
+    cuda_count = torch.cuda.device_count() if cuda_available else 0
+    print(f"cuda_avail  : {cuda_available}")
+    print(f"cuda_count  : {cuda_count}")
+    if cuda_available:
+        devices = [torch.cuda.get_device_name(i) for i in range(cuda_count)]
+        print(f"cuda_names  : {devices}")
+    elif args.require_cuda:
+        raise RuntimeError(
+            "CUDA is unavailable but --require-cuda was set. "
+            "Aborting to avoid accidental CPU benchmarking."
+        )
+    else:
+        print(
+            "warning     : CUDA unavailable; this run will use CPU and may be very slow.",
+        )
 
     rows = _load_prepared_rows(args.input_jsonl)
     if args.max_samples is not None:
@@ -179,6 +216,10 @@ def main() -> int:
     )
     model.eval()
     _configure_model_generation(model=model, gen_cfg=gen_cfg)
+    print(f"first_param : {next(model.parameters()).device}")
+    hf_map = getattr(model, "hf_device_map", None)
+    if hf_map is not None:
+        print(f"hf_device_map: {hf_map}")
 
     _run_generation(
         rows=rows,
@@ -188,6 +229,7 @@ def main() -> int:
         output_path=predictions_path,
         source_path=args.input_jsonl,
         torch_module=torch,
+        log_every=args.log_every,
     )
 
     scored_rows, summary = _run_evaluation(predictions_path)
@@ -306,8 +348,15 @@ def _run_generation(
     output_path: Path,
     source_path: Path,
     torch_module: Any,
+    log_every: int,
 ) -> None:
+    if log_every <= 0:
+        raise ValueError(f"--log-every must be >= 1, got {log_every}")
+
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    total = len(rows)
+    start_ts = time.perf_counter()
+    print(f"generation  : starting {total} samples", flush=True)
 
     with output_path.open("w", encoding="utf-8") as fout:
         for i, row in enumerate(rows):
@@ -350,6 +399,25 @@ def _run_generation(
                 },
             }
             fout.write(json.dumps(pred_row, ensure_ascii=False) + "\n")
+            # Flush every record so that progress can be monitored externally
+            # (for example with `wc -l predictions.jsonl` while job is running).
+            fout.flush()
+
+            done = i + 1
+            should_log = (done % log_every == 0) or (done == total)
+            if should_log:
+                elapsed = max(time.perf_counter() - start_ts, 1e-6)
+                rate = done / elapsed
+                remaining = total - done
+                eta_seconds = int(remaining / rate) if rate > 0 else -1
+                print(
+                    "generation  : "
+                    f"{done}/{total} ({done / max(total, 1):.1%}) | "
+                    f"elapsed={_fmt_seconds(int(elapsed))} | "
+                    f"rate={rate:.3f} sample/s | "
+                    f"eta={_fmt_seconds(eta_seconds)}",
+                    flush=True,
+                )
 
 
 def _configure_model_generation(model: Any, gen_cfg: GenerationConfig) -> None:
@@ -485,6 +553,16 @@ def _import_runtime_deps():
             "Please activate your ML environment first (for example: `conda activate bcr`)."
         ) from exc
     return torch, AutoTokenizer, AutoModelForCausalLM
+
+
+def _fmt_seconds(seconds: int) -> str:
+    """Format duration in a compact and readable `HH:MM:SS` style."""
+    if seconds < 0:
+        return "unknown"
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 if __name__ == "__main__":

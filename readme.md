@@ -313,8 +313,10 @@ Use:
 python scripts/phase_a_generate_and_eval.py \
   --input-jsonl assets/artifacts/phase_a_prepared/strategyqa/21095d3c688a/validation.jsonl \
   --run-name qwen_strategyqa_val \
+  --require-cuda \
   --no-do-sample \
-  --max-new-tokens 64
+  --max-new-tokens 64 \
+  --log-every 10
 ```
 
 What this script writes:
@@ -335,3 +337,57 @@ Notes for reproducibility:
 - keep `--no-do-sample` for deterministic baseline behavior.
 - keep `--seed` fixed (default `42`).
 - keep input file and generation parameters unchanged.
+
+Notes for long runs:
+- use `python -u ...` to force unbuffered console output.
+- use `--log-every 1` if you want per-sample status lines.
+- use `--require-cuda` for strict benchmarking so the script aborts instead of silently using CPU.
+- while running, you can monitor file progress:
+
+```bash
+wc -l assets/artifacts/phase_a_runs/<run_name_timestamp>/predictions.jsonl
+```
+
+### 9.6 One-Command Benchmark Suite (Prepare + Inference + Diagnostics)
+
+Use:
+
+```bash
+bash scripts/run_phase_a_benchmark_suite.sh
+```
+
+The script now supports **param groups** (`A1`, `A2`, `A3`, `A4`) for one-click experiment presets.
+
+One-click switching:
+1. Open `scripts/run_phase_a_benchmark_suite.sh`.
+2. Change `ACTIVE_PARAM_GROUP` (for example from `A1` to `A2`).
+3. Save and rerun the same script.
+
+Group intent summary:
+- `A1`: core reproduction (`direct_t32` repeat + `cot_t128` + `cot_t256`)
+- `A2`: CoT token sweep (truncation/compliance diagnosis)
+- `A3`: direct token sweep (speed/accuracy frontier)
+- `A4`: determinism check (repeat same config and compare deltas)
+
+Each group prints:
+- intention,
+- what to observe,
+- expected trend,
+- and a summary table with `accuracy`, `parse_error_rate`, `acc_parseable`, plus delta fields when comparison is enabled.
+
+Useful overrides (optional):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+RUN_PREFIX=my_suite \
+LIMIT=2000 \
+COT_SWEEP_TOKENS="128 192 256 320 384" \
+DIRECT_SWEEP_TOKENS="16 24 32 48 64" \
+LOG_EVERY=5 \
+bash scripts/run_phase_a_benchmark_suite.sh
+```
+
+Notes:
+- The script fails fast if another `phase_a_generate_and_eval.py` process is already running.
+- Set `ALLOW_CONCURRENT=1` only if you intentionally want overlapping jobs.
+- Default `CUDA_VISIBLE_DEVICES=0` is chosen for stable, simpler 7B benchmarking.

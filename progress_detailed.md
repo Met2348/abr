@@ -2,6 +2,155 @@
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
 
+## 2026-02-26 18:36:48 +08 (+0800)
+- Type: Feature / Docs / Workflow
+- Summary: Refactored benchmark shell runner into a param-group system (`A1`..`A4`) for one-click reproducible experiment presets.
+- Details:
+  - Reworked `scripts/run_phase_a_benchmark_suite.sh` into a configurable group runner.
+  - Added one-click group selector:
+    - `ACTIVE_PARAM_GROUP=A1|A2|A3|A4`
+    - user can switch by editing one variable (or env override) and rerunning the same script.
+  - Added four explicit param groups:
+    - `A1`: core reproduction (direct baseline + CoT comparison),
+    - `A2`: CoT token sweep,
+    - `A3`: direct token sweep,
+    - `A4`: determinism validation repeats.
+  - Added group-level explanatory metadata printed at runtime:
+    - intention,
+    - what to observe,
+    - expected outcome trend.
+  - Added generalized summary table output for any group, including:
+    - `accuracy`,
+    - `parse_error_rate`,
+    - `acc_parseable`,
+    - delta columns when comparison mode is active.
+  - Updated `readme.md` section `9.6` to document:
+    - one-click group switching flow,
+    - group purpose summary,
+    - updated environment overrides.
+  - Validation:
+    - `bash -n scripts/run_phase_a_benchmark_suite.sh` passed.
+    - script marked executable.
+- Files changed:
+  - `scripts/run_phase_a_benchmark_suite.sh`
+  - `readme.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - [CAUTION] old suite-specific env knobs (`MAX_NEW_TOKENS_DIRECT`, `MAX_NEW_TOKENS_COT_SMALL`, `MAX_NEW_TOKENS_COT_LARGE`) are no longer the primary control path for grouped runs; use `ACTIVE_PARAM_GROUP` and sweep token lists (`COT_SWEEP_TOKENS`, `DIRECT_SWEEP_TOKENS`).
+
+---
+
+## 2026-02-26 18:32:31 +08 (+0800)
+- Type: Docs / Knowledge Transfer
+- Summary: Added teammate-facing experiment history ledger `result_records.md` to capture meaningful prior Phase A runs and conclusions with timestamps.
+- Details:
+  - Added new root file: `result_records.md`.
+  - Included:
+    - prepared artifact lineage (fingerprints, template/target style, creation timestamps),
+    - early smoke-run records,
+    - main StrategyQA run table (`n=193`) with:
+      - run timestamp,
+      - input prepared set,
+      - generation budget,
+      - accuracy,
+      - parse error rate,
+      - parseable sample count,
+      - parseable-only accuracy,
+    - operational incident notes (GPU visibility instability and CPU offload slow run),
+    - trusted conclusions and next-experiment checklist.
+  - Goal:
+    - new teammates can understand prior outcomes quickly without digging through many run folders.
+- Files changed:
+  - `result_records.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+---
+
+## 2026-02-26 17:23:43 +08 (+0800)
+- Type: Feature / Docs / Automation
+- Summary: Added a one-command benchmark suite shell script that runs Phase A preparation + multi-variant inference/eval + diagnostic summary table.
+- Details:
+  - Added new executable script: `scripts/run_phase_a_benchmark_suite.sh`.
+  - Script workflow:
+    - prepares StrategyQA artifacts for both template/target variants,
+    - runs deterministic direct baseline twice (for reproducibility check),
+    - runs CoT variant at two token budgets (small vs large),
+    - prints a compact summary table with:
+      - `accuracy`,
+      - `parse_error_rate`,
+      - `acc_parseable` (accuracy on parseable outputs).
+  - Added operational safeguards:
+    - checks for concurrent `phase_a_generate_and_eval.py` processes and fails fast by default,
+    - defaults to single-GPU benchmarking (`CUDA_VISIBLE_DEVICES=0`) for simpler/stabler 7B runs,
+    - supports explicit environment-variable overrides for common benchmark knobs.
+  - Updated `readme.md` with a new section:
+    - “9.6 One-Command Benchmark Suite (Prepare + Inference + Diagnostics)”
+    - includes default usage and override examples.
+  - Validation:
+    - `bash -n scripts/run_phase_a_benchmark_suite.sh` passed.
+    - script marked executable.
+- Files changed:
+  - `scripts/run_phase_a_benchmark_suite.sh`
+  - `readme.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+---
+
+## 2026-02-26 17:06:23 +08 (+0800)
+- Type: Reliability / UX / Benchmarking Guard
+- Summary: Added explicit CUDA visibility reporting and `--require-cuda` fail-fast mode to prevent accidental CPU benchmarking.
+- Details:
+  - Updated `scripts/phase_a_generate_and_eval.py`:
+    - prints runtime CUDA diagnostics at start (`torch` version, CUDA build, availability, device count, GPU names),
+    - prints model placement after load (`first_param` device and `hf_device_map` when present),
+    - added `--require-cuda` flag to abort immediately when CUDA is not available.
+  - Updated `readme.md` Phase A run command and notes:
+    - included `--require-cuda` in benchmark example,
+    - documented why this flag is important for strict benchmark reproducibility.
+  - Validation:
+    - `python -m py_compile scripts/phase_a_generate_and_eval.py` passed.
+- Files changed:
+  - `scripts/phase_a_generate_and_eval.py`
+  - `readme.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None (default behavior unchanged unless `--require-cuda` is enabled).
+
+---
+
+## 2026-02-26 17:00:29 +08 (+0800)
+- Type: Feature / UX / Observability
+- Summary: Added live generation progress logging and ETA to long Phase A runs so job status is visible during benchmarking.
+- Details:
+  - Updated `scripts/phase_a_generate_and_eval.py`:
+    - added `--log-every` (default `10`) to control progress print frequency,
+    - prints run-time generation progress lines with:
+      - completed/total samples,
+      - completion percentage,
+      - elapsed wall time,
+      - throughput (samples/sec),
+      - ETA.
+    - explicitly flushes prediction output after each written row, so external monitoring commands (`wc -l`, `tail`) reflect near-real-time progress.
+    - added compact duration formatter helper for readable progress output.
+  - Updated `readme.md` Phase A section with new usage notes:
+    - `--log-every` examples,
+    - `python -u` for visible live logs,
+    - quick `wc -l` command for progress checks.
+  - Validation:
+    - `python -m py_compile scripts/phase_a_generate_and_eval.py` passed.
+- Files changed:
+  - `scripts/phase_a_generate_and_eval.py`
+  - `readme.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+---
+
 ## 2026-02-26 14:57:01 +08 (+0800)
 - Type: Feature / Docs / Fix / Test
 - Summary: Added one-script Phase A inference+evaluation+comparison workflow and fixed runtime import/generation issues for novice-friendly reruns.
