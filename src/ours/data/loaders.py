@@ -461,13 +461,25 @@ def _glob_required(root: Path, pattern: str, dataset: str) -> list[Path]:
 
 
 def _normalize_split(split: str, available: set[str], fallback: str) -> str:
-    split = split.strip().lower()
-    if split in available:
-        return split
-    if split in {"val", "valid"} and "validation" in available:
-        return "validation"
-    if split in {"dev"} and "validation" in available:
-        return "validation"
+    requested = split.strip().lower()
+    alias_map = {
+        "val": "validation",
+        "valid": "validation",
+        "dev": "validation",
+    }
+    normalized = alias_map.get(requested, requested)
+
+    # Fail fast for obvious typos (for example "trian"), instead of silently
+    # falling back to another split.
+    known = {"train", "validation", "test"}
+    if normalized not in known:
+        raise ValueError(
+            f"Unknown split={split!r}. Expected one of "
+            f"{sorted(known | set(alias_map.keys()))}."
+        )
+
+    if normalized in available:
+        return normalized
     return fallback
 
 

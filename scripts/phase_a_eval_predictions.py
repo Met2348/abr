@@ -95,6 +95,8 @@ def main() -> int:
     print(f"n_total          : {summary.n_total}")
     print(f"accuracy         : {summary.accuracy:.4f}")
     print(f"parse_error_rate : {summary.parse_error_rate:.4f}")
+    print(f"n_parseable      : {summary.n_parseable}")
+    print(f"acc_parseable    : {summary.accuracy_parseable:.4f}")
     print(f"output_dir       : {run_dir}")
     print("=" * 88)
     return 0

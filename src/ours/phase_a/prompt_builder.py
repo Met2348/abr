@@ -33,6 +33,28 @@ PROMPT_TEMPLATE_REGISTRY: dict[str, dict[str, PromptTemplateSpec]] = {
             answer_prefix="",
         )
     },
+    "qa_math_direct_final": {
+        "1.0.0": PromptTemplateSpec(
+            template_id="qa_math_direct_final",
+            template_version="1.0.0",
+            description=(
+                "Math-focused direct template. "
+                "Forces a final-answer line format to reduce ambiguous extraction."
+            ),
+            system_prompt=(
+                "You are a careful math assistant. "
+                "Solve internally, then output exactly one line: "
+                "'Final answer: <number>'. "
+                "Do not include extra explanation."
+            ),
+            user_prefix=(
+                "Question:\n{question}\n\n"
+                "Return only one line in this exact format:\n"
+                "Final answer: <number>"
+            ),
+            answer_prefix="Final answer: ",
+        )
+    },
     "qa_cot_then_final": {
         "1.0.0": PromptTemplateSpec(
             template_id="qa_cot_then_final",
@@ -47,6 +69,29 @@ PROMPT_TEMPLATE_REGISTRY: dict[str, dict[str, PromptTemplateSpec]] = {
             ),
             user_prefix="Question:\n{question}\n\nLet's think step by step.",
             answer_prefix="Final answer: ",
+        )
+    },
+    "qa_binary_strict": {
+        "1.0.0": PromptTemplateSpec(
+            template_id="qa_binary_strict",
+            template_version="1.0.0",
+            description=(
+                "Strict yes/no output template for binary QA. "
+                "Designed to maximize answer-format compliance and reduce "
+                "token waste from long explanations."
+            ),
+            system_prompt=(
+                "You are a careful assistant for yes/no questions. "
+                "Output exactly one word: yes or no. "
+                "Do not output explanations, punctuation, or extra words. "
+                "Do not default to one label; decide from question evidence."
+            ),
+            user_prefix=(
+                "Question:\n{question}\n\n"
+                "Respond with one word only (yes or no).\n"
+                "Answer:"
+            ),
+            answer_prefix="",
         )
     },
 }

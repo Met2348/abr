@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import pytest
+
 from ours.data.loaders import (
     _build_drop_question,
     _build_proofwriter_question,
     _extract_hendrycks_final_answer,
     _extract_last_boxed_content,
+    _normalize_split,
 )
 
 
@@ -45,3 +48,11 @@ def test_extract_hendrycks_answer_fallback_last_line() -> None:
     assert answer == "17"
     assert method == "last_line"
 
+
+def test_normalize_split_accepts_alias_to_validation() -> None:
+    assert _normalize_split("val", available={"train", "validation"}, fallback="validation") == "validation"
+
+
+def test_normalize_split_unknown_raises() -> None:
+    with pytest.raises(ValueError, match="Unknown split"):
+        _normalize_split("trian", available={"train", "test"}, fallback="test")

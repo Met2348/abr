@@ -2,14 +2,20 @@
 
 This repository is building an in-house reasoning-faithfulness pipeline from scratch.
 
-Current milestone status:
-- First and second data-pipeline milestones are complete:
-  - canonical schema
-  - multi-dataset loaders
-  - data validation CLI
-  - starter unit/integration tests
-  - step-level builder (`step_builder.py`)
-  - preprocessing artifact CLI (`preprocess_steps.py`)
+Current milestone status (2026-02-27):
+- Phase A is concluded.
+- Phase A core conclusion:
+  - parse-error inflation was mostly protocol/extraction/free-form formatting related,
+  - after binary-choice decode, StrategyQA parse error reaches `0.0000`,
+  - remaining errors are model/prompt decision-quality gaps (not parser-only noise).
+- Current StrategyQA decision-quality baseline (`binary_choice`, n=193):
+  - `direct_binchoice`: `accuracy=0.6788`
+  - `cot_binchoice`: `accuracy=0.5803`
+- Batched freeform inference is now validated after padding fix:
+  - StrategyQA direct (`max_new_tokens=32`, n=193):
+  - `batch_size=1`: `accuracy=0.5492`, `parse_error_rate=0.1762`, `1.180 sample/s`
+  - `batch_size=4`: `accuracy=0.5596`, `parse_error_rate=0.1658`, `4.189 sample/s`
+- Phase B should start now as a separate training track (value head + BCR-lite), while keeping Phase A scripts frozen as benchmark references.
 
 Primary roadmap:
 - `TODO_ours.md`
@@ -18,6 +24,29 @@ Context files:
 - `idea_polish.md`
 - `idea_formulation.md`
 - `readme_dev.md`
+- `result_records.md` (experiment history + diagnosis)
+- `phase_A_report.md` (newcomer-facing Phase A closeout report)
+- `foundation_reliability_audit.md` (low-level risk scan + hardening plan before Phase B scale)
+
+## Phase A Retrospective (Before You Start Phase B)
+
+Treat these as operational lessons from the full Phase A cycle:
+1. Evaluation logic is part of the experiment. Keep evaluator/version fixed when comparing runs.
+2. Always read metrics as a tuple:
+   - `accuracy`,
+   - `parse_error_rate`,
+   - `n_parseable`,
+   - `acc_parseable`.
+3. For StrategyQA, maintain both tracks:
+   - `binary_choice` for decision quality,
+   - `freeform` for end-to-end compliance.
+4. Batching is now the default speed path, but trust it only with correctness guards:
+   - left-padding in batch decode for decoder-only models,
+   - deterministic parity checks vs batch size 1.
+5. For math tasks, watch truncation/extraction diagnostics before interpreting accuracy:
+   - cap hit rate,
+   - final-answer tag rate,
+   - fallback extraction rate.
 
 ## 1. Model files
 
@@ -298,6 +327,11 @@ Recommended first baseline:
 
 This A/B comparison is your Stage A baseline matrix.
 
+Dataset-specific note:
+- For GSM8K direct-answer baselines, prefer:
+  - `--template-id qa_math_direct_final --target-style answer_only`
+  - this avoids weak `last_number` extraction from truncated reasoning outputs.
+
 ### 9.4 Why this milestone is critical
 
 - You now have reproducible prompt+target generation.
@@ -324,6 +358,7 @@ What this script writes:
 - `assets/artifacts/phase_a_runs/<run_name_timestamp>/scored_predictions.jsonl`
 - `assets/artifacts/phase_a_runs/<run_name_timestamp>/metrics.json`
 - `assets/artifacts/phase_a_runs/<run_name_timestamp>/manifest.json`
+- `assets/artifacts/phase_a_runs/<run_name_timestamp>/console.log`
 
 Rerun the same experiment to compare differences:
 1. Run the same command again (same `--input-jsonl`, `--run-name`, and generation settings).
@@ -340,8 +375,30 @@ Notes for reproducibility:
 
 Notes for long runs:
 - use `python -u ...` to force unbuffered console output.
-- use `--log-every 1` if you want per-sample status lines.
+- `--log-every` controls candidate checkpoint stride.
+- `--max-progress-lines` caps generation progress verbosity (default `5` lines including start line).
 - use `--require-cuda` for strict benchmarking so the script aborts instead of silently using CPU.
+- console output is persisted by default in each run folder as `console.log`.
+- disable console-log persistence only if needed: add `--no-persist-console-log`.
+- model loading progress bars are suppressed; logs show concise load start + completion time.
+- `--strategyqa-decode-mode` controls StrategyQA decoding:
+  - `freeform` (default): normal text generation,
+  - `binary_choice`: score `yes` vs `no` directly (removes most format-related parse errors).
+- `--batch-size` controls free-form decode batching:
+  - `1` keeps old behavior (safest baseline),
+  - `2/4/8` can improve throughput when VRAM allows.
+- `--oom-backoff` (default on) auto-splits a failing batch on OOM:
+  - useful for robust sweeps on shared servers,
+  - turn off with `--no-oom-backoff` for strict failure behavior.
+- `--truncate-chat-markers` (default on) trims leaked next-turn markers such as `[USER]` / `Human:`.
+- For math datasets, script output now includes `math_diag` (extraction reliability signals):
+  - `last_number_rate`,
+  - `hit_token_limit_rate`,
+  - `final_answer_tag_rate`.
+- script output now also prints and stores generation throughput:
+  - `gen_elapsed_sec`,
+  - `gen_sample_rate`,
+  - `oom_backoff_evts`.
 - while running, you can monitor file progress:
 
 ```bash
@@ -356,7 +413,7 @@ Use:
 bash scripts/run_phase_a_benchmark_suite.sh
 ```
 
-The script now supports **param groups** (`A1`, `A2`, `A3`, `A4`) for one-click experiment presets.
+The script now supports **param groups** (`A1`, `A2`, `A3`, `A4`, `A5`) for one-click experiment presets.
 
 One-click switching:
 1. Open `scripts/run_phase_a_benchmark_suite.sh`.
@@ -368,6 +425,8 @@ Group intent summary:
 - `A2`: CoT token sweep (truncation/compliance diagnosis)
 - `A3`: direct token sweep (speed/accuracy frontier)
 - `A4`: determinism check (repeat same config and compare deltas)
+- `A5`: strict yes/no compliance fix (`qa_binary_strict`) to reduce parse errors and token waste
+- `A6`: binary-choice decode validation (removes free-form format noise for StrategyQA)
 
 Each group prints:
 - intention,
@@ -383,11 +442,67 @@ RUN_PREFIX=my_suite \
 LIMIT=2000 \
 COT_SWEEP_TOKENS="128 192 256 320 384" \
 DIRECT_SWEEP_TOKENS="16 24 32 48 64" \
+STRATEGYQA_DECODE_MODE=freeform \
+TRUNCATE_CHAT_MARKERS=1 \
 LOG_EVERY=5 \
+MAX_PROGRESS_LINES=5 \
+BATCH_SIZE=1 \
+OOM_BACKOFF=1 \
 bash scripts/run_phase_a_benchmark_suite.sh
 ```
 
 Notes:
-- The script fails fast if another `phase_a_generate_and_eval.py` process is already running.
-- Set `ALLOW_CONCURRENT=1` only if you intentionally want overlapping jobs.
+- The script no longer blocks concurrent runs.
+- If concurrent runs are detected, it prints a warning and continues.
+
+### 9.7 Batching Hands-On: How To See Speed Difference
+
+Run the same config twice, only changing `--batch-size`.
+
+Example (`batch_size=1` baseline):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -u scripts/phase_a_generate_and_eval.py \
+  --input-jsonl assets/artifacts/phase_a_prepared/strategyqa/b0f373610f96/validation.jsonl \
+  --run-name strat_batch1 \
+  --require-cuda --dtype bfloat16 --device-map auto \
+  --no-do-sample --seed 42 \
+  --max-new-tokens 32 \
+  --batch-size 1 \
+  --oom-backoff \
+  --log-every 10 --max-progress-lines 5 \
+  --no-compare-latest-same-name
+```
+
+Then run batched:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -u scripts/phase_a_generate_and_eval.py \
+  --input-jsonl assets/artifacts/phase_a_prepared/strategyqa/b0f373610f96/validation.jsonl \
+  --run-name strat_batch4 \
+  --require-cuda --dtype bfloat16 --device-map auto \
+  --no-do-sample --seed 42 \
+  --max-new-tokens 32 \
+  --batch-size 4 \
+  --oom-backoff \
+  --log-every 10 --max-progress-lines 5 \
+  --no-compare-latest-same-name
+```
+
+Compare these fields in console or `metrics.json`:
+1. `gen_sample_rate` (higher is better),
+2. `gen_elapsed_sec` (lower is better),
+3. `accuracy` / `parse_error_rate` (should stay comparable).
+- If you see warning `decoder-only ... right-padding`, stop and fix tokenizer padding before trusting results.
+- Current expected stable setup on A100 80G for StrategyQA direct:
+  - `--batch-size 4 --oom-backoff`
+  - quality parity with significant speedup.
 - Default `CUDA_VISIBLE_DEVICES=0` is chosen for stable, simpler 7B benchmarking.
+- Suite-level live logs are persisted to `assets/artifacts/phase_a_logs/<RUN_PREFIX>/suite.log`.
+- At the end of a group run, it prints a **final summary block** (group + settings + table) and saves it to:
+  - `assets/artifacts/phase_a_logs/<RUN_PREFIX>/final_summary.md`
+- Disable suite log persistence if needed:
+
+```bash
+ENABLE_PERSISTED_LOGS=0 bash scripts/run_phase_a_benchmark_suite.sh
+```

@@ -16,8 +16,21 @@ Changes to this file are user-authorized only.
 9. The assistant checks `chat_system_prompts.md` only under explicit user instruction.
 10. If `chat_system_prompts.md` changes after the last check and no new explicit check instruction is given, the assistant should ignore those new changes and continue following the previously acknowledged requirements.
 11. For Markdown documents containing math, expressions must be written in Notion/Obsidian-friendly delimiters: inline `$...$`, display `$$...$$`; avoid `\(...\)` and `\[...\]`.
+12. New experiment settings should be organized into named parameter groups (for example `A1`, `A2`, ...), so previous experiments can be replicated without manual command copy-paste.
+13. For each parameter group, include comments that explain:
+    - why this group exists (intention),
+    - what to observe in results (attention points),
+    - expected outcomes.
+14. New experiment setting execution should be provided through `.sh` scripts as one-click workflows; preferred usage is switching the configured param group and rerunning the same script.
+15. When requested to diagnose experiment problems/fixes, update `result_records.md` with:
+    - diagnosis,
+    - summary of meaningful results,
+    - explicit next-step plans.
+16. For new implementations that may affect experiment speed, always evaluate batching-first design as the default approach.
+17. When batching is introduced, always include safety nets (for example OOM backoff, fallback path, deterministic checks) so experiments remain robust.
+18. Treat batching-specific correctness risks as first-class concerns; explicitly guard and test for batching-introduced bugs (for example padding side, ordering, decode parity).
 
 ## Acknowledgement Metadata
 
-- Last explicit user instruction to refresh this file: `2026-02-23`
-- Source scope: includes latest instruction to persist the math-rendering requirement for Notion/Obsidian.
+- Last explicit user instruction to refresh this file: `2026-02-27`
+- Source scope: includes math-rendering requirement, experiment-workflow requirements (param groups + one-click shell execution), experiment-diagnosis record maintenance in `result_records.md`, and batching-first implementation policy with safety/correctness guards.

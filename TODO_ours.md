@@ -26,6 +26,72 @@ Build and validate **our own method** (step-level adaptive reasoning + value con
 
 ---
 
+## 0.1 Phase A Closeout Status (2026-02-26)
+
+### What Is Done
+
+1. Data and preprocessing foundation:
+   - canonical schema/loaders,
+   - deterministic step builder,
+   - preprocessing artifacts and tests.
+2. Phase A benchmark harness:
+   - prompt preparation,
+   - inference + evaluation,
+   - grouped one-click benchmark suites.
+3. Diagnosis milestones:
+   - parse-error root cause split established,
+   - binary-choice track isolates decision quality from free-form format noise.
+
+### What Is Not Done Yet
+
+1. No training loop for value head / BCR losses yet.
+2. No ABR router training or verification policy yet.
+3. No full faithfulness metric suite (calibration/corruption AUC) wired into training-time evaluations.
+
+### Phase A Freeze Rule
+
+Keep `scripts/phase_a_*` as benchmark references.
+New BCR/ABR implementation work should go to new Phase B+ scripts/modules.
+
+---
+
+## 0.2 Phase A -> Phase B Handoff Gate (Commit-Time)
+
+Use this as the final pre-Phase-B gate before committing Phase A baseline.
+
+### Baseline Freeze Items
+
+- [ ] Freeze and record StrategyQA baselines in docs:
+  - binary-choice decision-quality baseline,
+  - freeform end-to-end baseline.
+- [ ] Freeze and record GSM8K baselines in docs:
+  - direct math baseline,
+  - CoT math baseline (with current evaluator semantics).
+- [ ] Confirm evaluator/template/decode versions are explicitly listed in baseline notes.
+
+### Reproducibility Gate
+
+- [ ] Run at least one reproducibility pair for StrategyQA direct baseline.
+- [ ] Run at least one reproducibility pair for batched StrategyQA baseline.
+- [ ] Run at least one reproducibility pair for GSM8K direct baseline.
+- [ ] Ensure run diffs show deterministic parity (`changed_samples=0`) where expected.
+
+### Artifact Integrity Gate
+
+- [ ] Every frozen baseline run has:
+  - `manifest.json`,
+  - `metrics.json`,
+  - persisted `console.log`.
+- [ ] Metrics include evaluator version information.
+- [ ] Prepared artifacts have no duplicate sample IDs.
+
+### Change-Control Gate
+
+- [ ] Mark `scripts/phase_a_*` as frozen reference scripts for early Phase B.
+- [ ] Route new BCR/ABR training logic to Phase B modules/scripts only.
+
+---
+
 ## 1. Method Scope Freeze (Do This First)
 
 Before coding, freeze a minimal v1 method to prevent scope drift.
@@ -141,6 +207,8 @@ Definition of done:
 3. Test gates before scale-up: no large runs before smoke + integration tests pass.
 4. Layered rollout: data -> model -> trainer -> eval -> optimization.
 5. Fail loud: explicit exceptions with actionable messages.
+6. Batching-first mindset: for throughput-sensitive paths, design batch execution first, then add safe fallback paths.
+7. Any batching rollout must include dedicated correctness guards (padding, ordering, decode parity, reproducibility checks).
 
 ---
 
@@ -400,18 +468,56 @@ runs/
 
 ---
 
-## 14. Immediate Next Actions (Next 7 Days)
+## 14. Re-Planned Route After Phase A (Actionable)
 
-1. [ ] Create `src/ours/` package skeleton and config folders.
-2. [ ] Write `docs/method_v1.md` and freeze v1 scope.
-3. [ ] Implement `scripts/check_env.py`.
-4. [ ] Implement `src/ours/data/schema.py` and `registry.py`.
-5. [ ] Implement dataset adapters for GSM8K and StrategyQA first.
-6. [ ] Implement `step_builder.py` and deterministic stepization tests.
-7. [ ] Implement base model + value head smoke forward.
-8. [ ] Implement `train_sft.py` smoke training on GSM8K subset.
-9. [ ] Implement temporal consistency loss and `train_ours_lite.py`.
-10. [ ] Implement `eval_all.py` with accuracy + Brier + corruption AUC.
+### Stage B: BCR-Lite Build (Next Priority)
+
+1. [ ] Create `src/ours/models/`:
+   - `lm_backbone.py`,
+   - `value_head.py`,
+   - `reasoning_model.py`.
+2. [ ] Create `src/ours/losses/`:
+   - `sft.py`,
+   - `value_temporal.py` (Bellman-style),
+   - optional `value_calibration.py`.
+3. [ ] Create `src/ours/training/`:
+   - `common.py`,
+   - `sft_trainer.py`,
+   - `value_trainer.py`.
+4. [ ] Add new scripts:
+   - `scripts/phase_b_train_sft.py`,
+   - `scripts/phase_b_train_bcr_lite.py`,
+   - `scripts/phase_b_eval.py`.
+5. [ ] Run smoke training on small StrategyQA/GSM8K subsets and verify stability.
+
+### Stage C: Faithfulness Evaluation Completion
+
+1. [ ] Implement calibration metrics (Brier/ECE).
+2. [ ] Implement corruption generator + corruption AUC pipeline.
+3. [ ] Add a single eval report format for:
+   - accuracy,
+   - parse/compliance,
+   - calibration,
+   - corruption sensitivity,
+   - compute cost.
+
+### Stage D: ABR-Lite (Heuristic Router)
+
+1. [ ] Implement `gen/ver/fin` action loop with deterministic policy.
+2. [ ] Add verification budget controls and traces.
+3. [ ] Compare against BCR-lite under fixed compute budgets.
+
+### Stage E: ABR-RL (Final)
+
+1. [ ] Add learned router only after Stage D is stable.
+2. [ ] Use constrained reward design to prevent reward hacking.
+3. [ ] Require multi-seed replication before claiming gains.
+
+### Go/No-Go Gates
+
+1. Stage B cannot start large runs until smoke runs are stable and reproducible.
+2. Stage D cannot start until Stage C metrics are automated.
+3. Stage E cannot start until Stage D shows non-trivial frontier gains.
 
 ---
 
@@ -438,3 +544,153 @@ runs/
 - [ ] Multi-dataset evidence supports generality claim.
 - [ ] Artifact package is paper-ready (scripts + configs + reports).
 
+---
+
+## 17. Scaling and Throughput Boost Plan (A100 Cluster)
+
+This section is the performance plan before large Phase B sweeps.
+
+Observed runtime context:
+1. Inference jobs are slow for CoT variants despite A100 GPUs.
+2. Per-process VRAM usage has been observed around `4-15 GiB` on A100 80GB.
+3. This indicates memory headroom exists; current bottlenecks are mostly decode throughput and software design.
+
+### 17.1 Bottleneck Diagnosis
+
+Code-level bottlenecks:
+1. Single-sample decode loop (`batch_size=1`) in inference script.
+2. Token-by-token autoregressive generation with high `max_new_tokens` for CoT.
+3. Weak/late stopping criteria; many samples run to cap.
+4. Model reload per run/sweep item adds repeated overhead.
+5. Single-process-per-run does not leverage all 4 GPUs.
+
+Hardware/runtime bottlenecks:
+1. Decoder inference is often memory-bandwidth bound rather than pure FLOP bound.
+2. PCIe/CPU offload events can collapse throughput if device map spills.
+3. One active GPU with three idle GPUs wastes cluster capacity.
+
+### 17.2 Best Strategy for This Project (Recommended)
+
+Given current phase (research correctness first, low ops complexity, strong reproducibility needs), the best plan is:
+1. Keep HF/Transformers path (no immediate engine migration).
+2. Add deterministic batching + input bucketing.
+3. Shard evaluation data and run one process per GPU (4-way parallel).
+4. Tighten stopping and prompt contracts to reduce unnecessary token generation.
+
+Why this is best now:
+1. Highest speedup per implementation risk.
+2. Preserves metric continuity with current Phase A artifacts.
+3. Minimal infrastructure complexity for a small research team.
+
+### 17.3 Phased Acceleration Roadmap
+
+#### Phase S1 (Quick Wins, 1-2 days)
+
+1. [ ] Add stronger stop behavior:
+   - explicit stop markers for prompt leakage (`[USER]`, `Human:`).
+   - dataset-specific short-output contracts where appropriate.
+2. [ ] Add token-budget policy by task/template:
+   - direct math: small cap,
+   - CoT reasoning: larger cap only when needed.
+3. [ ] Add run warnings for cap overuse:
+   - high `hit_token_limit_rate` should fail CI/smoke gates.
+
+Target gain:
+- 1.2x to 1.6x wall-clock improvement with near-zero methodological risk.
+
+#### Phase S2 (Core Throughput Upgrade, 2-4 days)
+
+1. [x] Implement batched generation in `phase_a_generate_and_eval.py`:
+   - new `--batch-size` (default 1),
+   - OOM auto-backoff option (`--oom-backoff`),
+   - deterministic output ordering and per-sample metadata.
+2. [x] Fix decoder-only padding correctness in batch path:
+   - force left-padding in batched tokenization,
+   - restore tokenizer state after call,
+   - regression test for padding + restore behavior.
+3. [ ] Add prompt-length bucketing to reduce padding waste.
+4. [ ] Keep deterministic ordering and row-index mapping for exact reproducibility.
+
+Target gain:
+- 1.5x to 3x depending on sequence lengths and batch-size stability.
+
+#### Phase S3 (Multi-GPU Parallel Evaluation, 2-3 days)
+
+1. [ ] Add dataset sharding utility:
+   - split input JSONL into N shards with stable sample-id hashing.
+2. [ ] Launch one process per GPU with fixed shard:
+   - `CUDA_VISIBLE_DEVICES=0..3`.
+3. [ ] Merge shard predictions and run one unified evaluator.
+
+Target gain:
+- near-4x throughput scaling at cluster level (minus merge overhead).
+
+#### Phase S4 (Optional Engine Upgrade, later)
+
+1. [ ] Evaluate vLLM backend for inference-only sweeps.
+2. [ ] Validate equivalence protocol:
+   - same prompts, same seeds/settings,
+   - compare answer distribution + metrics drift.
+3. [ ] Adopt only if speedup is substantial and metric drift is acceptable.
+
+Target gain:
+- potentially large throughput gain for long-sequence decoding.
+
+Risk:
+- runtime stack complexity and possible behavioral drift.
+
+### 17.4 Performance Experiment Groups (Planned)
+
+Use dedicated shell param groups (same one-click philosophy):
+1. `S1`: stop-rule ablation (same model/settings, different stop strategy).
+2. `S2`: batch-size sweep (`1,2,4,8`).
+3. `S3`: single-GPU vs 4-GPU sharded wall-clock comparison.
+4. `S4`: optional backend comparison (HF vs vLLM) with drift checks.
+
+Each group must report:
+1. accuracy metrics (same as baseline),
+2. throughput (`sample/s`),
+3. tokens/sec if available,
+4. peak VRAM usage per process,
+5. reproducibility deltas.
+
+### 17.5 Go/No-Go Criteria for Scaling Work
+
+Go:
+1. Speedup >= 2x aggregate for CoT-heavy benchmarks.
+2. Accuracy drift <= 0.5 percentage points on fixed benchmark set.
+3. Reproducibility checks pass on repeat runs.
+
+No-Go:
+1. Any optimization that changes core metric semantics without explicit versioning.
+2. Any acceleration path that introduces unstable or opaque run artifacts.
+
+---
+
+## 18. Foundation Reliability Hardening Gate (Before Large Phase B Runs)
+
+Reference audit:
+- `foundation_reliability_audit.md`
+
+### 18.1 Completed Hardening (P0)
+
+1. [x] Binary-choice generation metadata safety (no branch-unsafe token dependency).
+2. [x] Empty raw prediction accepted as parse-error case (no hard evaluator crash).
+3. [x] Split typo fail-fast in loader split normalization.
+4. [x] Evaluator-version tracking and comparison mismatch caution.
+5. [x] Duplicate `sample_id` detection for prepared input JSONL.
+6. [x] Regression tests added for above fixes.
+
+### 18.2 Required Before Phase B Scale (P1)
+
+1. [ ] Add adversarial numeric-equivalence fixture pack (should-pass/should-fail).
+2. [ ] Add artifact schema-version validator module and fail-fast checks.
+3. [ ] Add `scripts/check_foundation_reliability.sh` gate script:
+   - critical unit tests,
+   - schema checks,
+   - evaluator-version presence check.
+4. [ ] Document a strict "no-compare-across-evaluator-version" rule in benchmark SOP.
+
+### 18.3 Entry Rule
+
+1. [ ] Do not start large Phase B sweeps until all 18.2 items are complete.

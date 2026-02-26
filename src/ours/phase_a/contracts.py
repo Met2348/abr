@@ -104,7 +104,9 @@ class PredictionRecord:
         _validate_non_empty_str(self.sample_id, "sample_id")
         _validate_non_empty_str(self.dataset, "dataset")
         _validate_non_empty_str(self.split, "split")
-        _validate_non_empty_str(self.raw_prediction, "raw_prediction")
+        # Empty prediction is a valid inference outcome (parse error case),
+        # so we only require type=str here.
+        _validate_str(self.raw_prediction, "raw_prediction")
         _validate_non_empty_str(self.gold_answer, "gold_answer")
         if self.question is not None and not isinstance(self.question, str):
             raise TypeError("`question` must be str or None")
@@ -136,7 +138,8 @@ class ScoredPrediction:
         _validate_non_empty_str(self.sample_id, "sample_id")
         _validate_non_empty_str(self.dataset, "dataset")
         _validate_non_empty_str(self.split, "split")
-        _validate_non_empty_str(self.raw_prediction, "raw_prediction")
+        # Keep empty raw prediction representable for audit/debug visibility.
+        _validate_str(self.raw_prediction, "raw_prediction")
         if not isinstance(self.extracted_prediction, str):
             raise TypeError("`extracted_prediction` must be str")
         if not isinstance(self.normalized_gold, str):

@@ -298,6 +298,11 @@ please init a result_records.md file to cover all prev exp meaningful results wi
 i am now running your recommended sweeping suggestions 123. I expect you may integrate different exp settings into 'param groups' with a name like 'A1',..., in a sh file.  you need to explain in the comment why this group exist(the intention), what to observe for their result(attention paied to where), and expected result(expectations), these param groups are used for replicating old exps without manually copy-paste command lines. It should be a 'one-click' design - I change the param group configured from, say A1 to A2, save the file, rerun the sh file.  
 
 
+remember we have a chat_system_prompts.md file at root? my last order of 'always creating param groups for new exp' and 'use sh file to exec new exps settings' are system-prompt like. summarize my last order and refresh the chat_system_prompts file, and start to follow the file.
+
+
+i am still running your last param sweeping task. we need a log system to capture these live logs into persisted files. impl the logger system and tell me how to use it if necessary
+
 tell me that at current situation, do we need more runs? 
 
 

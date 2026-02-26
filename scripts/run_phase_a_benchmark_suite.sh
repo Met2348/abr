@@ -45,6 +45,11 @@ RUN_ROOT="${RUN_ROOT:-assets/artifacts/phase_a_runs}"
 
 DTYPE="${DTYPE:-bfloat16}"
 LOG_EVERY="${LOG_EVERY:-5}"
+MAX_PROGRESS_LINES="${MAX_PROGRESS_LINES:-5}"
+BATCH_SIZE="${BATCH_SIZE:-1}"
+OOM_BACKOFF="${OOM_BACKOFF:-1}"
+STRATEGYQA_DECODE_MODE="${STRATEGYQA_DECODE_MODE:-freeform}"
+TRUNCATE_CHAT_MARKERS="${TRUNCATE_CHAT_MARKERS:-1}"
 
 # Sweep defaults used by some groups.
 COT_SWEEP_TOKENS="${COT_SWEEP_TOKENS:-128 192 256 320 384}"
@@ -57,6 +62,18 @@ export CUDA_VISIBLE_DEVICES
 # Include group name in run prefix so outputs are easy to track.
 RUN_PREFIX="${RUN_PREFIX:-${ACTIVE_PARAM_GROUP}_$(date -u +%Y%m%dT%H%M%SZ)}"
 
+# Persist full suite stdout/stderr in one place.
+LOG_ROOT="${LOG_ROOT:-assets/artifacts/phase_a_logs}"
+SUITE_LOG_DIR="${SUITE_LOG_DIR:-${LOG_ROOT}/${RUN_PREFIX}}"
+ENABLE_PERSISTED_LOGS="${ENABLE_PERSISTED_LOGS:-1}"
+mkdir -p "${SUITE_LOG_DIR}"
+SUITE_SUMMARY_FILE="${SUITE_SUMMARY_FILE:-${SUITE_LOG_DIR}/final_summary.md}"
+if [[ "${ENABLE_PERSISTED_LOGS}" == "1" ]]; then
+  SUITE_LOG_FILE="${SUITE_LOG_FILE:-${SUITE_LOG_DIR}/suite.log}"
+  # Mirror everything to terminal + file for live monitoring and postmortem.
+  exec > >(tee -a "${SUITE_LOG_FILE}") 2>&1
+fi
+
 # -----------------------------------------------------------------------------
 # Internal state populated by group config.
 # -----------------------------------------------------------------------------
@@ -66,10 +83,12 @@ GROUP_OBSERVE=""
 GROUP_EXPECTATION=""
 GROUP_NEED_DIRECT=0
 GROUP_NEED_COT=0
+GROUP_NEED_STRICT=0
 declare -a GROUP_RUN_SPECS=()
 declare -a RESULT_LINES=()
 DIRECT_VAL_JSONL=""
 COT_VAL_JSONL=""
+STRICT_VAL_JSONL=""
 
 log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$*"
@@ -95,13 +114,10 @@ assert_dir() {
   [[ -d "${path}" ]] || die "Required directory not found: ${path}"
 }
 
-assert_no_concurrent_generation() {
-  if [[ "${ALLOW_CONCURRENT:-0}" == "1" ]]; then
-    return 0
-  fi
+warn_if_concurrent_generation() {
   if pgrep -fa "scripts/phase_a_generate_and_eval.py" >/dev/null; then
-    die "Detected another running phase_a_generate_and_eval.py process. \
-Set ALLOW_CONCURRENT=1 to bypass, or wait for current run to finish."
+    log "WARNING: Detected other running phase_a_generate_and_eval.py processes."
+    log "WARNING: This suite will continue, but concurrent runs can distort speed/comparison fairness."
   fi
 }
 
@@ -201,6 +217,16 @@ run_infer_eval() {
     compare_flag=(--no-compare-latest-same-name)
   fi
 
+  local truncate_flag=(--truncate-chat-markers)
+  if [[ "${TRUNCATE_CHAT_MARKERS}" == "0" ]]; then
+    truncate_flag=(--no-truncate-chat-markers)
+  fi
+
+  local oom_backoff_flag=(--oom-backoff)
+  if [[ "${OOM_BACKOFF}" == "0" ]]; then
+    oom_backoff_flag=(--no-oom-backoff)
+  fi
+
   run_cmd "${PYTHON_BIN}" -u scripts/phase_a_generate_and_eval.py \
     --input-jsonl "${input_jsonl}" \
     --model-path "${MODEL_PATH}" \
@@ -211,7 +237,12 @@ run_infer_eval() {
     --no-do-sample \
     --seed "${SEED}" \
     --max-new-tokens "${max_new_tokens}" \
+    --strategyqa-decode-mode "${STRATEGYQA_DECODE_MODE}" \
+    "${truncate_flag[@]}" \
+    --batch-size "${BATCH_SIZE}" \
+    "${oom_backoff_flag[@]}" \
     --log-every "${LOG_EVERY}" \
+    --max-progress-lines "${MAX_PROGRESS_LINES}" \
     "${compare_flag[@]}"
 }
 
@@ -221,6 +252,7 @@ configure_param_group() {
   GROUP_RUN_SPECS=()
   GROUP_NEED_DIRECT=0
   GROUP_NEED_COT=0
+  GROUP_NEED_STRICT=0
 
   case "${group_id}" in
     A1)
@@ -312,8 +344,64 @@ configure_param_group() {
         "cot_t256_repro_r2|cot|${RUN_PREFIX}_cot_t256_repro|256|yes"
       )
       ;;
+    A5)
+      # Intention:
+      # Directly target three observed problems in direct runs:
+      # 1) parse/compliance misses,
+      # 2) wasted tokens due to long answers hitting caps,
+      # 3) potential default-label bias.
+      #
+      # Observe:
+      # - parse_error_rate improvement vs direct baseline,
+      # - whether tiny token budgets (4/8/16) still keep strong accuracy,
+      # - determinism on strict setting (second run should match first).
+      #
+      # Expectation:
+      # - strict template should reduce parse errors and output length,
+      # - small token budgets should be sufficient for yes/no output,
+      # - accuracy should stay comparable or improve vs direct_t16 baseline.
+      GROUP_TITLE="Strict Yes/No Compliance Fix"
+      GROUP_INTENTION="Use strict binary prompt to improve format compliance and efficiency."
+      GROUP_OBSERVE="Watch parse_error_rate first; then total accuracy and reproducibility deltas."
+      GROUP_EXPECTATION="Strict runs should be shorter and cleaner; determinism should hold on repeat."
+      GROUP_NEED_DIRECT=1
+      GROUP_NEED_STRICT=1
+      GROUP_RUN_SPECS=(
+        "baseline_direct_t16|direct|${RUN_PREFIX}_baseline_direct_t16|16|no"
+        "strict_t4|strict|${RUN_PREFIX}_strict_t4|4|no"
+        "strict_t8|strict|${RUN_PREFIX}_strict_t8|8|no"
+        "strict_t16_r1|strict|${RUN_PREFIX}_strict_t16|16|no"
+        "strict_t16_r2|strict|${RUN_PREFIX}_strict_t16|16|yes"
+      )
+      ;;
+    A6)
+      # Intention:
+      # Remove format-related parse failures by forcing binary decision decoding
+      # for StrategyQA (score `yes` vs `no` directly).
+      #
+      # Observe:
+      # - parse_error_rate should approach 0 for StrategyQA.
+      # - compare direct and CoT prompt styles under identical binary-choice decode.
+      #
+      # Expectation:
+      # - parse errors largely disappear,
+      # - accuracy differences become more attributable to model decision quality
+      #   rather than output-format noise.
+      GROUP_TITLE="Binary-Choice Decode Validation"
+      GROUP_INTENTION="Diagnose model quality after removing free-form format failures."
+      GROUP_OBSERVE="Check parse_error first (should be near zero), then compare direct vs CoT accuracy."
+      GROUP_EXPECTATION="Coverage improves sharply; remaining errors mostly reflect model reasoning/calibration."
+      STRATEGYQA_DECODE_MODE="binary_choice"
+      GROUP_NEED_DIRECT=1
+      GROUP_NEED_COT=1
+      GROUP_RUN_SPECS=(
+        "direct_binchoice|direct|${RUN_PREFIX}_direct_binchoice|16|no"
+        "cot_binchoice|cot|${RUN_PREFIX}_cot_binchoice|16|no"
+        "direct_binchoice_repro|direct|${RUN_PREFIX}_direct_binchoice|16|yes"
+      )
+      ;;
     *)
-      die "Unsupported ACTIVE_PARAM_GROUP=${group_id}. Supported: A1, A2, A3, A4"
+      die "Unsupported ACTIVE_PARAM_GROUP=${group_id}. Supported: A1, A2, A3, A4, A5, A6"
       ;;
   esac
 }
@@ -336,6 +424,15 @@ prepare_needed_inputs() {
     assert_file "${COT_VAL_JSONL}"
     log "Prepared CoT validation file   : ${COT_VAL_JSONL}"
   fi
+
+  if [[ "${GROUP_NEED_STRICT}" == "1" ]]; then
+    prepare_variant "qa_binary_strict" "answer_only"
+    local strict_prep_dir
+    strict_prep_dir="$(resolve_prepared_dir "answer_only" "qa_binary_strict")"
+    STRICT_VAL_JSONL="${strict_prep_dir}/validation.jsonl"
+    assert_file "${STRICT_VAL_JSONL}"
+    log "Prepared strict validation file: ${STRICT_VAL_JSONL}"
+  fi
 }
 
 execute_group_runs() {
@@ -354,6 +451,10 @@ execute_group_runs() {
         [[ -n "${COT_VAL_JSONL}" ]] || die "CoT input is not prepared."
         input_jsonl="${COT_VAL_JSONL}"
         ;;
+      strict)
+        [[ -n "${STRICT_VAL_JSONL}" ]] || die "Strict input is not prepared."
+        input_jsonl="${STRICT_VAL_JSONL}"
+        ;;
       *)
         die "Unknown input kind in run spec: ${input_kind}"
         ;;
@@ -366,23 +467,59 @@ execute_group_runs() {
 }
 
 print_summary_table() {
-  local tmp_file
-  tmp_file="$(mktemp /tmp/phasea_group_summary_XXXXXX.txt)"
-  trap 'rm -f "${tmp_file}"' RETURN
+  local tmp_results_file
+  local tmp_specs_file
+  tmp_results_file="$(mktemp /tmp/phasea_group_results_XXXXXX.txt)"
+  tmp_specs_file="$(mktemp /tmp/phasea_group_specs_XXXXXX.txt)"
+  trap 'rm -f "${tmp_results_file}" "${tmp_specs_file}"' RETURN
 
-  printf '%s\n' "${RESULT_LINES[@]}" > "${tmp_file}"
+  printf '%s\n' "${RESULT_LINES[@]}" > "${tmp_results_file}"
+  printf '%s\n' "${GROUP_RUN_SPECS[@]}" > "${tmp_specs_file}"
 
-  "${PYTHON_BIN}" - "${tmp_file}" "${ACTIVE_PARAM_GROUP}" "${GROUP_TITLE}" <<'PY'
+  PHASEA_GROUP_ID="${ACTIVE_PARAM_GROUP}" \
+  PHASEA_GROUP_TITLE="${GROUP_TITLE}" \
+  PHASEA_GROUP_INTENTION="${GROUP_INTENTION}" \
+  PHASEA_GROUP_OBSERVE="${GROUP_OBSERVE}" \
+  PHASEA_GROUP_EXPECTATION="${GROUP_EXPECTATION}" \
+  PHASEA_RUN_PREFIX="${RUN_PREFIX}" \
+  PHASEA_DATASET="${DATASET}" \
+  PHASEA_SOURCE_SPLIT="${SOURCE_SPLIT}" \
+  PHASEA_SPLIT_POLICY="${SPLIT_POLICY}" \
+  PHASEA_LIMIT="${LIMIT}" \
+  PHASEA_SEED="${SEED}" \
+  PHASEA_DTYPE="${DTYPE}" \
+  PHASEA_LOG_EVERY="${LOG_EVERY}" \
+  PHASEA_MAX_PROGRESS_LINES="${MAX_PROGRESS_LINES}" \
+  PHASEA_BATCH_SIZE="${BATCH_SIZE}" \
+  PHASEA_OOM_BACKOFF="${OOM_BACKOFF}" \
+  PHASEA_STRATEGYQA_DECODE_MODE="${STRATEGYQA_DECODE_MODE}" \
+  PHASEA_TRUNCATE_CHAT_MARKERS="${TRUNCATE_CHAT_MARKERS}" \
+  PHASEA_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
+  PHASEA_MODEL_PATH="${MODEL_PATH}" \
+  PHASEA_DIRECT_VAL_JSONL="${DIRECT_VAL_JSONL}" \
+  PHASEA_COT_VAL_JSONL="${COT_VAL_JSONL}" \
+  PHASEA_STRICT_VAL_JSONL="${STRICT_VAL_JSONL}" \
+  PHASEA_SUITE_LOG_FILE="${SUITE_LOG_FILE:-<disabled>}" \
+  PHASEA_SUITE_SUMMARY_FILE="${SUITE_SUMMARY_FILE}" \
+  "${PYTHON_BIN}" - "${tmp_results_file}" "${tmp_specs_file}" <<'PY'
 import json
+import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
-lines_path = Path(sys.argv[1])
-group_id = sys.argv[2]
-group_title = sys.argv[3]
+results_path = Path(sys.argv[1])
+specs_path = Path(sys.argv[2])
+
+group_id = os.environ["PHASEA_GROUP_ID"]
+group_title = os.environ["PHASEA_GROUP_TITLE"]
+group_intention = os.environ["PHASEA_GROUP_INTENTION"]
+group_observe = os.environ["PHASEA_GROUP_OBSERVE"]
+group_expectation = os.environ["PHASEA_GROUP_EXPECTATION"]
+summary_path = Path(os.environ["PHASEA_SUITE_SUMMARY_FILE"])
 
 rows = []
-for raw in lines_path.read_text(encoding="utf-8").splitlines():
+for raw in results_path.read_text(encoding="utf-8").splitlines():
     if not raw.strip():
         continue
     label, run_dir_str = raw.split("|", 1)
@@ -426,24 +563,102 @@ for raw in lines_path.read_text(encoding="utf-8").splitlines():
         }
     )
 
-print("=" * 138)
-print(f"Group Summary: {group_id} - {group_title}")
-print("=" * 138)
-print(
+spec_rows = []
+for raw in specs_path.read_text(encoding="utf-8").splitlines():
+    if not raw.strip():
+        continue
+    label, input_kind, run_name, max_new_tokens, compare_mode = raw.split("|", 4)
+    spec_rows.append(
+        {
+            "label": label,
+            "input_kind": input_kind,
+            "run_name": run_name,
+            "max_new_tokens": max_new_tokens,
+            "compare_mode": compare_mode,
+        }
+    )
+
+best_acc = max(rows, key=lambda r: r["acc"]) if rows else None
+best_parse = min(rows, key=lambda r: r["parse_err"]) if rows else None
+
+out_lines: list[str] = []
+out_lines.append("=" * 138)
+out_lines.append("FINAL EXPERIMENT SUMMARY")
+out_lines.append("=" * 138)
+out_lines.append(f"generated_at      : {datetime.now().astimezone().isoformat()}")
+out_lines.append(f"group_id          : {group_id}")
+out_lines.append(f"group_title       : {group_title}")
+out_lines.append(f"run_prefix        : {os.environ['PHASEA_RUN_PREFIX']}")
+out_lines.append(f"intention         : {group_intention}")
+out_lines.append(f"observe           : {group_observe}")
+out_lines.append(f"expectation       : {group_expectation}")
+out_lines.append("-" * 138)
+out_lines.append("SETTINGS")
+out_lines.append(f"dataset           : {os.environ['PHASEA_DATASET']}")
+out_lines.append(f"source_split      : {os.environ['PHASEA_SOURCE_SPLIT']}")
+out_lines.append(f"split_policy      : {os.environ['PHASEA_SPLIT_POLICY']}")
+out_lines.append(f"limit             : {os.environ['PHASEA_LIMIT']}")
+out_lines.append(f"seed              : {os.environ['PHASEA_SEED']}")
+out_lines.append(f"dtype             : {os.environ['PHASEA_DTYPE']}")
+out_lines.append(f"log_every         : {os.environ['PHASEA_LOG_EVERY']}")
+out_lines.append(f"max_progress_lines: {os.environ['PHASEA_MAX_PROGRESS_LINES']}")
+out_lines.append(f"batch_size        : {os.environ['PHASEA_BATCH_SIZE']}")
+out_lines.append(f"oom_backoff       : {os.environ['PHASEA_OOM_BACKOFF']}")
+out_lines.append(f"strategyqa_decode : {os.environ['PHASEA_STRATEGYQA_DECODE_MODE']}")
+out_lines.append(f"truncate_markers  : {os.environ['PHASEA_TRUNCATE_CHAT_MARKERS']}")
+out_lines.append(f"cuda_devices      : {os.environ['PHASEA_CUDA_VISIBLE_DEVICES']}")
+out_lines.append(f"model_path        : {os.environ['PHASEA_MODEL_PATH']}")
+direct_path = os.environ.get("PHASEA_DIRECT_VAL_JSONL", "")
+cot_path = os.environ.get("PHASEA_COT_VAL_JSONL", "")
+strict_path = os.environ.get("PHASEA_STRICT_VAL_JSONL", "")
+if direct_path:
+    out_lines.append(f"direct_input      : {direct_path}")
+if cot_path:
+    out_lines.append(f"cot_input         : {cot_path}")
+if strict_path:
+    out_lines.append(f"strict_input      : {strict_path}")
+out_lines.append(f"suite_log_file    : {os.environ.get('PHASEA_SUITE_LOG_FILE', '<disabled>')}")
+out_lines.append(f"summary_file      : {summary_path}")
+out_lines.append("-" * 138)
+out_lines.append("PLANNED RUN SPECS")
+for spec in spec_rows:
+    out_lines.append(
+        f"- label={spec['label']} | input={spec['input_kind']} | "
+        f"tok={spec['max_new_tokens']} | compare={spec['compare_mode']} | "
+        f"run_name={spec['run_name']}"
+    )
+out_lines.append("-" * 138)
+out_lines.append("RESULT TABLE")
+out_lines.append(
     f"{'label':<22} {'tok':>4} {'n':>5} {'acc':>8} {'parse_err':>10} "
     f"{'parseable_n':>11} {'acc_parseable':>13} {'delta_acc':>10} {'changed':>8}"
 )
-print("-" * 138)
+out_lines.append("-" * 138)
 for row in rows:
     delta_acc = f"{row['delta_acc']:+.4f}" if row["delta_acc"] is not None else "n/a"
     changed = str(row["changed"]) if row["changed"] is not None else "n/a"
-    print(
+    out_lines.append(
         f"{row['label']:<22} {row['max_new_tokens']:>4d} {row['n']:>5d} "
         f"{row['acc']:>8.4f} {row['parse_err']:>10.4f} "
         f"{row['parseable_n']:>11d} {row['acc_parseable']:>13.4f} "
         f"{delta_acc:>10} {changed:>8}"
     )
-print("=" * 138)
+out_lines.append("-" * 138)
+if best_acc is not None:
+    out_lines.append(
+        "best_accuracy     : "
+        f"{best_acc['label']} (acc={best_acc['acc']:.4f}, parse_err={best_acc['parse_err']:.4f})"
+    )
+if best_parse is not None:
+    out_lines.append(
+        "lowest_parse_err  : "
+        f"{best_parse['label']} (parse_err={best_parse['parse_err']:.4f}, acc={best_parse['acc']:.4f})"
+    )
+out_lines.append("=" * 138)
+
+text = "\n".join(out_lines) + "\n"
+print(text, end="")
+summary_path.write_text(text, encoding="utf-8")
 PY
 }
 
@@ -453,12 +668,21 @@ main() {
   log "CUDA devices   : ${CUDA_VISIBLE_DEVICES}"
   log "Model path     : ${MODEL_PATH}"
   log "Run prefix     : ${RUN_PREFIX}"
+  log "Log settings   : log_every=${LOG_EVERY}, max_progress_lines=${MAX_PROGRESS_LINES}"
+  log "Batch settings : batch_size=${BATCH_SIZE}, oom_backoff=${OOM_BACKOFF}"
+  log "Decode mode    : strategyqa_decode_mode=${STRATEGYQA_DECODE_MODE}, truncate_chat_markers=${TRUNCATE_CHAT_MARKERS}"
+  if [[ "${ENABLE_PERSISTED_LOGS}" == "1" ]]; then
+    log "Suite log file : ${SUITE_LOG_FILE}"
+  else
+    log "Suite log file : <disabled>"
+  fi
+  log "Summary file   : ${SUITE_SUMMARY_FILE}"
   log "Dataset config : dataset=${DATASET}, source_split=${SOURCE_SPLIT}, split_policy=${SPLIT_POLICY}, limit=${LIMIT}"
 
   assert_file "scripts/phase_a_prepare.py"
   assert_file "scripts/phase_a_generate_and_eval.py"
   assert_dir "${MODEL_PATH}"
-  assert_no_concurrent_generation
+  warn_if_concurrent_generation
 
   configure_param_group "${ACTIVE_PARAM_GROUP}"
 
@@ -475,4 +699,3 @@ main() {
 }
 
 main "$@"
-

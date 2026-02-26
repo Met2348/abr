@@ -18,6 +18,11 @@ def test_resolve_template_unknown_id_raises() -> None:
         resolve_template("unknown_template", "1.0.0")
 
 
+def test_list_template_versions_contains_math_direct() -> None:
+    versions = list_template_versions("qa_math_direct_final")
+    assert "1.0.0" in versions
+
+
 def test_build_prepared_sample_answer_only() -> None:
     sample = CanonicalSample(
         id="toy:1",

@@ -32,6 +32,7 @@ _bootstrap_src_path()
 
 from ours.data.loaders import DATASET_LOADERS, load_dataset_canonical  # noqa: E402
 from ours.phase_a import (  # noqa: E402
+    PROMPT_TEMPLATE_REGISTRY,
     SplitConfig,
     assign_split,
     build_prepared_sample,
@@ -89,7 +90,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--template-id",
         default="qa_direct",
-        choices=["qa_direct", "qa_cot_then_final"],
+        choices=sorted(PROMPT_TEMPLATE_REGISTRY.keys()),
         help="Prompt template id.",
     )
     parser.add_argument(
