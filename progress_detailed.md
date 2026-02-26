@@ -2,6 +2,85 @@
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
 
+## 2026-02-26 14:57:01 +08 (+0800)
+- Type: Feature / Docs / Fix / Test
+- Summary: Added one-script Phase A inference+evaluation+comparison workflow and fixed runtime import/generation issues for novice-friendly reruns.
+- Details:
+  - Added new script: `scripts/phase_a_generate_and_eval.py`.
+  - Script capabilities:
+    - loads prepared Phase A JSONL input,
+    - runs local model generation,
+    - evaluates predictions via Phase A evaluator,
+    - writes `predictions.jsonl`, `scored_predictions.jsonl`, `metrics.json`, `manifest.json`,
+    - auto-compares with latest previous run of same `run_name` (or explicit `--compare-with`).
+  - Implemented lazy runtime dependency imports (`torch`, `transformers`) so `--help` works even in mismatched environments.
+  - Fixed runtime bug after lazy-import refactor:
+    - [CAUTION] internal bug fixed where `_run_generation` referenced undefined global `torch`; now uses passed runtime module.
+  - Added generation-config alignment to reduce confusing warnings when `do_sample=False`.
+  - Updated `readme.md` with a dedicated section:
+    - “9.5 One-Script Inference + Eval + Diff”
+    - exact rerun instructions and reproducibility notes.
+  - Validation results:
+    - `python3 -m py_compile scripts/phase_a_generate_and_eval.py` passed.
+    - `python3 scripts/phase_a_generate_and_eval.py --help` works.
+    - `conda run -n bcr python scripts/phase_a_generate_and_eval.py ... --max-samples 2` completed.
+    - `conda run -n bcr python scripts/phase_a_generate_and_eval.py ... --max-samples 1` completed and produced run-to-run diff.
+- Files changed:
+  - `scripts/phase_a_generate_and_eval.py`
+  - `readme.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+---
+
+## 2026-02-26 02:49:59 +08 (+0800)
+- Type: Feature / Docs / Test
+- Summary: Started Phase A critical milestone with reproducible baseline foundations (prompting, split, extraction, evaluator) and runnable CLIs.
+- Details:
+  - Added new Stage A package `src/ours/phase_a/`:
+    - `contracts.py`: typed dataclasses (`PromptTemplateSpec`, `PreparedSample`, `PredictionRecord`, `ScoredPrediction`).
+    - `prompt_builder.py`: versioned dataset-agnostic prompt templates and target builders.
+    - `splitting.py`: deterministic hash-based split policy (`train/validation/test`).
+    - `answer_extraction.py`: dataset-aware prediction extraction (`strategyqa`, `gsm8k`, `hendrycks_math`, fallback).
+    - `evaluator.py`: robust scoring pipeline with extraction + normalization + aggregate metrics.
+    - `__init__.py`: Phase A public exports.
+  - Added new Stage A scripts:
+    - `scripts/phase_a_prepare.py`: builds model-ready prompt/target artifacts from canonical samples.
+    - `scripts/phase_a_eval_predictions.py`: scores prediction JSONL files and writes metrics.
+  - Added new Stage A tests:
+    - `tests/unit/test_phase_a_prompt_builder.py`
+    - `tests/unit/test_phase_a_splitting.py`
+    - `tests/unit/test_phase_a_extraction_eval.py`
+  - Updated `readme.md` with a dedicated “Stage A Baseline (New)” section:
+    - how to prepare artifacts,
+    - how to evaluate predictions,
+    - recommended baseline A/B template-target matrix,
+    - why this milestone is a prerequisite for ABR.
+  - Validation results:
+    - `python3 -m py_compile ...` on all new Phase A modules/scripts passed.
+    - `python3 -m pytest -q` -> `29 passed, 1 skipped`.
+    - Smoke run: `python3 scripts/phase_a_prepare.py --datasets strategyqa --source-split train --limit 10 --split-policy hash ...` succeeded.
+    - Smoke run: `python3 scripts/phase_a_eval_predictions.py --predictions .../mock_predictions.jsonl --run-name smoke_eval` succeeded with expected metrics.
+- Files changed:
+  - `src/ours/phase_a/__init__.py`
+  - `src/ours/phase_a/contracts.py`
+  - `src/ours/phase_a/prompt_builder.py`
+  - `src/ours/phase_a/splitting.py`
+  - `src/ours/phase_a/answer_extraction.py`
+  - `src/ours/phase_a/evaluator.py`
+  - `scripts/phase_a_prepare.py`
+  - `scripts/phase_a_eval_predictions.py`
+  - `tests/unit/test_phase_a_prompt_builder.py`
+  - `tests/unit/test_phase_a_splitting.py`
+  - `tests/unit/test_phase_a_extraction_eval.py`
+  - `readme.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+---
+
 ## 2026-02-26 01:25:56 +08 (+0800)
 - Type: Docs
 - Summary: Expanded novice-facing documentation with explicit change history and step-preprocessing usage instructions.

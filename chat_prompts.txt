@@ -80,3 +80,18 @@ please show me 3 examples of unsafe scenario, and in constrast, what the safe sc
 oh, maybe i misunderstand the safety meaning. I wonder, if we want to limit the llm to output safe contents, how can we do? does these pretrained weights i downloaded already have the abiity to reject to produce malicious outputs?
 
 write your code change history and new instructs to readme.md, progress_detailed.md, to make novice understand your changes
+
+
+
+Now. assess how far (or what to do) to achieve our ABR research goal. just to help me with it,.
+
+please detailedly describe phase-A
+
+please elaborate: 1. what is - Dataset-agnostic prompt builder, why? 2.what is prompt templates? why versioned? what versions look like? 3. what is  inference-time answer extraction rules? how they work? 4. how evaluators work? how do they know if the answer is correct, since they are natural languages so that you can not use "==" to judge correctness
+
+# ==== PHASE A: TOWARDS SFT =====
+
+
+please start the very careful impl of  stage A, a critical milestone. keep code readable to a novice. also maintain the readme and changelog. and finally, give concrete instructions
+
+
