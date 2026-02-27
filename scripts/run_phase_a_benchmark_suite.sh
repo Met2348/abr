@@ -28,6 +28,17 @@ cd "${REPO_ROOT}"
 # -----------------------------------------------------------------------------
 ACTIVE_PARAM_GROUP="${ACTIVE_PARAM_GROUP:-A1}"
 
+# Track which runtime knobs were explicitly provided by user env.
+# We use this so param groups can set sensible defaults without overriding user intent.
+USER_SET_BATCH_SIZE="${BATCH_SIZE+x}"
+USER_SET_MAX_PROGRESS_LINES="${MAX_PROGRESS_LINES+x}"
+USER_SET_OOM_BACKOFF="${OOM_BACKOFF+x}"
+USER_SET_TRUNCATION_RECOVERY="${TRUNCATION_RECOVERY+x}"
+USER_SET_TRUNCATION_RECOVERY_ROUNDS="${TRUNCATION_RECOVERY_ROUNDS+x}"
+USER_SET_TRUNCATION_RECOVERY_EXTRA_TOKENS="${TRUNCATION_RECOVERY_EXTRA_TOKENS+x}"
+USER_SET_TRUNCATION_RECOVERY_DATASETS="${TRUNCATION_RECOVERY_DATASETS+x}"
+USER_SET_TRUNCATION_RECOVERY_REQUIRE_FINAL_SIGNAL="${TRUNCATION_RECOVERY_REQUIRE_FINAL_SIGNAL+x}"
+
 # -----------------------------------------------------------------------------
 # Global runtime knobs (override with env vars if needed).
 # -----------------------------------------------------------------------------
@@ -50,6 +61,57 @@ BATCH_SIZE="${BATCH_SIZE:-1}"
 OOM_BACKOFF="${OOM_BACKOFF:-1}"
 STRATEGYQA_DECODE_MODE="${STRATEGYQA_DECODE_MODE:-freeform}"
 TRUNCATE_CHAT_MARKERS="${TRUNCATE_CHAT_MARKERS:-1}"
+TRUNCATION_RECOVERY="${TRUNCATION_RECOVERY:-1}"
+TRUNCATION_RECOVERY_ROUNDS="${TRUNCATION_RECOVERY_ROUNDS:-2}"
+TRUNCATION_RECOVERY_EXTRA_TOKENS="${TRUNCATION_RECOVERY_EXTRA_TOKENS:-96}"
+TRUNCATION_RECOVERY_DATASETS="${TRUNCATION_RECOVERY_DATASETS:-gsm8k,hendrycks_math}"
+TRUNCATION_RECOVERY_REQUIRE_FINAL_SIGNAL="${TRUNCATION_RECOVERY_REQUIRE_FINAL_SIGNAL:-1}"
+
+set_default_if_not_user_set() {
+  local user_flag="$1"
+  local var_name="$2"
+  local default_value="$3"
+  if [[ "${user_flag}" != "x" ]]; then
+    printf -v "${var_name}" '%s' "${default_value}"
+  fi
+}
+
+configure_a11_token_stress_variant() {
+  local max_new_tokens="$1"
+  local default_batch_size="$2"
+
+  GROUP_TITLE="StrategyQA Whole-Corpus Token Stress t${max_new_tokens}"
+  GROUP_INTENTION="Stress-test suspected token-limit effects on whole-corpus StrategyQA with larger CoT budgets."
+  GROUP_OBSERVE="Track split-wise and aggregate accuracy while monitoring truncation-recovery activity and throughput."
+  GROUP_EXPECTATION="Larger token budgets should reduce cap-related failures but increase runtime; gains should eventually plateau."
+  DATASET="strategyqa"
+  LIMIT="None"
+  STRATEGYQA_DECODE_MODE="freeform"
+
+  # Long-run defaults: verbose enough for monitoring, conservative enough for stability.
+  # User env values still take precedence over these defaults.
+  set_default_if_not_user_set "${USER_SET_MAX_PROGRESS_LINES}" MAX_PROGRESS_LINES "50"
+  set_default_if_not_user_set "${USER_SET_BATCH_SIZE}" BATCH_SIZE "${default_batch_size}"
+  set_default_if_not_user_set "${USER_SET_OOM_BACKOFF}" OOM_BACKOFF "1"
+  set_default_if_not_user_set "${USER_SET_TRUNCATION_RECOVERY}" TRUNCATION_RECOVERY "1"
+  set_default_if_not_user_set "${USER_SET_TRUNCATION_RECOVERY_ROUNDS}" TRUNCATION_RECOVERY_ROUNDS "2"
+  set_default_if_not_user_set "${USER_SET_TRUNCATION_RECOVERY_EXTRA_TOKENS}" TRUNCATION_RECOVERY_EXTRA_TOKENS "96"
+  set_default_if_not_user_set "${USER_SET_TRUNCATION_RECOVERY_DATASETS}" TRUNCATION_RECOVERY_DATASETS "gsm8k,hendrycks_math,strategyqa"
+  set_default_if_not_user_set "${USER_SET_TRUNCATION_RECOVERY_REQUIRE_FINAL_SIGNAL}" TRUNCATION_RECOVERY_REQUIRE_FINAL_SIGNAL "1"
+
+  COT_TEMPLATE_ID="qa_strategyqa_cot_compact"
+  COT_TARGET_STYLE="cot_then_answer"
+  GROUP_NEED_COT=1
+  GROUP_ENABLE_WHOLE_AGG=1
+
+  # Keep these stress runs compute-aware: no additional repro run by default.
+  # Aggregate summary remains report-ready across train/validation/test.
+  GROUP_RUN_SPECS=(
+    "full_train_t${max_new_tokens}|cot_train|${RUN_PREFIX}_full_train_t${max_new_tokens}|${max_new_tokens}|no"
+    "full_validation_t${max_new_tokens}|cot_validation|${RUN_PREFIX}_full_validation_t${max_new_tokens}|${max_new_tokens}|no"
+    "full_test_t${max_new_tokens}|cot_test|${RUN_PREFIX}_full_test_t${max_new_tokens}|${max_new_tokens}|no"
+  )
+}
 
 # Template slots used by groups.
 # Groups can override these values to compare prompt styles while reusing
@@ -102,11 +164,18 @@ GROUP_EXPECTATION=""
 GROUP_NEED_DIRECT=0
 GROUP_NEED_COT=0
 GROUP_NEED_STRICT=0
+GROUP_ENABLE_WHOLE_AGG=0
 declare -a GROUP_RUN_SPECS=()
 declare -a RESULT_LINES=()
+DIRECT_TRAIN_JSONL=""
 DIRECT_VAL_JSONL=""
+DIRECT_TEST_JSONL=""
+COT_TRAIN_JSONL=""
 COT_VAL_JSONL=""
+COT_TEST_JSONL=""
+STRICT_TRAIN_JSONL=""
 STRICT_VAL_JSONL=""
+STRICT_TEST_JSONL=""
 
 log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$*"
@@ -159,7 +228,7 @@ template_id = sys.argv[7]
 template_version = sys.argv[8]
 seed = int(sys.argv[9])
 
-limit = None if limit_raw in {"None", ""} else int(limit_raw)
+limit = None if limit_raw in {"None", "none", "ALL", "all", ""} else int(limit_raw)
 dataset_dir = prep_root / dataset
 if not dataset_dir.exists():
     raise SystemExit(f"Missing prepared root: {dataset_dir}")
@@ -212,16 +281,23 @@ PY
 prepare_variant() {
   local template_id="$1"
   local target_style="$2"
-  run_cmd "${PYTHON_BIN}" scripts/phase_a_prepare.py \
+  local cmd=("${PYTHON_BIN}" scripts/phase_a_prepare.py \
     --datasets "${DATASET}" \
     --source-split "${SOURCE_SPLIT}" \
     --split-policy "${SPLIT_POLICY}" \
-    --limit "${LIMIT}" \
     --template-id "${template_id}" \
     --template-version "${TEMPLATE_VERSION}" \
     --target-style "${target_style}" \
     --seed "${SEED}" \
-    --resume
+    --resume)
+
+  # Allow full-dataset runs by omitting --limit entirely.
+  # Supported env values: LIMIT=None, LIMIT=all, or LIMIT="".
+  if [[ "${LIMIT}" != "None" && "${LIMIT}" != "none" && "${LIMIT}" != "ALL" && "${LIMIT}" != "all" && -n "${LIMIT}" ]]; then
+    cmd+=(--limit "${LIMIT}")
+  fi
+
+  run_cmd "${cmd[@]}"
 }
 
 run_infer_eval() {
@@ -245,6 +321,16 @@ run_infer_eval() {
     oom_backoff_flag=(--no-oom-backoff)
   fi
 
+  local trunc_recovery_flag=(--truncation-recovery)
+  if [[ "${TRUNCATION_RECOVERY}" == "0" ]]; then
+    trunc_recovery_flag=(--no-truncation-recovery)
+  fi
+
+  local trunc_recovery_require_signal_flag=(--truncation-recovery-require-final-answer-signal)
+  if [[ "${TRUNCATION_RECOVERY_REQUIRE_FINAL_SIGNAL}" == "0" ]]; then
+    trunc_recovery_require_signal_flag=(--no-truncation-recovery-require-final-answer-signal)
+  fi
+
   run_cmd "${PYTHON_BIN}" -u scripts/phase_a_generate_and_eval.py \
     --input-jsonl "${input_jsonl}" \
     --model-path "${MODEL_PATH}" \
@@ -259,6 +345,11 @@ run_infer_eval() {
     "${truncate_flag[@]}" \
     --batch-size "${BATCH_SIZE}" \
     "${oom_backoff_flag[@]}" \
+    "${trunc_recovery_flag[@]}" \
+    --truncation-recovery-rounds "${TRUNCATION_RECOVERY_ROUNDS}" \
+    --truncation-recovery-extra-tokens "${TRUNCATION_RECOVERY_EXTRA_TOKENS}" \
+    --truncation-recovery-datasets "${TRUNCATION_RECOVERY_DATASETS}" \
+    "${trunc_recovery_require_signal_flag[@]}" \
     --log-every "${LOG_EVERY}" \
     --max-progress-lines "${MAX_PROGRESS_LINES}" \
     "${compare_flag[@]}"
@@ -271,6 +362,16 @@ configure_param_group() {
   GROUP_NEED_DIRECT=0
   GROUP_NEED_COT=0
   GROUP_NEED_STRICT=0
+  GROUP_ENABLE_WHOLE_AGG=0
+  DIRECT_TRAIN_JSONL=""
+  DIRECT_VAL_JSONL=""
+  DIRECT_TEST_JSONL=""
+  COT_TRAIN_JSONL=""
+  COT_VAL_JSONL=""
+  COT_TEST_JSONL=""
+  STRICT_TRAIN_JSONL=""
+  STRICT_VAL_JSONL=""
+  STRICT_TEST_JSONL=""
   DIRECT_TEMPLATE_ID="${BASE_DIRECT_TEMPLATE_ID}"
   DIRECT_TARGET_STYLE="${BASE_DIRECT_TARGET_STYLE}"
   COT_TEMPLATE_ID="${BASE_COT_TEMPLATE_ID}"
@@ -490,8 +591,166 @@ configure_param_group() {
         "style_equation_t64|strict|${RUN_PREFIX}_style_equation_t64|64|no"
       )
       ;;
+    A9)
+      # Intention:
+      # Run the current best StrategyQA setting on the full dataset
+      # (no preparation-time limit cap), with a reproducibility check.
+      #
+      # Observe:
+      # - full-data accuracy and parse_error_rate,
+      # - run2 determinism delta vs run1.
+      #
+      # Expectation:
+      # - accuracy close to small-scale best setting,
+      # - zero (or near-zero) reproducibility deltas.
+      GROUP_TITLE="StrategyQA Full-Data Best Setting"
+      GROUP_INTENTION="Validate full-data performance of the best StrategyQA prompt configuration."
+      GROUP_OBSERVE="Track full-data accuracy, parse_error_rate, and deterministic rerun deltas."
+      GROUP_EXPECTATION="CoT compact t96 should remain top quality with low parse error on full-data validation."
+      DATASET="strategyqa"
+      LIMIT="None"
+      STRATEGYQA_DECODE_MODE="freeform"
+      COT_TEMPLATE_ID="qa_strategyqa_cot_compact"
+      COT_TARGET_STYLE="cot_then_answer"
+      GROUP_NEED_COT=1
+      GROUP_RUN_SPECS=(
+        "full_best_cot_t96_r1|cot|${RUN_PREFIX}_full_best_cot_t96|96|no"
+        "full_best_cot_t96_r2|cot|${RUN_PREFIX}_full_best_cot_t96|96|yes"
+      )
+      ;;
+    A10)
+      # Intention:
+      # Run the current best GSM8K setting on the full dataset
+      # (no preparation-time limit cap), with a reproducibility check.
+      #
+      # Observe:
+      # - full-data accuracy,
+      # - truncation recovery activity,
+      # - run2 determinism delta vs run1.
+      #
+      # Expectation:
+      # - CoT compact t192 remains strongest,
+      # - truncation recovery should trigger on a small subset.
+      GROUP_TITLE="GSM8K Full-Data Best Setting"
+      GROUP_INTENTION="Validate full-data performance of the best GSM8K prompt configuration."
+      GROUP_OBSERVE="Track full-data accuracy, truncation-recovery rows, and deterministic rerun deltas."
+      GROUP_EXPECTATION="CoT compact t192 should remain near best-known GSM8K accuracy on full-data validation."
+      DATASET="gsm8k"
+      LIMIT="None"
+      STRATEGYQA_DECODE_MODE="freeform"
+      COT_TEMPLATE_ID="qa_gsm8k_cot_compact_final"
+      COT_TARGET_STYLE="cot_then_answer"
+      GROUP_NEED_COT=1
+      GROUP_RUN_SPECS=(
+        "full_best_cot_t192_r1|cot|${RUN_PREFIX}_full_best_cot_t192|192|no"
+        "full_best_cot_t192_r2|cot|${RUN_PREFIX}_full_best_cot_t192|192|yes"
+      )
+      ;;
+    A11)
+      # Intention:
+      # Evaluate one best StrategyQA setting over the full prepared corpus
+      # (train+validation+test = all samples) for report-ready "whole picture".
+      #
+      # Observe:
+      # - per-split accuracy/parse_error_rate,
+      # - weighted aggregate metrics over all rows,
+      # - deterministic rerun on the aggregate.
+      #
+      # Expectation:
+      # - aggregate n should equal full prepared corpus count,
+      # - parse errors should mainly come from cap-hit freeform outputs,
+      # - rerun deltas should remain zero.
+      GROUP_TITLE="StrategyQA Whole-Corpus Review (2290)"
+      GROUP_INTENTION="Produce report-ready whole-corpus metrics using the current best StrategyQA prompt setting."
+      GROUP_OBSERVE="Check split-wise metrics and the weighted aggregate over train+validation+test."
+      GROUP_EXPECTATION="Aggregate should be stable and reproducible; truncation-safe settings should keep parse errors low."
+      DATASET="strategyqa"
+      LIMIT="None"
+      STRATEGYQA_DECODE_MODE="freeform"
+      set_default_if_not_user_set "${USER_SET_MAX_PROGRESS_LINES}" MAX_PROGRESS_LINES "50"
+      set_default_if_not_user_set "${USER_SET_BATCH_SIZE}" BATCH_SIZE "16"
+      set_default_if_not_user_set "${USER_SET_OOM_BACKOFF}" OOM_BACKOFF "1"
+      set_default_if_not_user_set "${USER_SET_TRUNCATION_RECOVERY}" TRUNCATION_RECOVERY "1"
+      set_default_if_not_user_set "${USER_SET_TRUNCATION_RECOVERY_ROUNDS}" TRUNCATION_RECOVERY_ROUNDS "2"
+      set_default_if_not_user_set "${USER_SET_TRUNCATION_RECOVERY_EXTRA_TOKENS}" TRUNCATION_RECOVERY_EXTRA_TOKENS "96"
+      set_default_if_not_user_set "${USER_SET_TRUNCATION_RECOVERY_DATASETS}" TRUNCATION_RECOVERY_DATASETS "gsm8k,hendrycks_math,strategyqa"
+      set_default_if_not_user_set "${USER_SET_TRUNCATION_RECOVERY_REQUIRE_FINAL_SIGNAL}" TRUNCATION_RECOVERY_REQUIRE_FINAL_SIGNAL "1"
+      COT_TEMPLATE_ID="qa_strategyqa_cot_compact"
+      COT_TARGET_STYLE="cot_then_answer"
+      GROUP_NEED_COT=1
+      GROUP_ENABLE_WHOLE_AGG=1
+      GROUP_RUN_SPECS=(
+        "full_train_t96|cot_train|${RUN_PREFIX}_full_train_t96|96|no"
+        "full_validation_t96|cot_validation|${RUN_PREFIX}_full_validation_t96|96|no"
+        "full_test_t96|cot_test|${RUN_PREFIX}_full_test_t96|96|no"
+        "full_train_t96_repro|cot_train|${RUN_PREFIX}_full_train_t96|96|yes"
+      )
+      ;;
+    A11_128)
+      # StrategyQA whole-corpus token-stress subgroup (t128).
+      # Slightly reduced default batch vs A11 to keep long-decoding runs stable.
+      configure_a11_token_stress_variant "128" "64"
+      ;;
+    A11_256)
+      # StrategyQA whole-corpus token-stress subgroup (t256).
+      # Batch default is lowered as token budget grows to reduce OOM risk.
+      configure_a11_token_stress_variant "256" "32"
+      ;;
+    A11_384)
+      # StrategyQA whole-corpus token-stress subgroup (t384).
+      configure_a11_token_stress_variant "384" "24"
+      ;;
+    A11_512)
+      # StrategyQA whole-corpus token-stress subgroup (t512).
+      configure_a11_token_stress_variant "512" "16"
+      ;;
+    A11_1024)
+      # StrategyQA whole-corpus token-stress subgroup (t1024).
+      # Very long decode budget; conservative default batch for stability.
+      configure_a11_token_stress_variant "1024" "8"
+      ;;
+    A12)
+      # Intention:
+      # Evaluate one best GSM8K setting over the full prepared corpus
+      # (train+validation+test from source train split) for report-ready totals.
+      #
+      # Observe:
+      # - per-split accuracy/parse_error_rate,
+      # - weighted aggregate metrics over all rows,
+      # - deterministic rerun check on validation split.
+      #
+      # Expectation:
+      # - aggregate reflects the full prepared corpus,
+      # - truncation recovery should trigger on a subset of long CoT outputs,
+      # - validation rerun deltas should remain zero.
+      GROUP_TITLE="GSM8K Whole-Corpus Review"
+      GROUP_INTENTION="Produce report-ready whole-corpus metrics using the current best GSM8K prompt setting."
+      GROUP_OBSERVE="Check split-wise metrics, aggregate quality, truncation-recovery activity, and reproducibility."
+      GROUP_EXPECTATION="CoT compact t192 should stay strongest on quality with bounded truncation failures under safeguards."
+      DATASET="gsm8k"
+      LIMIT="None"
+      STRATEGYQA_DECODE_MODE="freeform"
+      set_default_if_not_user_set "${USER_SET_MAX_PROGRESS_LINES}" MAX_PROGRESS_LINES "50"
+      set_default_if_not_user_set "${USER_SET_BATCH_SIZE}" BATCH_SIZE "16"
+      set_default_if_not_user_set "${USER_SET_OOM_BACKOFF}" OOM_BACKOFF "1"
+      set_default_if_not_user_set "${USER_SET_TRUNCATION_RECOVERY}" TRUNCATION_RECOVERY "1"
+      set_default_if_not_user_set "${USER_SET_TRUNCATION_RECOVERY_ROUNDS}" TRUNCATION_RECOVERY_ROUNDS "2"
+      set_default_if_not_user_set "${USER_SET_TRUNCATION_RECOVERY_EXTRA_TOKENS}" TRUNCATION_RECOVERY_EXTRA_TOKENS "96"
+      set_default_if_not_user_set "${USER_SET_TRUNCATION_RECOVERY_DATASETS}" TRUNCATION_RECOVERY_DATASETS "gsm8k,hendrycks_math"
+      set_default_if_not_user_set "${USER_SET_TRUNCATION_RECOVERY_REQUIRE_FINAL_SIGNAL}" TRUNCATION_RECOVERY_REQUIRE_FINAL_SIGNAL "1"
+      COT_TEMPLATE_ID="qa_gsm8k_cot_compact_final"
+      COT_TARGET_STYLE="cot_then_answer"
+      GROUP_NEED_COT=1
+      GROUP_ENABLE_WHOLE_AGG=1
+      GROUP_RUN_SPECS=(
+        "full_train_t192|cot_train|${RUN_PREFIX}_full_train_t192|192|no"
+        "full_validation_t192|cot_validation|${RUN_PREFIX}_full_validation_t192|192|no"
+        "full_test_t192|cot_test|${RUN_PREFIX}_full_test_t192|192|no"
+        "full_validation_t192_repro|cot_validation|${RUN_PREFIX}_full_validation_t192|192|yes"
+      )
+      ;;
     *)
-      die "Unsupported ACTIVE_PARAM_GROUP=${group_id}. Supported: A1, A2, A3, A4, A5, A6, A7, A8"
+      die "Unsupported ACTIVE_PARAM_GROUP=${group_id}. Supported: A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A11_128, A11_256, A11_384, A11_512, A11_1024, A12"
       ;;
   esac
 }
@@ -501,27 +760,39 @@ prepare_needed_inputs() {
     prepare_variant "${DIRECT_TEMPLATE_ID}" "${DIRECT_TARGET_STYLE}"
     local direct_prep_dir
     direct_prep_dir="$(resolve_prepared_dir "${DIRECT_TARGET_STYLE}" "${DIRECT_TEMPLATE_ID}")"
+    DIRECT_TRAIN_JSONL="${direct_prep_dir}/train.jsonl"
     DIRECT_VAL_JSONL="${direct_prep_dir}/validation.jsonl"
+    DIRECT_TEST_JSONL="${direct_prep_dir}/test.jsonl"
+    assert_file "${DIRECT_TRAIN_JSONL}"
     assert_file "${DIRECT_VAL_JSONL}"
-    log "Prepared direct validation file: ${DIRECT_VAL_JSONL} (${DIRECT_TEMPLATE_ID}, ${DIRECT_TARGET_STYLE})"
+    assert_file "${DIRECT_TEST_JSONL}"
+    log "Prepared direct files        : train=${DIRECT_TRAIN_JSONL}, validation=${DIRECT_VAL_JSONL}, test=${DIRECT_TEST_JSONL} (${DIRECT_TEMPLATE_ID}, ${DIRECT_TARGET_STYLE})"
   fi
 
   if [[ "${GROUP_NEED_COT}" == "1" ]]; then
     prepare_variant "${COT_TEMPLATE_ID}" "${COT_TARGET_STYLE}"
     local cot_prep_dir
     cot_prep_dir="$(resolve_prepared_dir "${COT_TARGET_STYLE}" "${COT_TEMPLATE_ID}")"
+    COT_TRAIN_JSONL="${cot_prep_dir}/train.jsonl"
     COT_VAL_JSONL="${cot_prep_dir}/validation.jsonl"
+    COT_TEST_JSONL="${cot_prep_dir}/test.jsonl"
+    assert_file "${COT_TRAIN_JSONL}"
     assert_file "${COT_VAL_JSONL}"
-    log "Prepared CoT validation file   : ${COT_VAL_JSONL} (${COT_TEMPLATE_ID}, ${COT_TARGET_STYLE})"
+    assert_file "${COT_TEST_JSONL}"
+    log "Prepared CoT files           : train=${COT_TRAIN_JSONL}, validation=${COT_VAL_JSONL}, test=${COT_TEST_JSONL} (${COT_TEMPLATE_ID}, ${COT_TARGET_STYLE})"
   fi
 
   if [[ "${GROUP_NEED_STRICT}" == "1" ]]; then
     prepare_variant "${STRICT_TEMPLATE_ID}" "${STRICT_TARGET_STYLE}"
     local strict_prep_dir
     strict_prep_dir="$(resolve_prepared_dir "${STRICT_TARGET_STYLE}" "${STRICT_TEMPLATE_ID}")"
+    STRICT_TRAIN_JSONL="${strict_prep_dir}/train.jsonl"
     STRICT_VAL_JSONL="${strict_prep_dir}/validation.jsonl"
+    STRICT_TEST_JSONL="${strict_prep_dir}/test.jsonl"
+    assert_file "${STRICT_TRAIN_JSONL}"
     assert_file "${STRICT_VAL_JSONL}"
-    log "Prepared strict validation file: ${STRICT_VAL_JSONL} (${STRICT_TEMPLATE_ID}, ${STRICT_TARGET_STYLE})"
+    assert_file "${STRICT_TEST_JSONL}"
+    log "Prepared strict files        : train=${STRICT_TRAIN_JSONL}, validation=${STRICT_VAL_JSONL}, test=${STRICT_TEST_JSONL} (${STRICT_TEMPLATE_ID}, ${STRICT_TARGET_STYLE})"
   fi
 }
 
@@ -537,13 +808,49 @@ execute_group_runs() {
         [[ -n "${DIRECT_VAL_JSONL}" ]] || die "Direct input is not prepared."
         input_jsonl="${DIRECT_VAL_JSONL}"
         ;;
+      direct_train)
+        [[ -n "${DIRECT_TRAIN_JSONL}" ]] || die "Direct train input is not prepared."
+        input_jsonl="${DIRECT_TRAIN_JSONL}"
+        ;;
+      direct_validation)
+        [[ -n "${DIRECT_VAL_JSONL}" ]] || die "Direct validation input is not prepared."
+        input_jsonl="${DIRECT_VAL_JSONL}"
+        ;;
+      direct_test)
+        [[ -n "${DIRECT_TEST_JSONL}" ]] || die "Direct test input is not prepared."
+        input_jsonl="${DIRECT_TEST_JSONL}"
+        ;;
       cot)
         [[ -n "${COT_VAL_JSONL}" ]] || die "CoT input is not prepared."
         input_jsonl="${COT_VAL_JSONL}"
         ;;
+      cot_train)
+        [[ -n "${COT_TRAIN_JSONL}" ]] || die "CoT train input is not prepared."
+        input_jsonl="${COT_TRAIN_JSONL}"
+        ;;
+      cot_validation)
+        [[ -n "${COT_VAL_JSONL}" ]] || die "CoT validation input is not prepared."
+        input_jsonl="${COT_VAL_JSONL}"
+        ;;
+      cot_test)
+        [[ -n "${COT_TEST_JSONL}" ]] || die "CoT test input is not prepared."
+        input_jsonl="${COT_TEST_JSONL}"
+        ;;
       strict)
         [[ -n "${STRICT_VAL_JSONL}" ]] || die "Strict input is not prepared."
         input_jsonl="${STRICT_VAL_JSONL}"
+        ;;
+      strict_train)
+        [[ -n "${STRICT_TRAIN_JSONL}" ]] || die "Strict train input is not prepared."
+        input_jsonl="${STRICT_TRAIN_JSONL}"
+        ;;
+      strict_validation)
+        [[ -n "${STRICT_VAL_JSONL}" ]] || die "Strict validation input is not prepared."
+        input_jsonl="${STRICT_VAL_JSONL}"
+        ;;
+      strict_test)
+        [[ -n "${STRICT_TEST_JSONL}" ]] || die "Strict test input is not prepared."
+        input_jsonl="${STRICT_TEST_JSONL}"
         ;;
       *)
         die "Unknown input kind in run spec: ${input_kind}"
@@ -561,7 +868,7 @@ print_summary_table() {
   local tmp_specs_file
   tmp_results_file="$(mktemp /tmp/phasea_group_results_XXXXXX.txt)"
   tmp_specs_file="$(mktemp /tmp/phasea_group_specs_XXXXXX.txt)"
-  trap 'rm -f "${tmp_results_file}" "${tmp_specs_file}"' RETURN
+  trap 'rm -f "${tmp_results_file:-}" "${tmp_specs_file:-}"' RETURN
 
   printf '%s\n' "${RESULT_LINES[@]}" > "${tmp_results_file}"
   printf '%s\n' "${GROUP_RUN_SPECS[@]}" > "${tmp_specs_file}"
@@ -571,6 +878,7 @@ print_summary_table() {
   PHASEA_GROUP_INTENTION="${GROUP_INTENTION}" \
   PHASEA_GROUP_OBSERVE="${GROUP_OBSERVE}" \
   PHASEA_GROUP_EXPECTATION="${GROUP_EXPECTATION}" \
+  PHASEA_GROUP_ENABLE_WHOLE_AGG="${GROUP_ENABLE_WHOLE_AGG}" \
   PHASEA_RUN_PREFIX="${RUN_PREFIX}" \
   PHASEA_DATASET="${DATASET}" \
   PHASEA_SOURCE_SPLIT="${SOURCE_SPLIT}" \
@@ -582,6 +890,11 @@ print_summary_table() {
   PHASEA_MAX_PROGRESS_LINES="${MAX_PROGRESS_LINES}" \
   PHASEA_BATCH_SIZE="${BATCH_SIZE}" \
   PHASEA_OOM_BACKOFF="${OOM_BACKOFF}" \
+  PHASEA_TRUNCATION_RECOVERY="${TRUNCATION_RECOVERY}" \
+  PHASEA_TRUNCATION_RECOVERY_ROUNDS="${TRUNCATION_RECOVERY_ROUNDS}" \
+  PHASEA_TRUNCATION_RECOVERY_EXTRA_TOKENS="${TRUNCATION_RECOVERY_EXTRA_TOKENS}" \
+  PHASEA_TRUNCATION_RECOVERY_DATASETS="${TRUNCATION_RECOVERY_DATASETS}" \
+  PHASEA_TRUNCATION_RECOVERY_REQUIRE_FINAL_SIGNAL="${TRUNCATION_RECOVERY_REQUIRE_FINAL_SIGNAL}" \
   PHASEA_STRATEGYQA_DECODE_MODE="${STRATEGYQA_DECODE_MODE}" \
   PHASEA_TRUNCATE_CHAT_MARKERS="${TRUNCATE_CHAT_MARKERS}" \
   PHASEA_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
@@ -592,9 +905,15 @@ print_summary_table() {
   PHASEA_COT_TARGET_STYLE="${COT_TARGET_STYLE}" \
   PHASEA_STRICT_TEMPLATE_ID="${STRICT_TEMPLATE_ID}" \
   PHASEA_STRICT_TARGET_STYLE="${STRICT_TARGET_STYLE}" \
+  PHASEA_DIRECT_TRAIN_JSONL="${DIRECT_TRAIN_JSONL}" \
   PHASEA_DIRECT_VAL_JSONL="${DIRECT_VAL_JSONL}" \
+  PHASEA_DIRECT_TEST_JSONL="${DIRECT_TEST_JSONL}" \
+  PHASEA_COT_TRAIN_JSONL="${COT_TRAIN_JSONL}" \
   PHASEA_COT_VAL_JSONL="${COT_VAL_JSONL}" \
+  PHASEA_COT_TEST_JSONL="${COT_TEST_JSONL}" \
+  PHASEA_STRICT_TRAIN_JSONL="${STRICT_TRAIN_JSONL}" \
   PHASEA_STRICT_VAL_JSONL="${STRICT_VAL_JSONL}" \
+  PHASEA_STRICT_TEST_JSONL="${STRICT_TEST_JSONL}" \
   PHASEA_SUITE_LOG_FILE="${SUITE_LOG_FILE:-<disabled>}" \
   PHASEA_SUITE_SUMMARY_FILE="${SUITE_SUMMARY_FILE}" \
   "${PYTHON_BIN}" - "${tmp_results_file}" "${tmp_specs_file}" <<'PY'
@@ -603,6 +922,21 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+
+def _bootstrap_src_path() -> None:
+    repo_root = Path.cwd()
+    src_dir = repo_root / "src"
+    if str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
+
+
+_bootstrap_src_path()
+
+from ours.phase_a.instability import (
+    compute_pairwise_prediction_flip,
+    index_rows_by_sample_id,
+    summarize_strategyqa_instability,
+)
 
 results_path = Path(sys.argv[1])
 specs_path = Path(sys.argv[2])
@@ -615,6 +949,8 @@ group_expectation = os.environ["PHASEA_GROUP_EXPECTATION"]
 summary_path = Path(os.environ["PHASEA_SUITE_SUMMARY_FILE"])
 
 rows = []
+instability_by_label = {}
+sample_index_by_label = {}
 for raw in results_path.read_text(encoding="utf-8").splitlines():
     if not raw.strip():
         continue
@@ -624,20 +960,23 @@ for raw in results_path.read_text(encoding="utf-8").splitlines():
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     scored_path = run_dir / "scored_predictions.jsonl"
 
+    scored_rows = []
     parsed = []
     for line in scored_path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
+        scored_rows.append(row)
         if not bool(row.get("parse_error", False)):
             parsed.append(row)
-    acc_parsed = (
-        sum(1 for r in parsed if bool(r.get("is_correct", False))) / len(parsed)
-        if parsed
-        else 0.0
-    )
+    inst = summarize_strategyqa_instability(scored_rows)
+    instability_by_label[label] = inst
+    sample_index_by_label[label] = index_rows_by_sample_id(scored_rows)
+    parseable_correct = sum(1 for r in parsed if bool(r.get("is_correct", False)))
+    acc_parsed = (parseable_correct / len(parsed)) if parsed else 0.0
 
     gen_cfg = manifest.get("generation_config", {})
+    gen_stats = metrics.get("generation_stats", {}) if isinstance(metrics.get("generation_stats"), dict) else {}
     comparison = metrics.get("comparison", {}) if isinstance(metrics.get("comparison"), dict) else {}
     delta_acc = comparison.get("delta_accuracy")
     delta_parse = comparison.get("delta_parse_error_rate")
@@ -649,13 +988,26 @@ for raw in results_path.read_text(encoding="utf-8").splitlines():
             "run_dir": str(run_dir),
             "max_new_tokens": int(gen_cfg.get("max_new_tokens", 0)),
             "n": int(metrics.get("n_total", 0)),
+            "n_correct": int(metrics.get("n_correct", 0)),
+            "n_parse_error": int(metrics.get("n_parse_error", 0)),
             "acc": float(metrics.get("accuracy", 0.0)),
             "parse_err": float(metrics.get("parse_error_rate", 0.0)),
             "parseable_n": len(parsed),
+            "parseable_correct": int(parseable_correct),
             "acc_parseable": float(acc_parsed),
             "delta_acc": delta_acc,
             "delta_parse": delta_parse,
             "changed": changed,
+            "vram_mean_gib": (
+                float(gen_stats.get("vram_mean_total_reserved_gib_sampled"))
+                if gen_stats.get("vram_mean_total_reserved_gib_sampled") is not None
+                else None
+            ),
+            "vram_max_gib": (
+                float(gen_stats.get("vram_max_total_reserved_gib_sampled"))
+                if gen_stats.get("vram_max_total_reserved_gib_sampled") is not None
+                else None
+            ),
         }
     )
 
@@ -673,6 +1025,8 @@ for raw in specs_path.read_text(encoding="utf-8").splitlines():
             "compare_mode": compare_mode,
         }
     )
+
+spec_compare_mode_by_label = {s["label"]: s["compare_mode"] for s in spec_rows}
 
 best_acc = max(rows, key=lambda r: r["acc"]) if rows else None
 best_parse = min(rows, key=lambda r: r["parse_err"]) if rows else None
@@ -700,6 +1054,11 @@ out_lines.append(f"log_every         : {os.environ['PHASEA_LOG_EVERY']}")
 out_lines.append(f"max_progress_lines: {os.environ['PHASEA_MAX_PROGRESS_LINES']}")
 out_lines.append(f"batch_size        : {os.environ['PHASEA_BATCH_SIZE']}")
 out_lines.append(f"oom_backoff       : {os.environ['PHASEA_OOM_BACKOFF']}")
+out_lines.append(f"trunc_recovery    : {os.environ['PHASEA_TRUNCATION_RECOVERY']}")
+out_lines.append(f"trunc_recov_rounds: {os.environ['PHASEA_TRUNCATION_RECOVERY_ROUNDS']}")
+out_lines.append(f"trunc_recov_extra : {os.environ['PHASEA_TRUNCATION_RECOVERY_EXTRA_TOKENS']}")
+out_lines.append(f"trunc_recov_data  : {os.environ['PHASEA_TRUNCATION_RECOVERY_DATASETS']}")
+out_lines.append(f"trunc_recov_reqfa : {os.environ['PHASEA_TRUNCATION_RECOVERY_REQUIRE_FINAL_SIGNAL']}")
 out_lines.append(f"strategyqa_decode : {os.environ['PHASEA_STRATEGYQA_DECODE_MODE']}")
 out_lines.append(f"truncate_markers  : {os.environ['PHASEA_TRUNCATE_CHAT_MARKERS']}")
 out_lines.append(f"cuda_devices      : {os.environ['PHASEA_CUDA_VISIBLE_DEVICES']}")
@@ -716,15 +1075,34 @@ out_lines.append(
     "strict_template  : "
     f"{os.environ['PHASEA_STRICT_TEMPLATE_ID']} ({os.environ['PHASEA_STRICT_TARGET_STYLE']})"
 )
-direct_path = os.environ.get("PHASEA_DIRECT_VAL_JSONL", "")
-cot_path = os.environ.get("PHASEA_COT_VAL_JSONL", "")
-strict_path = os.environ.get("PHASEA_STRICT_VAL_JSONL", "")
-if direct_path:
-    out_lines.append(f"direct_input      : {direct_path}")
-if cot_path:
-    out_lines.append(f"cot_input         : {cot_path}")
-if strict_path:
-    out_lines.append(f"strict_input      : {strict_path}")
+direct_train = os.environ.get("PHASEA_DIRECT_TRAIN_JSONL", "")
+direct_val = os.environ.get("PHASEA_DIRECT_VAL_JSONL", "")
+direct_test = os.environ.get("PHASEA_DIRECT_TEST_JSONL", "")
+cot_train = os.environ.get("PHASEA_COT_TRAIN_JSONL", "")
+cot_val = os.environ.get("PHASEA_COT_VAL_JSONL", "")
+cot_test = os.environ.get("PHASEA_COT_TEST_JSONL", "")
+strict_train = os.environ.get("PHASEA_STRICT_TRAIN_JSONL", "")
+strict_val = os.environ.get("PHASEA_STRICT_VAL_JSONL", "")
+strict_test = os.environ.get("PHASEA_STRICT_TEST_JSONL", "")
+
+if direct_train:
+    out_lines.append(f"direct_train_input: {direct_train}")
+if direct_val:
+    out_lines.append(f"direct_val_input  : {direct_val}")
+if direct_test:
+    out_lines.append(f"direct_test_input : {direct_test}")
+if cot_train:
+    out_lines.append(f"cot_train_input   : {cot_train}")
+if cot_val:
+    out_lines.append(f"cot_val_input     : {cot_val}")
+if cot_test:
+    out_lines.append(f"cot_test_input    : {cot_test}")
+if strict_train:
+    out_lines.append(f"strict_train_input: {strict_train}")
+if strict_val:
+    out_lines.append(f"strict_val_input  : {strict_val}")
+if strict_test:
+    out_lines.append(f"strict_test_input : {strict_test}")
 out_lines.append(f"suite_log_file    : {os.environ.get('PHASEA_SUITE_LOG_FILE', '<disabled>')}")
 out_lines.append(f"summary_file      : {summary_path}")
 out_lines.append("-" * 138)
@@ -739,19 +1117,107 @@ out_lines.append("-" * 138)
 out_lines.append("RESULT TABLE")
 out_lines.append(
     f"{'label':<22} {'tok':>4} {'n':>5} {'acc':>8} {'parse_err':>10} "
-    f"{'parseable_n':>11} {'acc_parseable':>13} {'delta_acc':>10} {'changed':>8}"
+    f"{'parseable_n':>11} {'acc_parseable':>13} {'vram_mean':>10} {'vram_max':>10} "
+    f"{'delta_acc':>10} {'changed':>8}"
 )
 out_lines.append("-" * 138)
 for row in rows:
     delta_acc = f"{row['delta_acc']:+.4f}" if row["delta_acc"] is not None else "n/a"
     changed = str(row["changed"]) if row["changed"] is not None else "n/a"
+    vram_mean = f"{row['vram_mean_gib']:.2f}" if row["vram_mean_gib"] is not None else "n/a"
+    vram_max = f"{row['vram_max_gib']:.2f}" if row["vram_max_gib"] is not None else "n/a"
     out_lines.append(
         f"{row['label']:<22} {row['max_new_tokens']:>4d} {row['n']:>5d} "
         f"{row['acc']:>8.4f} {row['parse_err']:>10.4f} "
         f"{row['parseable_n']:>11d} {row['acc_parseable']:>13.4f} "
+        f"{vram_mean:>10} {vram_max:>10} "
         f"{delta_acc:>10} {changed:>8}"
     )
 out_lines.append("-" * 138)
+out_lines.append("INSTABILITY INDICATORS (ARTIFACT ANALYSIS)")
+out_lines.append(
+    f"{'label':<22} {'tagged':>8} {'multi_tag':>10} {'first_last_flip':>15} "
+    f"{'tag_switch':>11} {'mean_tags':>10}"
+)
+out_lines.append("-" * 138)
+for row in rows:
+    inst = instability_by_label.get(row["label"], {})
+    out_lines.append(
+        f"{row['label']:<22} "
+        f"{float(inst.get('with_final_tag_rate', 0.0)):>8.4f} "
+        f"{float(inst.get('multi_final_tag_rate', 0.0)):>10.4f} "
+        f"{float(inst.get('first_last_disagree_rate', 0.0)):>15.4f} "
+        f"{float(inst.get('tag_switch_rate', 0.0)):>11.4f} "
+        f"{float(inst.get('mean_final_tag_count_tagged', 0.0)):>10.2f}"
+    )
+out_lines.append("-" * 138)
+
+pairwise_rows = []
+for i in range(len(rows)):
+    for j in range(i + 1, len(rows)):
+        label_a = rows[i]["label"]
+        label_b = rows[j]["label"]
+        flip = compute_pairwise_prediction_flip(
+            sample_index_by_label.get(label_a, {}),
+            sample_index_by_label.get(label_b, {}),
+        )
+        if int(flip.get("n_overlap", 0)) <= 0:
+            continue
+        pairwise_rows.append(
+            {
+                "label_a": label_a,
+                "label_b": label_b,
+                **flip,
+            }
+        )
+
+if pairwise_rows:
+    out_lines.append("PAIRWISE FLIP ANALYSIS (OVERLAPPING SAMPLE_IDS)")
+    out_lines.append(
+        f"{'run_a':<24} {'run_b':<24} {'overlap':>8} {'pred_flip':>10} "
+        f"{'corr_flip':>10} {'yes->no':>8} {'no->yes':>8}"
+    )
+    out_lines.append("-" * 138)
+    for item in pairwise_rows:
+        out_lines.append(
+            f"{item['label_a']:<24} {item['label_b']:<24} "
+            f"{int(item.get('n_overlap', 0)):>8d} "
+            f"{float(item.get('pred_flip_rate', 0.0)):>10.4f} "
+            f"{float(item.get('correctness_flip_rate', 0.0)):>10.4f} "
+            f"{int(item.get('n_yes_to_no', 0)):>8d} "
+            f"{int(item.get('n_no_to_yes', 0)):>8d}"
+        )
+    out_lines.append("-" * 138)
+
+if os.environ.get("PHASEA_GROUP_ENABLE_WHOLE_AGG", "0") == "1" and rows:
+    primary_rows = [
+        r
+        for r in rows
+        if spec_compare_mode_by_label.get(r["label"], "no") != "yes"
+    ]
+    agg_n = sum(r["n"] for r in primary_rows)
+    agg_correct = sum(r["n_correct"] for r in primary_rows)
+    agg_parse_err_n = sum(r["n_parse_error"] for r in primary_rows)
+    agg_parseable_n = sum(r["parseable_n"] for r in primary_rows)
+    agg_parseable_correct = sum(r["parseable_correct"] for r in primary_rows)
+    agg_acc = (agg_correct / agg_n) if agg_n else 0.0
+    agg_parse_err_rate = (agg_parse_err_n / agg_n) if agg_n else 0.0
+    agg_acc_parseable = (
+        agg_parseable_correct / agg_parseable_n if agg_parseable_n else 0.0
+    )
+    out_lines.append("WHOLE-CORPUS AGGREGATE")
+    out_lines.append(
+        f"included_runs={len(primary_rows)} (compare=no only, reproducibility reruns excluded)"
+    )
+    out_lines.append(
+        f"n_total={agg_n} | n_correct={agg_correct} | n_parse_error={agg_parse_err_n} | "
+        f"n_parseable={agg_parseable_n}"
+    )
+    out_lines.append(
+        f"accuracy={agg_acc:.4f} | parse_error_rate={agg_parse_err_rate:.4f} | "
+        f"acc_parseable={agg_acc_parseable:.4f}"
+    )
+    out_lines.append("-" * 138)
 if best_acc is not None:
     out_lines.append(
         "best_accuracy     : "
@@ -778,6 +1244,7 @@ main() {
   log "Run prefix     : ${RUN_PREFIX}"
   log "Log settings   : log_every=${LOG_EVERY}, max_progress_lines=${MAX_PROGRESS_LINES}"
   log "Batch settings : batch_size=${BATCH_SIZE}, oom_backoff=${OOM_BACKOFF}"
+  log "Trunc settings : enabled=${TRUNCATION_RECOVERY}, rounds=${TRUNCATION_RECOVERY_ROUNDS}, extra_tokens=${TRUNCATION_RECOVERY_EXTRA_TOKENS}, datasets=${TRUNCATION_RECOVERY_DATASETS}, require_final_signal=${TRUNCATION_RECOVERY_REQUIRE_FINAL_SIGNAL}"
   if [[ "${ENABLE_PERSISTED_LOGS}" == "1" ]]; then
     log "Suite log file : ${SUITE_LOG_FILE}"
   else

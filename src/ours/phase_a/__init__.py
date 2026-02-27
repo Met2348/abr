@@ -22,6 +22,12 @@ from .prompt_builder import (
     list_template_versions,
     resolve_template,
 )
+from .instability import (
+    compute_pairwise_prediction_flip,
+    extract_final_answer_sequence,
+    index_rows_by_sample_id,
+    summarize_strategyqa_instability,
+)
 from .splitting import SplitConfig, assign_split, split_ids
 
 __all__ = [
@@ -44,4 +50,8 @@ __all__ = [
     "list_template_versions",
     "resolve_template",
     "build_prepared_sample",
+    "extract_final_answer_sequence",
+    "summarize_strategyqa_instability",
+    "index_rows_by_sample_id",
+    "compute_pairwise_prediction_flip",
 ]

@@ -79,10 +79,29 @@ python -u scripts/phase_a_generate_and_eval.py \
   --max-new-tokens 64
 ```
 
+Run output and `metrics.json` now include sampled VRAM usage stats (`vram_mean_gib`, `vram_max_gib`) for reporting.
+
+Truncation recovery is enabled by default for math datasets (`gsm8k`, `hendrycks_math`).
+You can tune it with:
+- `--truncation-recovery-rounds`
+- `--truncation-recovery-extra-tokens`
+- `--truncation-recovery-datasets`
+- `--no-truncation-recovery`
+
 Run one-click benchmark suite:
 
 ```bash
 bash scripts/run_phase_a_benchmark_suite.sh
+```
+
+Suite final summaries now include artifact-only instability diagnostics under
+`RESULT TABLE` (multi-tag rate, first/last tag disagreement, tag-switch rate, pairwise flip rate).
+
+Standalone artifact analysis (no re-inference):
+
+```bash
+python scripts/phase_a_analyze_instability.py \
+  --run-dirs assets/artifacts/phase_a_runs/<run_dir_a> assets/artifacts/phase_a_runs/<run_dir_b>
 ```
 
 Prompt-style sweeps:
@@ -90,7 +109,15 @@ Prompt-style sweeps:
 ```bash
 ACTIVE_PARAM_GROUP=A7 RUN_PREFIX=strategyqa_style_sweep bash scripts/run_phase_a_benchmark_suite.sh
 ACTIVE_PARAM_GROUP=A8 RUN_PREFIX=gsm8k_style_sweep bash scripts/run_phase_a_benchmark_suite.sh
+# Whole-corpus StrategyQA review (train+validation+test aggregate)
+ACTIVE_PARAM_GROUP=A11 RUN_PREFIX=strategyqa_whole_2290 bash scripts/run_phase_a_benchmark_suite.sh
+# StrategyQA token-stress variant (example)
+ACTIVE_PARAM_GROUP=A11_256 RUN_PREFIX=strategyqa_whole_t256 bash scripts/run_phase_a_benchmark_suite.sh
+# Whole-corpus GSM8K review (train+validation+test aggregate)
+ACTIVE_PARAM_GROUP=A12 RUN_PREFIX=gsm8k_whole_corpus bash scripts/run_phase_a_benchmark_suite.sh
 ```
+
+For whole-corpus groups (`A11`/`A12`), env runtime overrides such as `BATCH_SIZE=...` are honored.
 
 ## Phase B Public Entry Points
 

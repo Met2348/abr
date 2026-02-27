@@ -262,7 +262,98 @@ def test_generate_freeform_rows_once_uses_left_padding_and_restores_tokenizer_si
     assert tok.seen_padding_sides == ["left"]
     assert tok.padding_side == "right"
     assert len(outputs) == 2
-    assert all(item[0] == "13" for item in outputs)
+    assert all(item.raw_prediction == "13" for item in outputs)
+
+
+def test_needs_truncation_recovery_requires_hit_cap_and_missing_signal() -> None:
+    module = _load_phase_a_generate_module()
+
+    cfg = module.TruncationRecoveryConfig(
+        enabled=True,
+        max_rounds=2,
+        extra_tokens_per_round=32,
+        datasets=("gsm8k",),
+        require_final_answer_signal=True,
+    )
+    needs = module._needs_truncation_recovery(
+        dataset="gsm8k",
+        result=module.FreeformGenerationResult(
+            raw_prediction="Reasoning without final line",
+            generated_token_count=64,
+            hit_token_limit=True,
+        ),
+        truncation_recovery_cfg=cfg,
+    )
+    assert needs is True
+
+    no_need = module._needs_truncation_recovery(
+        dataset="gsm8k",
+        result=module.FreeformGenerationResult(
+            raw_prediction="Final answer: 42",
+            generated_token_count=64,
+            hit_token_limit=True,
+        ),
+        truncation_recovery_cfg=cfg,
+    )
+    assert no_need is False
+
+
+def test_apply_truncation_recovery_appends_continuation(monkeypatch) -> None:
+    module = _load_phase_a_generate_module()
+
+    rows = [
+        {
+            "sample_id": "gsm8k:r1",
+            "dataset": "gsm8k",
+            "split": "validation",
+            "prompt_text": "Q\\n[ASSISTANT]\\n",
+            "answer": "7",
+            "question": "q",
+        }
+    ]
+    outputs = [
+        module.FreeformGenerationResult(
+            raw_prediction="working",
+            generated_token_count=32,
+            hit_token_limit=True,
+        )
+    ]
+
+    def _fake_generate_once(**kwargs):
+        del kwargs
+        return [
+            module.FreeformGenerationResult(
+                raw_prediction="Final answer: 7",
+                generated_token_count=5,
+                hit_token_limit=False,
+            )
+        ]
+
+    monkeypatch.setattr(module, "_generate_freeform_rows_once", _fake_generate_once)
+
+    recovered = module._apply_truncation_recovery_if_needed(
+        rows=rows,
+        outputs=outputs,
+        model=object(),
+        tokenizer=object(),
+        gen_cfg=module.GenerationConfig(max_new_tokens=32, do_sample=False),
+        pad_id=0,
+        truncate_chat_markers=True,
+        torch_module=object(),
+        truncation_recovery_cfg=module.TruncationRecoveryConfig(
+            enabled=True,
+            max_rounds=2,
+            extra_tokens_per_round=32,
+            datasets=("gsm8k",),
+            require_final_answer_signal=True,
+        ),
+    )
+
+    assert len(recovered) == 1
+    rec = recovered[0]
+    assert rec.truncation_recovery_applied is True
+    assert rec.truncation_recovery_rounds == 1
+    assert "Final answer: 7" in rec.raw_prediction
 
 
 def test_load_prepared_rows_rejects_duplicate_sample_ids(tmp_path: Path) -> None:

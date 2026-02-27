@@ -2,6 +2,373 @@
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
 
+## 2026-02-28 02:06:01 +08 (+0800)
+- Type: Phase A Instability Analysis Integration
+- Summary: Added artifact-only instability analysis tooling and integrated automatic instability sections into suite final summaries directly below `RESULT TABLE`.
+- Details:
+  - Added `src/ours/phase_a/instability.py`:
+    - final-answer tag sequence extraction for yes/no tags,
+    - per-run instability metrics (`multi_tag`, `first_last_disagree`, `tag_switch`),
+    - pairwise overlap/flip analysis helpers.
+  - Added `scripts/phase_a_analyze_instability.py`:
+    - artifact-only analyzer for existing `scored_predictions.jsonl`,
+    - supports multi-run pairwise analysis,
+    - optional JSON/Markdown outputs for reports.
+  - Updated `src/ours/phase_a/__init__.py` exports for instability helpers.
+  - Updated `scripts/run_phase_a_benchmark_suite.sh` final summary renderer:
+    - computes instability metrics from each run’s scored artifact,
+    - prints `INSTABILITY INDICATORS (ARTIFACT ANALYSIS)` immediately under `RESULT TABLE`,
+    - prints `PAIRWISE FLIP ANALYSIS` when runs share sample IDs.
+  - Added unit tests: `tests/unit/test_phase_a_instability.py`.
+  - Updated docs:
+    - `readme_full.md`: detailed usage and command recipes for artifact analysis.
+    - `readme.md`: concise public note and standalone command.
+- Validation:
+  - `bash -n scripts/run_phase_a_benchmark_suite.sh` passed.
+  - `python -m py_compile scripts/phase_a_analyze_instability.py src/ours/phase_a/instability.py` passed.
+  - `python -m pytest -q tests/unit/test_phase_a_instability.py tests/unit/test_phase_a_generate_script.py` passed.
+- Files changed:
+  - `src/ours/phase_a/instability.py`
+  - `scripts/phase_a_analyze_instability.py`
+  - `src/ours/phase_a/__init__.py`
+  - `scripts/run_phase_a_benchmark_suite.sh`
+  - `tests/unit/test_phase_a_instability.py`
+  - `readme_full.md`
+  - `readme.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-02-28 01:01:20 +08 (+0800)
+- Type: Phase A Telemetry Upgrade / VRAM Reporting
+- Summary: Added per-run GPU VRAM telemetry (mean/max) to generation outputs and suite summaries for PPT-friendly reporting.
+- Details:
+  - Updated `scripts/phase_a_generate_and_eval.py`:
+    - extended `GenerationStats` with VRAM fields:
+      - sampled total reserved/allocated mean and max,
+      - per-device sampled means and peak memory stats,
+    - implemented lightweight VRAM tracker:
+      - initializes once per generation run,
+      - samples once per processed batch,
+      - finalizes with per-device peaks via CUDA memory counters,
+    - console output now prints:
+      - `vram_mean_gib`,
+      - `vram_max_gib`,
+    - metrics now persist VRAM telemetry under:
+      - `metrics.json -> generation_stats`.
+  - Updated `scripts/run_phase_a_benchmark_suite.sh` summary renderer:
+    - extracts VRAM stats from each run metrics,
+    - adds `vram_mean` and `vram_max` columns to result table.
+  - Updated docs:
+    - `readme_full.md`: detailed note on VRAM metrics and where to find per-device stats.
+    - `readme.md`: concise note that run outputs include VRAM stats.
+- Validation:
+  - `python -m py_compile scripts/phase_a_generate_and_eval.py` passed.
+  - `bash -n scripts/run_phase_a_benchmark_suite.sh` passed.
+  - `python -m pytest -q tests/unit/test_phase_a_generate_script.py` passed.
+- Files changed:
+  - `scripts/phase_a_generate_and_eval.py`
+  - `scripts/run_phase_a_benchmark_suite.sh`
+  - `readme_full.md`
+  - `readme.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-02-28 00:48:06 +08 (+0800)
+- Type: Phase A Suite Extension / A11 Token-Stress Subgroups
+- Summary: Added `A11x` StrategyQA whole-corpus token-stress subgroups for CoT decode budgets `128/256/384/512/1024`, with long-run-safe defaults and explicit comments.
+- Details:
+  - Updated `scripts/run_phase_a_benchmark_suite.sh`:
+    - added helper `configure_a11_token_stress_variant(max_new_tokens, default_batch_size)` to avoid duplicated setup logic,
+    - added new groups:
+      - `A11_128`,
+      - `A11_256`,
+      - `A11_384`,
+      - `A11_512`,
+      - `A11_1024`,
+    - each subgroup:
+      - uses StrategyQA full-corpus settings (`LIMIT=None`, hash split),
+      - runs `train/validation/test` once each (no extra repro run by default to control runtime),
+      - enables whole-corpus weighted aggregate in summary,
+      - keeps truncation safeguards enabled,
+      - applies adaptive default batch size by token budget:
+        - `64 / 32 / 24 / 16 / 8` respectively,
+      - preserves user env override precedence (`BATCH_SIZE`, `TRUNCATION_RECOVERY_*`, etc.).
+    - updated unsupported-group help text with all new subgroup IDs.
+  - Updated docs:
+    - `readme_full.md`:
+      - added subgroup descriptions, commands, and adaptive batch-size notes.
+    - `readme.md`:
+      - added concise token-stress command example (`A11_256`).
+- Validation:
+  - `bash -n scripts/run_phase_a_benchmark_suite.sh` passed.
+- Files changed:
+  - `scripts/run_phase_a_benchmark_suite.sh`
+  - `readme_full.md`
+  - `readme.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-02-28 00:37:54 +08 (+0800)
+- Type: Phase A Suite UX Tuning / Whole-Corpus Progress Logging
+- Summary: Increased default progress-line budget for long whole-corpus groups (`A11`, `A12`) from 5 to 50 lines.
+- Details:
+  - Updated `scripts/run_phase_a_benchmark_suite.sh`:
+    - added `USER_SET_MAX_PROGRESS_LINES` env-detection guard,
+    - in `A11` and `A12`, set default `MAX_PROGRESS_LINES=50` only when user did not explicitly set `MAX_PROGRESS_LINES`,
+    - preserves existing override precedence behavior.
+  - Updated `readme_full.md` to document new default for whole-corpus groups.
+- Validation:
+  - `bash -n scripts/run_phase_a_benchmark_suite.sh` passed.
+- Files changed:
+  - `scripts/run_phase_a_benchmark_suite.sh`
+  - `readme_full.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-02-28 00:31:42 +08 (+0800)
+- Type: Phase A Suite Behavior Fix / Runtime Override Precedence
+- Summary: Fixed A11/A12 so user-provided env runtime knobs (notably `BATCH_SIZE`) are no longer overridden by group defaults.
+- Details:
+  - Updated `scripts/run_phase_a_benchmark_suite.sh`:
+    - tracks whether user explicitly set runtime env vars:
+      - `BATCH_SIZE`,
+      - `OOM_BACKOFF`,
+      - truncation-recovery controls,
+    - added helper `set_default_if_not_user_set`,
+    - applied helper in `A11` and `A12` group config so defaults are used only when user did not set these vars.
+  - This resolves the observed mismatch where running:
+    - `BATCH_SIZE=128 ACTIVE_PARAM_GROUP=A12 ...`
+    - still printed `batch_size : 16`.
+  - Updated docs:
+    - `readme_full.md` and `readme.md` now state that `A11`/`A12` honor env runtime overrides.
+- Validation:
+  - `bash -n scripts/run_phase_a_benchmark_suite.sh` passed.
+- Files changed:
+  - `scripts/run_phase_a_benchmark_suite.sh`
+  - `readme_full.md`
+  - `readme.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-02-28 00:24:33 +08 (+0800)
+- Type: Phase A Benchmark Suite Extension / GSM8K Whole-Corpus Group
+- Summary: Added `A12` param group for full GSM8K whole-corpus evaluation with split-wise runs and weighted aggregate summary.
+- Details:
+  - Updated `scripts/run_phase_a_benchmark_suite.sh`:
+    - new param group `A12`:
+      - dataset: `gsm8k`,
+      - template: `qa_gsm8k_cot_compact_final`,
+      - target style: `cot_then_answer`,
+      - token budget: `192`,
+      - speed + safety defaults:
+        - `batch_size=16`,
+        - `oom_backoff=1`,
+        - truncation recovery enabled for `gsm8k,hendrycks_math`,
+      - run specs:
+        - `train`, `validation`, `test`,
+        - reproducibility rerun on `validation`,
+      - whole-corpus aggregate reuses compare=`no` rows only.
+    - updated supported group list to include `A12`.
+  - Updated docs:
+    - `readme_full.md`:
+      - param range now `A1~A12`,
+      - added `A12` description and command.
+    - `readme.md`:
+      - added concise `A12` run command in public quick commands.
+- Validation:
+  - `bash -n scripts/run_phase_a_benchmark_suite.sh` passed.
+- Files changed:
+  - `scripts/run_phase_a_benchmark_suite.sh`
+  - `readme_full.md`
+  - `readme.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-02-28 00:16:12 +08 (+0800)
+- Type: Phase A Benchmark Suite Upgrade / Whole-Corpus Param Block
+- Summary: Added a new one-click whole-corpus StrategyQA review group (`A11`) with split-wise runs (train/validation/test), weighted aggregate reporting, and high-throughput safe defaults.
+- Details:
+  - Updated `scripts/run_phase_a_benchmark_suite.sh`:
+    - added `A11` param group:
+      - dataset: `strategyqa`,
+      - template: `qa_strategyqa_cot_compact`,
+      - target style: `cot_then_answer`,
+      - token budget: `96`,
+      - runs: `train`, `validation`, `test`, plus deterministic repro rerun on `train`,
+      - defaults tuned for speed + safety:
+        - `batch_size=8`,
+        - `oom_backoff=1`,
+        - truncation recovery enabled with dataset list including `strategyqa`.
+    - expanded input routing to support split-specific input kinds:
+      - `*_train`, `*_validation`, `*_test` for direct/cot/strict.
+    - prepared-input resolution now captures all split files (`train.jsonl`, `validation.jsonl`, `test.jsonl`) per template slot.
+    - final summary now supports a weighted whole-corpus aggregate block:
+      - `n_total`,
+      - `n_correct`,
+      - `n_parse_error`,
+      - `n_parseable`,
+      - `accuracy`,
+      - `parse_error_rate`,
+      - `acc_parseable`.
+    - fixed cleanup bug at suite end under `set -u`:
+      - trap now safely handles unset temp-file variables.
+    - unsupported-group help text now includes `A11`.
+  - Updated docs:
+    - `readme_full.md`:
+      - param range changed to `A1~A11`,
+      - added `A11` description and one-click command.
+    - `readme.md`:
+      - added public command example for `A11`.
+- Validation:
+  - `bash -n scripts/run_phase_a_benchmark_suite.sh` passed.
+- Files changed:
+  - `scripts/run_phase_a_benchmark_suite.sh`
+  - `readme_full.md`
+  - `readme.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-02-27 22:43:10 +08 (+0800)
+- Type: Phase A Benchmark Suite Extension / Full-Dataset Best-Setting Groups
+- Summary: Added one-click full-dataset param groups for current best StrategyQA and GSM8K settings, and enabled `LIMIT=None/all` flow in suite preparation.
+- Details:
+  - Updated `scripts/run_phase_a_benchmark_suite.sh`:
+    - `prepare_variant` now omits `--limit` when `LIMIT` is one of:
+      - `None`, `none`, `all`, `ALL`, or empty string,
+    - `resolve_prepared_dir` now treats those same tokens as `limit=None`,
+    - added new param groups:
+      - `A9` = StrategyQA full-data best setting:
+        - `qa_strategyqa_cot_compact`, `cot_then_answer`, `max_new_tokens=96`,
+        - includes deterministic rerun pair (`r1`, `r2`),
+      - `A10` = GSM8K full-data best setting:
+        - `qa_gsm8k_cot_compact_final`, `cot_then_answer`, `max_new_tokens=192`,
+        - includes deterministic rerun pair (`r1`, `r2`),
+    - updated unsupported-group help text to include `A9`, `A10`.
+  - Updated `readme_full.md`:
+    - param-group range from `A1~A8` to `A1~A10`,
+    - added intent notes for `A9`/`A10`,
+    - added one-click commands for both full-data groups,
+    - documented full-data override usage with `LIMIT=None` or `LIMIT=all`.
+- Validation:
+  - `bash -n scripts/run_phase_a_benchmark_suite.sh` passed.
+- Files changed:
+  - `scripts/run_phase_a_benchmark_suite.sh`
+  - `readme_full.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-02-27 20:55:01 +08 (+0800)
+- Type: Phase A Inference Hardening / Truncation Recovery Implementation
+- Summary: Implemented continuation-based truncation recovery in generation pipeline, integrated controls into benchmark suite, and documented usage for reproducible reruns.
+- Details:
+  - Updated `scripts/phase_a_generate_and_eval.py`:
+    - added truncation-recovery CLI controls:
+      - `--truncation-recovery`,
+      - `--truncation-recovery-rounds`,
+      - `--truncation-recovery-extra-tokens`,
+      - `--truncation-recovery-datasets`,
+      - `--truncation-recovery-require-final-answer-signal`,
+    - added `TruncationRecoveryConfig` and `FreeformGenerationResult`,
+    - implemented continuation-decoding recovery loop for cap-hit freeform outputs,
+    - added dataset-aware final-answer-signal gating (`gsm8k`, `hendrycks_math`, `strategyqa`),
+    - persisted recovery metadata into prediction rows:
+      - `truncation_recovery_applied`,
+      - `truncation_recovery_rounds`,
+    - extended generation stats:
+      - `truncation_recovery_rows`,
+      - `truncation_recovery_rounds`,
+    - exposed recovery settings in run logs and run manifest.
+  - Updated `scripts/run_phase_a_benchmark_suite.sh`:
+    - added env-level recovery controls:
+      - `TRUNCATION_RECOVERY`,
+      - `TRUNCATION_RECOVERY_ROUNDS`,
+      - `TRUNCATION_RECOVERY_EXTRA_TOKENS`,
+      - `TRUNCATION_RECOVERY_DATASETS`,
+      - `TRUNCATION_RECOVERY_REQUIRE_FINAL_SIGNAL`,
+    - wired the above into `phase_a_generate_and_eval.py` calls,
+    - included truncation-recovery settings in final summary output.
+  - Updated tests:
+    - `tests/unit/test_phase_a_generate_script.py`:
+      - adapted left-padding test for new result dataclass,
+      - added tests for recovery trigger logic and continuation append behavior.
+  - Updated docs:
+    - `readme.md`: public concise note for truncation-recovery flags.
+    - `readme_full.md`: detailed truncation-recovery behavior, suite env knobs, and concrete rerun commands.
+- Validation:
+  - `python -m pytest -q tests/unit/test_phase_a_generate_script.py tests/unit/test_phase_a_prompt_builder.py` passed (`16 passed`).
+  - `python -m py_compile scripts/phase_a_generate_and_eval.py` passed.
+  - `bash -n scripts/run_phase_a_benchmark_suite.sh` passed.
+- Files changed:
+  - `scripts/phase_a_generate_and_eval.py`
+  - `scripts/run_phase_a_benchmark_suite.sh`
+  - `tests/unit/test_phase_a_generate_script.py`
+  - `readme.md`
+  - `readme_full.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-02-27 20:44:41 +08 (+0800)
+- Type: Error Pattern Diagnosis / A8 Sample-Level Deep Dive
+- Summary: Added a detailed A8 GSM8K error-pattern analysis (sample-level) to isolate truncation, reasoning, and extraction-edge-case failures.
+- Details:
+  - Updated `result_records.md` with new subsection:
+    - error composition by extraction method (`final_answer_tag` vs `last_number`),
+    - truncation-style error signatures and representative sample IDs,
+    - reasoning/sign/conversion error examples,
+    - extraction undercount edge cases for expression-style final lines and repeated final tags,
+    - cross-style shared-hard subset insight (`31` IDs wrong across all A8 styles),
+    - concrete improvement implications for prompting + evaluator hardening.
+  - Updated `result_records.md` last-updated timestamp.
+- Files changed:
+  - `result_records.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-02-27 20:39:17 +08 (+0800)
+- Type: Experiment Diagnosis Update / A8 GSM8K Style Sweep
+- Summary: Added a full A8 diagnosis with cross-run comparison against previous GSM8K baselines, runtime tradeoff analysis, and next-step plan.
+- Details:
+  - Updated `result_records.md` with a new top section:
+    - A8 metric table (`direct_final_t32`, `cot_compact_t192`, `equation_t64`),
+    - comparison against prior GSM8K direct/CoT re-evaluation baselines,
+    - throughput/elapsed-time tradeoff summary,
+    - extraction-method diagnostics (`final_answer_tag` vs `last_number`) and implications,
+    - finalized conclusion for quality baseline vs speed baseline and recommended follow-up.
+  - Re-indexed older top-level diagnosis section numbering for chronology clarity.
+- Files changed:
+  - `result_records.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-02-27 20:31:59 +08 (+0800)
+- Type: Experiment Diagnosis Update / A7 Prompt Style Analysis
+- Summary: Logged A7 StrategyQA prompt-style sweep diagnosis, key lessons, reliability notes, and next-step plan in result records.
+- Details:
+  - Updated `result_records.md`:
+    - added new top diagnosis section for A7 run (`qa_strategyqa_minimal_binary`, `qa_strategyqa_cot_compact`, `qa_strategyqa_evidence_verdict`),
+    - recorded metric table and comparative interpretation,
+    - documented compliance-vs-quality tradeoff,
+    - highlighted verdict-style parse bottleneck as likely format/truncation issue,
+    - added concrete next-step plan for follow-up evaluation.
+  - Renamed prior section header to keep chronology clear:
+    - previous 2026-02-26 diagnosis moved under “Previous Diagnosis Update”.
+- Files changed:
+  - `result_records.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
 ## 2026-02-27 18:58:34 +08 (+0800)
 - Type: Documentation Policy Update / System Prompt Refresh
 - Summary: Added dual-README policy and command-recording requirements to persistent system prompts.

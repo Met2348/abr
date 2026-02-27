@@ -1208,3 +1208,356 @@ lowest_parse_err  : cot_t384 (parse_err=0.0518, acc=0.6995)
 333333333\\\\
 
 
+A7
+
+FINAL EXPERIMENT SUMMARY
+==========================================================================================================================================
+generated_at      : 2026-02-27T20:24:46.715315+08:00
+group_id          : A7
+group_title       : StrategyQA Prompt Style Sweep
+run_prefix        : strategyqa_style_sweep
+intention         : Compare three StrategyQA prompt styles under one reproducible setup.
+observe           : Check style ranking on accuracy, parse_error_rate, and generation speed.
+expectation       : Minimal-binary style should be cleanest; CoT style may help only if token budget is sufficient.
+------------------------------------------------------------------------------------------------------------------------------------------
+SETTINGS
+dataset           : strategyqa
+source_split      : train
+split_policy      : hash
+limit             : 2000
+seed              : 42
+dtype             : bfloat16
+log_every         : 5
+max_progress_lines: 5
+batch_size        : 1
+oom_backoff       : 1
+strategyqa_decode : freeform
+truncate_markers  : 1
+cuda_devices      : 1
+model_path        : assets/models/Qwen2.5-7B-Instruct
+direct_template  : qa_strategyqa_minimal_binary (answer_only)
+cot_template     : qa_strategyqa_cot_compact (cot_then_answer)
+strict_template  : qa_strategyqa_evidence_verdict (answer_only)
+direct_input      : assets/artifacts/phase_a_prepared/strategyqa/b98514da0ff4/validation.jsonl
+cot_input         : assets/artifacts/phase_a_prepared/strategyqa/ef2ae6864f9c/validation.jsonl
+strict_input      : assets/artifacts/phase_a_prepared/strategyqa/74916b892b6b/validation.jsonl
+suite_log_file    : assets/artifacts/phase_a_logs/strategyqa_style_sweep/suite.log
+summary_file      : assets/artifacts/phase_a_logs/strategyqa_style_sweep/final_summary.md
+------------------------------------------------------------------------------------------------------------------------------------------
+PLANNED RUN SPECS
+- label=style_minimal_t16 | input=direct | tok=16 | compare=no | run_name=strategyqa_style_sweep_style_minimal_t16
+- label=style_cot_compact_t96 | input=cot | tok=96 | compare=no | run_name=strategyqa_style_sweep_style_cot_compact_t96
+- label=style_evidence_verdict_t32 | input=strict | tok=32 | compare=no | run_name=strategyqa_style_sweep_style_evidence_verdict_t32
+------------------------------------------------------------------------------------------------------------------------------------------
+RESULT TABLE
+label                   tok     n      acc  parse_err parseable_n acc_parseable  delta_acc  changed
+------------------------------------------------------------------------------------------------------------------------------------------
+style_minimal_t16        16   193   0.6632     0.0000         193        0.6632        n/a      n/a
+style_cot_compact_t96    96   193   0.6943     0.0311         187        0.7166        n/a      n/a
+style_evidence_verdict_t32   32   193   0.3782     0.4663         103        0.7087        n/a      n/a
+------------------------------------------------------------------------------------------------------------------------------------------
+best_accuracy     : style_cot_compact_t96 (acc=0.6943, parse_err=0.0311)
+lowest_parse_err  : style_minimal_t16 (parse_err=0.0000, acc=0.6632)
+==========================================================================================================================================
+
+
+
+A8
+FINAL EXPERIMENT SUMMARY
+==========================================================================================================================================
+generated_at      : 2026-02-27T20:35:59.929405+08:00
+group_id          : A8
+group_title       : GSM8K Prompt Style Sweep
+run_prefix        : gsm8k_style_sweep
+intention         : Compare three GSM8K prompt styles with deterministic decode settings.
+observe           : Check accuracy first, then runtime and extraction diagnostics.
+expectation       : CoT style may win on quality; direct style should win on speed.
+------------------------------------------------------------------------------------------------------------------------------------------
+SETTINGS
+dataset           : gsm8k
+source_split      : train
+split_policy      : hash
+limit             : 2000
+seed              : 42
+dtype             : bfloat16
+log_every         : 5
+max_progress_lines: 5
+batch_size        : 1
+oom_backoff       : 1
+strategyqa_decode : freeform
+truncate_markers  : 1
+cuda_devices      : 2
+model_path        : assets/models/Qwen2.5-7B-Instruct
+direct_template  : qa_gsm8k_direct_final_only (answer_only)
+cot_template     : qa_gsm8k_cot_compact_final (cot_then_answer)
+strict_template  : qa_gsm8k_equation_then_final (answer_only)
+direct_input      : assets/artifacts/phase_a_prepared/gsm8k/18ffeb7b40f2/validation.jsonl
+cot_input         : assets/artifacts/phase_a_prepared/gsm8k/09d73d23f451/validation.jsonl
+strict_input      : assets/artifacts/phase_a_prepared/gsm8k/bdcce4830551/validation.jsonl
+suite_log_file    : assets/artifacts/phase_a_logs/gsm8k_style_sweep/suite.log
+summary_file      : assets/artifacts/phase_a_logs/gsm8k_style_sweep/final_summary.md
+------------------------------------------------------------------------------------------------------------------------------------------
+PLANNED RUN SPECS
+- label=style_direct_final_t32 | input=direct | tok=32 | compare=no | run_name=gsm8k_style_sweep_style_direct_final_t32
+- label=style_cot_compact_t192 | input=cot | tok=192 | compare=no | run_name=gsm8k_style_sweep_style_cot_compact_t192
+- label=style_equation_t64 | input=strict | tok=64 | compare=no | run_name=gsm8k_style_sweep_style_equation_t64
+------------------------------------------------------------------------------------------------------------------------------------------
+RESULT TABLE
+label                   tok     n      acc  parse_err parseable_n acc_parseable  delta_acc  changed
+------------------------------------------------------------------------------------------------------------------------------------------
+style_direct_final_t32   32   172   0.3895     0.0000         172        0.3895        n/a      n/a
+style_cot_compact_t192  192   172   0.7616     0.0000         172        0.7616        n/a      n/a
+style_equation_t64       64   172   0.3895     0.0000         172        0.3895        n/a      n/a
+------------------------------------------------------------------------------------------------------------------------------------------
+best_accuracy     : style_cot_compact_t192 (acc=0.7616, parse_err=0.0000)
+lowest_parse_err  : style_direct_final_t32 (parse_err=0.0000, acc=0.3895)
+==========================================================================================================================================
+
+
+A8 
+
+ACTIVE_PARAM_GROUP=A8 \
+CUDA_VISIBLE_DEVICES=2 \
+RUN_PREFIX=gsm8k_style_sweep \
+bash scripts/run_phase_a_benchmark_suite.sh
+
+FINAL EXPERIMENT SUMMARY
+==========================================================================================================================================
+generated_at      : 2026-02-27T22:29:34.083072+08:00
+group_id          : A8
+group_title       : GSM8K Prompt Style Sweep
+run_prefix        : gsm8k_style_sweep
+intention         : Compare three GSM8K prompt styles with deterministic decode settings.
+observe           : Check accuracy first, then runtime and extraction diagnostics.
+expectation       : CoT style may win on quality; direct style should win on speed.
+------------------------------------------------------------------------------------------------------------------------------------------
+SETTINGS
+dataset           : gsm8k
+source_split      : train
+split_policy      : hash
+limit             : 2000
+seed              : 42
+dtype             : bfloat16
+log_every         : 5
+max_progress_lines: 5
+batch_size        : 1
+oom_backoff       : 1
+trunc_recovery    : 1
+trunc_recov_rounds: 2
+trunc_recov_extra : 96
+trunc_recov_data  : gsm8k,hendrycks_math
+trunc_recov_reqfa : 1
+strategyqa_decode : freeform
+truncate_markers  : 1
+cuda_devices      : 2
+model_path        : assets/models/Qwen2.5-7B-Instruct
+direct_template  : qa_gsm8k_direct_final_only (answer_only)
+cot_template     : qa_gsm8k_cot_compact_final (cot_then_answer)
+strict_template  : qa_gsm8k_equation_then_final (answer_only)
+direct_input      : assets/artifacts/phase_a_prepared/gsm8k/18ffeb7b40f2/validation.jsonl
+cot_input         : assets/artifacts/phase_a_prepared/gsm8k/09d73d23f451/validation.jsonl
+strict_input      : assets/artifacts/phase_a_prepared/gsm8k/bdcce4830551/validation.jsonl
+suite_log_file    : assets/artifacts/phase_a_logs/gsm8k_style_sweep/suite.log
+summary_file      : assets/artifacts/phase_a_logs/gsm8k_style_sweep/final_summary.md
+------------------------------------------------------------------------------------------------------------------------------------------
+PLANNED RUN SPECS
+- label=style_direct_final_t32 | input=direct | tok=32 | compare=no | run_name=gsm8k_style_sweep_style_direct_final_t32
+- label=style_cot_compact_t192 | input=cot | tok=192 | compare=no | run_name=gsm8k_style_sweep_style_cot_compact_t192
+- label=style_equation_t64 | input=strict | tok=64 | compare=no | run_name=gsm8k_style_sweep_style_equation_t64
+------------------------------------------------------------------------------------------------------------------------------------------
+RESULT TABLE
+label                   tok     n      acc  parse_err parseable_n acc_parseable  delta_acc  changed
+------------------------------------------------------------------------------------------------------------------------------------------
+style_direct_final_t32   32   172   0.3895     0.0000         172        0.3895        n/a      n/a
+style_cot_compact_t192  192   172   0.7849     0.0000         172        0.7849        n/a      n/a
+style_equation_t64       64   172   0.3895     0.0000         172        0.3895        n/a      n/a
+------------------------------------------------------------------------------------------------------------------------------------------
+best_accuracy     : style_cot_compact_t192 (acc=0.7849, parse_err=0.0000)
+lowest_parse_err  : style_direct_final_t32 (parse_err=0.0000, acc=0.3895)
+==========================================================================================================================================
+
+
+
+
+
+A9
+FINAL EXPERIMENT SUMMARY
+==========================================================================================================================================
+generated_at      : 2026-02-27T23:58:25.737626+08:00
+group_id          : A9
+group_title       : StrategyQA Full-Data Best Setting
+run_prefix        : strategyqa_full_best_b4
+intention         : Validate full-data performance of the best StrategyQA prompt configuration.
+observe           : Track full-data accuracy, parse_error_rate, and deterministic rerun deltas.
+expectation       : CoT compact t96 should remain top quality with low parse error on full-data validation.
+------------------------------------------------------------------------------------------------------------------------------------------
+SETTINGS
+dataset           : strategyqa
+source_split      : train
+split_policy      : hash
+limit             : None
+seed              : 42
+dtype             : bfloat16
+log_every         : 5
+max_progress_lines: 5
+batch_size        : 4
+oom_backoff       : 1
+trunc_recovery    : 1
+trunc_recov_rounds: 2
+trunc_recov_extra : 96
+trunc_recov_data  : gsm8k,hendrycks_math
+trunc_recov_reqfa : 1
+strategyqa_decode : freeform
+truncate_markers  : 1
+cuda_devices      : 0
+model_path        : assets/models/Qwen2.5-7B-Instruct
+direct_template  : qa_direct (answer_only)
+cot_template     : qa_strategyqa_cot_compact (cot_then_answer)
+strict_template  : qa_binary_strict (answer_only)
+cot_input         : assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/validation.jsonl
+suite_log_file    : assets/artifacts/phase_a_logs/strategyqa_full_best_b4/suite.log
+summary_file      : assets/artifacts/phase_a_logs/strategyqa_full_best_b4/final_summary.md
+------------------------------------------------------------------------------------------------------------------------------------------
+PLANNED RUN SPECS
+- label=full_best_cot_t96_r1 | input=cot | tok=96 | compare=no | run_name=strategyqa_full_best_b4_full_best_cot_t96
+- label=full_best_cot_t96_r2 | input=cot | tok=96 | compare=yes | run_name=strategyqa_full_best_b4_full_best_cot_t96
+------------------------------------------------------------------------------------------------------------------------------------------
+RESULT TABLE
+label                   tok     n      acc  parse_err parseable_n acc_parseable  delta_acc  changed
+------------------------------------------------------------------------------------------------------------------------------------------
+full_best_cot_t96_r1     96   215   0.7116     0.0233         210        0.7286        n/a      n/a
+full_best_cot_t96_r2     96   215   0.7116     0.0233         210        0.7286    +0.0000        0
+------------------------------------------------------------------------------------------------------------------------------------------
+best_accuracy     : full_best_cot_t96_r1 (acc=0.7116, parse_err=0.0233)
+lowest_parse_err  : full_best_cot_t96_r1 (parse_err=0.0233, acc=0.7116)
+==================================================================================
+
+
+
+A11
+
+
+
+==================================================================      generated_at      : 2026-02-28T00:27:19.039247+08:00              
+group_id          : A11                                                 group_title       : StrategyQA Whole-Corpus Review (2290)     
+run_prefix        : strategyqa_whole_2290_b128                          intention         : Produce report-ready whole-corpus metrics using the 
+current best StrategyQA prompt setting.                                 observe           : Check split-wise metrics and the weighted aggregate 
+over train+validation+test.                                             expectation       : Aggregate should be stable and reproducible; truncat
+ion-safe settings should keep parse errors low.                         ------------------------------------------------------------------------
+------------------------------------------------------------------
+SETTINGS                                                                
+dataset           : strategyqa                                          
+source_split      : train                                               
+split_policy      : hash                                                limit             : None                                                
+seed              : 42                                                  
+dtype             : bfloat16                                            
+log_every         : 5                                                   max_progress_lines: 5                                                   
+batch_size        : 128                                                 
+oom_backoff       : 1                                                   trunc_recovery    : 1                                                   
+trunc_recov_rounds: 2                                                   
+trunc_recov_extra : 96                                                  
+trunc_recov_data  : gsm8k,hendrycks_math,strategyqa               
+trunc_recov_reqfa : 1
+strategyqa_decode : freeform                                            
+       
+truncate_markers  : 1                                  
+cuda_devices      : 1                                                   model_path        : assets/models/Qwen2.5-7B-Instruct             
+direct_template  : qa_direct (answer_only)                              cot_template     : qa_strategyqa_cot_compact (cot_then_answer)
+strict_template  : qa_binary_strict (answer_only)                       cot_train_input   : assets/artifacts/phase_a_prepared/strategyqa/16f7dd6
+39f3e/train.jsonl                                                       cot_val_input     : assets/artifacts/phase_a_prepared/strategyqa/16f7dd6
+39f3e/validation.jsonl                                                  cot_test_input    : assets/artifacts/phase_a_prepared/strategyqa/16f7dd6
+39f3e/test.jsonl                                                        suite_log_file    : assets/artifacts/phase_a_logs/strategyqa_whole_2290_
+b128/suite.log                      
+summary_file      : assets/artifacts/phase_a_logs/strategyqa_whole_2290_
+b128/final_summary.md                                                   
+------------------------------------------------------------------------
+------------------------------------------------------------------      PLANNED RUN SPECS                                                       
+- label=full_train_t96 | input=cot_train | tok=96 | compare=no | run_nam
+e=strategyqa_whole_2290_b128_full_train_t96                      
+- label=full_validation_t96 | input=cot_validation | tok=96 | compare=no | run_name=strategyqa_whole_2290_b128_full_validation_t96        
+- label=full_test_t96 | input=cot_test | tok=96 | compare=no | run_name=
+strategyqa_whole_2290_b128_full_test_t96                                - label=full_train_t96_repro | input=cot_train | tok=96 | compare=yes | 
+run_name=strategyqa_whole_2290_b128_full_train_t96
+------------------------------------------------------------------------
+------------------------------------------------------------------
+RESULT TABLE
+label                   tok     n      acc  parse_err parseable_n acc_pa
+rseable  delta_acc  changed
+------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------------------
+full_train_t96           96  1834   0.7007     0.0000        1834        0.7007        n/a      n/a
+full_validation_t96      96   215   0.6977     0.0000         215        0.6977        n/a      n/a
+full_test_t96            96   241   0.6929     0.0000         241        0.6929        n/a      n/a
+full_train_t96_repro     96  1834   0.7007     0.0000        1834        0.7007    +0.0000        0
+------------------------------------------------------------------------------------------------------------------------------------------
+WHOLE-CORPUS AGGREGATE
+included_runs=3 (compare=no only, reproducibility reruns excluded)
+n_total=2290 | n_correct=1602 | n_parse_error=0 | n_parseable=2290
+accuracy=0.6996 | parse_error_rate=0.0000 | acc_parseable=0.6996
+------------------------------------------------------------------------------------------------------------------------------------------
+best_accuracy     : full_train_t96 (acc=0.7007, parse_err=0.0000)
+lowest_parse_err  : full_train_t96 (parse_err=0.0000, acc=0.7007)
+==========================================================================================================================================
+[2026-02-28 00:27:19 +0800] Group run complete.
+
+
+A11-128
+FINAL EXPERIMENT SUMMARY
+==========================================================================================================================================
+generated_at      : 2026-02-28T00:44:57.318134+08:00
+group_id          : A11_128
+group_title       : StrategyQA Whole-Corpus Token Stress t128
+run_prefix        : strategyqa_whole_t128
+intention         : Stress-test suspected token-limit effects on whole-corpus StrategyQA with larger CoT budgets.
+observe           : Track split-wise and aggregate accuracy while monitoring truncation-recovery activity and throughput.
+expectation       : Larger token budgets should reduce cap-related failures but increase runtime; gains should eventually plateau.
+------------------------------------------------------------------------------------------------------------------------------------------
+SETTINGS
+dataset           : strategyqa
+source_split      : train
+split_policy      : hash
+limit             : None
+seed              : 42
+dtype             : bfloat16
+log_every         : 5
+max_progress_lines: 50
+batch_size        : 128
+oom_backoff       : 1
+trunc_recovery    : 1
+trunc_recov_rounds: 2
+trunc_recov_extra : 96
+trunc_recov_data  : gsm8k,hendrycks_math,strategyqa
+trunc_recov_reqfa : 1
+strategyqa_decode : freeform
+truncate_markers  : 1
+cuda_devices      : 1
+model_path        : assets/models/Qwen2.5-7B-Instruct
+direct_template  : qa_direct (answer_only)
+cot_template     : qa_strategyqa_cot_compact (cot_then_answer)
+strict_template  : qa_binary_strict (answer_only)
+cot_train_input   : assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl
+cot_val_input     : assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/validation.jsonl
+cot_test_input    : assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/test.jsonl
+suite_log_file    : assets/artifacts/phase_a_logs/strategyqa_whole_t128/suite.log
+summary_file      : assets/artifacts/phase_a_logs/strategyqa_whole_t128/final_summary.md
+------------------------------------------------------------------------------------------------------------------------------------------
+PLANNED RUN SPECS
+- label=full_train_t128 | input=cot_train | tok=128 | compare=no | run_name=strategyqa_whole_t128_full_train_t128
+- label=full_validation_t128 | input=cot_validation | tok=128 | compare=no | run_name=strategyqa_whole_t128_full_validation_t128
+- label=full_test_t128 | input=cot_test | tok=128 | compare=no | run_name=strategyqa_whole_t128_full_test_t128
+------------------------------------------------------------------------------------------------------------------------------------------
+RESULT TABLE
+label                   tok     n      acc  parse_err parseable_n acc_parseable  delta_acc  changed
+------------------------------------------------------------------------------------------------------------------------------------------
+full_train_t128         128  1834   0.7023     0.0000        1834        0.7023        n/a      n/a
+full_validation_t128    128   215   0.6977     0.0000         215        0.6977        n/a      n/a
+full_test_t128          128   241   0.6888     0.0000         241        0.6888        n/a      n/a
+------------------------------------------------------------------------------------------------------------------------------------------
+WHOLE-CORPUS AGGREGATE
+included_runs=3 (compare=no only, reproducibility reruns excluded)
+n_total=2290 | n_correct=1604 | n_parse_error=0 | n_parseable=2290
+accuracy=0.7004 | parse_error_rate=0.0000 | acc_parseable=0.7004
+------------------------------------------------------------------------------------------------------------------------------------------
+best_accuracy     : full_train_t128 (acc=0.7023, parse_err=0.0000)
+lowest_parse_err  : full_train_t128 (parse_err=0.0000, acc=0.7023)
+==========================================================================================================================================

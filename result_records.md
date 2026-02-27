@@ -1,8 +1,148 @@
 # Result Records (Phase A)
 
-Last updated: 2026-02-27 01:16:23 +0800
+Last updated: 2026-02-27 20:44:41 +0800
 
-## 0. Latest Diagnosis Update (2026-02-26, sweeper2 + A5)
+## 0. Latest Diagnosis Update (2026-02-27, A8 GSM8K Prompt Style Sweep)
+
+### 0.1 New A8 Results (n=172, freeform decode)
+
+| Label | Template | Max New Tokens | Accuracy | Parse Error Rate | Parseable n | Accuracy on Parseable |
+|---|---|---:|---:|---:|---:|---:|
+| `style_direct_final_t32` | `qa_gsm8k_direct_final_only` | 32 | 0.3895 | 0.0000 | 172 | 0.3895 |
+| `style_cot_compact_t192` | `qa_gsm8k_cot_compact_final` | 192 | 0.7616 | 0.0000 | 172 | 0.7616 |
+| `style_equation_t64` | `qa_gsm8k_equation_then_final` | 64 | 0.3895 | 0.0000 | 172 | 0.3895 |
+
+### 0.2 Comparison With Previous GSM8K Baselines
+
+| Track | Accuracy | Parse Error |
+|---|---:|---:|
+| Previous direct baseline (re-eval) | 0.3721 | 0.0000 |
+| Previous CoT baseline (`t256`, re-eval) | 0.7035 | 0.0000 |
+| A8 direct-final (`t32`) | 0.3895 | 0.0000 |
+| A8 CoT-compact (`t192`) | 0.7616 | 0.0000 |
+| A8 equation (`t64`) | 0.3895 | 0.0000 |
+
+Observed deltas:
+1. A8 CoT-compact improves over previous CoT baseline by `+0.0581` (0.7616 vs 0.7035).
+2. A8 direct-final improves over previous direct baseline by `+0.0174` (0.3895 vs 0.3721).
+3. Equation-style gives no quality gain vs direct-final in this setup.
+
+### 0.3 Runtime and Throughput Tradeoff (A8 runs)
+
+| Label | Elapsed Seconds | Samples/sec |
+|---|---:|---:|
+| `style_direct_final_t32` | 146.54 | 1.174 |
+| `style_cot_compact_t192` | 883.72 | 0.195 |
+| `style_equation_t64` | 288.53 | 0.596 |
+
+Interpretation:
+1. CoT-compact is strongest on quality but about `6x` slower than direct-final (`0.195` vs `1.174` sample/s).
+2. Equation-style is slower than direct-final and does not improve accuracy, so it is currently dominated.
+
+### 0.4 Extraction-Method Diagnostics (Why CoT still misses some items)
+
+1. `style_cot_compact_t192`:
+   - `final_answer_tag`: 162 samples, method-level acc `0.8086`
+   - `last_number`: 10 samples, method-level acc `0.0000`
+2. `style_equation_t64`:
+   - mostly `final_answer_tag` but low method-level accuracy (`0.3988`)
+3. `style_direct_final_t32`:
+   - all samples `final_answer_tag`, method-level accuracy `0.3895`
+
+Conclusion from extraction view:
+1. Remaining CoT errors are concentrated where model fails to emit clean final-answer format and falls to `last_number`.
+2. The main bottleneck is no longer parse coverage (already `0.0000` parse error), but reasoning correctness and answer-format consistency under long-form outputs.
+
+### 0.5 A8 Conclusions
+
+1. For GSM8K Phase A, `qa_gsm8k_cot_compact_final@t192` is the best current quality baseline.
+2. `qa_gsm8k_direct_final_only@t32` is the practical fast baseline.
+3. `qa_gsm8k_equation_then_final@t64` should not be prioritized further unless reformulated.
+4. A8 narrows the gap to expected public-model ceiling and gives a stronger launch point for Phase B.
+
+### 0.6 Next Plan
+
+1. Freeze two GSM8K reporting baselines:
+   - quality: `cot_compact_t192`
+   - speed: `direct_final_t32`
+2. Run one reproducibility repeat for `cot_compact_t192`.
+3. Add a focused follow-up to reduce `last_number` fallback cases in CoT outputs (format tightening + extraction guards).
+4. Carry these two baselines into Phase B pre/post training comparison.
+
+### 0.7 A8 Error Pattern Deep-Dive (Sample-Level)
+
+Focus run: `style_cot_compact_t192` (best GSM8K quality in A8).
+
+Error composition (41 wrong samples):
+1. `final_answer_tag` wrong: `31`
+2. `last_number` fallback wrong: `10`
+
+Observed error patterns:
+1. **Truncation / unfinished outputs** (`10/41`):
+   - No clean final-answer line, evaluator falls back to `last_number`.
+   - Typical signature: reasoning is mid-derivation and output ends abruptly near token cap.
+   - Example IDs: `gsm8k:main:train:140`, `gsm8k:main:train:198`, `gsm8k:main:train:581`.
+2. **Reasoning arithmetic/sign mistakes** (majority of remaining errors):
+   - Model emits parseable final answer but applies wrong operation/sign or rate conversion.
+   - Example IDs: `gsm8k:main:train:1406` (subtracts missed count instead of adding), `gsm8k:main:train:692`, `gsm8k:main:train:1033`.
+3. **Extraction edge cases with expression-style final lines** (small but critical):
+   - Some outputs contain `Final answer: <expression> = <number>` and/or multiple `Final answer:` lines.
+   - Current extraction can pick the first numeric token from the expression line, undercounting true correctness.
+   - Confirmed undercount IDs: `gsm8k:main:train:838`, `gsm8k:main:train:1418`.
+4. **Self-correction / repeated final-answer lines**:
+   - Multi-final-answer outputs appeared in error rows and can interact with extraction heuristics.
+   - Count in CoT errors: `11`.
+
+Cross-style hardness signal:
+1. `31` samples were wrong in **all three** A8 styles (direct, CoT-compact, equation).
+2. These shared-hard samples are dominated by multi-stage word problems with money/time/rate/percentage structure.
+
+Improvement implications:
+1. Keep improving prompt quality, but also harden evaluator extraction for math final-answer lines with expressions/repeated tags.
+2. Reduce truncation pressure on CoT outputs (format tightening / better stop behavior / budget tuning).
+3. Build a targeted “hard subset” regression list from the 31 shared-hard IDs for future Phase B comparisons.
+
+## 1. Previous Diagnosis Update (2026-02-27, A7 StrategyQA Prompt Style Sweep)
+
+### 0.1 New A7 Results (n=193, freeform decode)
+
+| Label | Template | Max New Tokens | Accuracy | Parse Error Rate | Parseable n | Accuracy on Parseable |
+|---|---|---:|---:|---:|---:|---:|
+| `style_minimal_t16` | `qa_strategyqa_minimal_binary` | 16 | 0.6632 | 0.0000 | 193 | 0.6632 |
+| `style_cot_compact_t96` | `qa_strategyqa_cot_compact` | 96 | 0.6943 | 0.0311 | 187 | 0.7166 |
+| `style_evidence_verdict_t32` | `qa_strategyqa_evidence_verdict` | 32 | 0.3782 | 0.4663 | 103 | 0.7087 |
+
+### 0.2 Diagnosis
+
+1. `qa_strategyqa_cot_compact` is currently the best total-accuracy style in freeform mode.
+   - It improves absolute accuracy over `qa_strategyqa_minimal_binary` by `+0.0311` (0.6943 vs 0.6632).
+2. `qa_strategyqa_minimal_binary` is the best compliance style.
+   - Parse error is exactly `0.0000`, making it the safest format baseline.
+3. `qa_strategyqa_evidence_verdict` likely has a **format/truncation bottleneck**, not purely low reasoning quality.
+   - Parseable-only accuracy is high (`0.7087`), close to the best parseable track (`0.7166`),
+   - but parse failures are very high (`0.4663`), collapsing total accuracy.
+
+### 0.3 What We Learn
+
+1. Prompt style matters as much as token budget for StrategyQA freeform performance.
+2. There is a practical tradeoff:
+   - best compliance (`minimal_binary`) vs best current total accuracy (`cot_compact`).
+3. For verdict-style prompts, current output protocol is under-specified for short budgets (`t32`).
+   - the model often produces partially formatted outputs, causing non-parseable predictions.
+
+### 0.4 Reliability Notes
+
+1. This comparison is protocol-consistent (same dataset split/policy/seed/model family), so the ranking is meaningful for this setup.
+2. Sample size is still modest (`n=193`); small deltas should be reconfirmed with reruns and/or larger validation sets before freezing final claims.
+
+### 0.5 Next Plan
+
+1. Keep `qa_strategyqa_cot_compact` as the freeform quality candidate for Phase A.
+2. Keep `qa_strategyqa_minimal_binary` as compliance/efficiency baseline.
+3. Run a targeted verdict-style follow-up with higher token budgets and/or stricter output contract before discarding the style.
+4. For fair model-quality comparison independent of parse noise, continue reporting binary-choice results in parallel.
+
+## 2. Previous Diagnosis Update (2026-02-26, sweeper2 + A5)
 
 ### 0.1 What Problem We Tried To Fix
 

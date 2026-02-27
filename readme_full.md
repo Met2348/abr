@@ -398,6 +398,13 @@ Notes for long runs:
   - useful for robust sweeps on shared servers,
   - turn off with `--no-oom-backoff` for strict failure behavior.
 - `--truncate-chat-markers` (default on) trims leaked next-turn markers such as `[USER]` / `Human:`.
+- truncation recovery (default on for math datasets):
+  - `--truncation-recovery` / `--no-truncation-recovery`,
+  - `--truncation-recovery-rounds`,
+  - `--truncation-recovery-extra-tokens`,
+  - `--truncation-recovery-datasets`,
+  - `--truncation-recovery-require-final-answer-signal`.
+  - behavior: if a sample hits token cap and still lacks final-answer signal, script auto-runs continuation rounds.
 - For math datasets, script output now includes `math_diag` (extraction reliability signals):
   - `last_number_rate`,
   - `hit_token_limit_rate`,
@@ -406,6 +413,10 @@ Notes for long runs:
   - `gen_elapsed_sec`,
   - `gen_sample_rate`,
   - `oom_backoff_evts`.
+- script now prints and stores VRAM telemetry (sampled during generation):
+  - `vram_mean_gib` (total reserved, sampled),
+  - `vram_max_gib` (total reserved, sampled),
+  - plus per-device peak stats under `metrics.json -> generation_stats.vram_per_device`.
 - while running, you can monitor file progress:
 
 ```bash
@@ -420,7 +431,7 @@ Use:
 bash scripts/run_phase_a_benchmark_suite.sh
 ```
 
-The script now supports **param groups** (`A1`~`A8`) for one-click experiment presets.
+The script now supports **param groups** (`A1`~`A12`, plus `A11_*` token-stress variants) for one-click experiment presets.
 
 One-click switching:
 1. Open `scripts/run_phase_a_benchmark_suite.sh`.
@@ -436,6 +447,12 @@ Group intent summary:
 - `A6`: binary-choice decode validation (removes free-form format noise for StrategyQA)
 - `A7`: StrategyQA prompt-style sweep (3 template styles)
 - `A8`: GSM8K prompt-style sweep (3 template styles)
+- `A9`: StrategyQA full-data best-setting run (`qa_strategyqa_cot_compact`, `t96`, reproducibility pair)
+- `A10`: GSM8K full-data best-setting run (`qa_gsm8k_cot_compact_final`, `t192`, reproducibility pair)
+- `A11`: StrategyQA whole-corpus review over train+validation+test with weighted aggregate output
+- `A11_128`, `A11_256`, `A11_384`, `A11_512`, `A11_1024`:
+  StrategyQA whole-corpus token-stress subgroups (same A11 setup, larger decode budgets)
+- `A12`: GSM8K whole-corpus review over train+validation+test with weighted aggregate output
 
 Template styles used in `A7` (StrategyQA):
 1. `qa_strategyqa_minimal_binary`
@@ -461,13 +478,96 @@ ACTIVE_PARAM_GROUP=A8 \
 CUDA_VISIBLE_DEVICES=0 \
 RUN_PREFIX=gsm8k_style_sweep \
 bash scripts/run_phase_a_benchmark_suite.sh
+
+# StrategyQA: full-data best setting (A7 winner)
+ACTIVE_PARAM_GROUP=A9 \
+CUDA_VISIBLE_DEVICES=0 \
+RUN_PREFIX=strategyqa_full_best \
+bash scripts/run_phase_a_benchmark_suite.sh
+
+# GSM8K: full-data best setting (A8 winner + truncation recovery)
+ACTIVE_PARAM_GROUP=A10 \
+CUDA_VISIBLE_DEVICES=0 \
+RUN_PREFIX=gsm8k_full_best \
+bash scripts/run_phase_a_benchmark_suite.sh
+
+# StrategyQA: whole-corpus review (train+validation+test aggregate)
+ACTIVE_PARAM_GROUP=A11 \
+CUDA_VISIBLE_DEVICES=0 \
+RUN_PREFIX=strategyqa_whole_2290 \
+bash scripts/run_phase_a_benchmark_suite.sh
+
+# StrategyQA: token-stress subgroup examples on whole corpus
+ACTIVE_PARAM_GROUP=A11_128  CUDA_VISIBLE_DEVICES=0 RUN_PREFIX=strategyqa_whole_t128  bash scripts/run_phase_a_benchmark_suite.sh
+ACTIVE_PARAM_GROUP=A11_256  CUDA_VISIBLE_DEVICES=0 RUN_PREFIX=strategyqa_whole_t256  bash scripts/run_phase_a_benchmark_suite.sh
+ACTIVE_PARAM_GROUP=A11_384  CUDA_VISIBLE_DEVICES=0 RUN_PREFIX=strategyqa_whole_t384  bash scripts/run_phase_a_benchmark_suite.sh
+ACTIVE_PARAM_GROUP=A11_512  CUDA_VISIBLE_DEVICES=0 RUN_PREFIX=strategyqa_whole_t512  bash scripts/run_phase_a_benchmark_suite.sh
+ACTIVE_PARAM_GROUP=A11_1024 CUDA_VISIBLE_DEVICES=0 RUN_PREFIX=strategyqa_whole_t1024 bash scripts/run_phase_a_benchmark_suite.sh
+
+# GSM8K: whole-corpus review (train+validation+test aggregate)
+ACTIVE_PARAM_GROUP=A12 \
+CUDA_VISIBLE_DEVICES=0 \
+RUN_PREFIX=gsm8k_whole_corpus \
+bash scripts/run_phase_a_benchmark_suite.sh
 ```
+
+For `A11`, the final summary includes `WHOLE-CORPUS AGGREGATE` over the primary
+`train/validation/test` runs only (reproducibility reruns are excluded from the aggregate).
+
+For `A11`/`A12`, runtime knobs passed via env (for example `BATCH_SIZE`, `OOM_BACKOFF`,
+`TRUNCATION_RECOVERY_*`) take precedence over group defaults.
+
+For long whole-corpus runs, `A11`/`A12` now default to `MAX_PROGRESS_LINES=50`
+(unless you set `MAX_PROGRESS_LINES` explicitly via env).
+
+For `A11_*` token-stress variants, default batch size is reduced as token budget grows:
+- `A11_128`: batch `64`
+- `A11_256`: batch `32`
+- `A11_384`: batch `24`
+- `A11_512`: batch `16`
+- `A11_1024`: batch `8`
+You can still override with `BATCH_SIZE=...` when your VRAM allows.
 
 Each group prints:
 - intention,
 - what to observe,
 - expected trend,
 - and a summary table with `accuracy`, `parse_error_rate`, `acc_parseable`, plus delta fields when comparison is enabled.
+
+New in-suite artifact diagnostics:
+- final summary now includes an `INSTABILITY INDICATORS (ARTIFACT ANALYSIS)` block
+  directly under `RESULT TABLE`,
+- and a `PAIRWISE FLIP ANALYSIS` block when run pairs share sample IDs.
+
+Indicator meanings:
+- `tagged`: fraction of rows containing at least one `Final answer` yes/no tag.
+- `multi_tag`: fraction of rows containing 2+ yes/no final-answer tags.
+- `first_last_flip`: fraction where first and last final-answer tags disagree.
+- `tag_switch`: fraction where tag sequence flips at least once (`yes -> no` or `no -> yes`).
+- `mean_tags`: average number of final-answer tags among tagged rows.
+
+Standalone artifact-only analyzer (no new inference required):
+
+```bash
+# Analyze one run directory.
+python scripts/phase_a_analyze_instability.py \
+  --run-dirs assets/artifacts/phase_a_runs/strategyqa_whole_t384_full_train_t384_20260227T164745Z
+
+# Analyze multiple runs and include pairwise flip rates.
+python scripts/phase_a_analyze_instability.py \
+  --run-dirs \
+    assets/artifacts/phase_a_runs/strategyqa_whole_t128_full_train_t128_20260227T164223Z \
+    assets/artifacts/phase_a_runs/strategyqa_whole_t256_full_train_t256_20260227T164403Z \
+    assets/artifacts/phase_a_runs/strategyqa_whole_t384_full_train_t384_20260227T164745Z
+
+# Save report artifacts for PPT/records.
+python scripts/phase_a_analyze_instability.py \
+  --run-dirs \
+    assets/artifacts/phase_a_runs/strategyqa_whole_t128_full_train_t128_20260227T164223Z \
+    assets/artifacts/phase_a_runs/strategyqa_whole_t384_full_train_t384_20260227T164745Z \
+  --output-json assets/artifacts/phase_a_logs/instability_compare/summary.json \
+  --output-markdown assets/artifacts/phase_a_logs/instability_compare/summary.md
+```
 
 Useful overrides (optional):
 
@@ -479,6 +579,11 @@ COT_SWEEP_TOKENS="128 192 256 320 384" \
 DIRECT_SWEEP_TOKENS="16 24 32 48 64" \
 STRATEGYQA_DECODE_MODE=freeform \
 TRUNCATE_CHAT_MARKERS=1 \
+TRUNCATION_RECOVERY=1 \
+TRUNCATION_RECOVERY_ROUNDS=2 \
+TRUNCATION_RECOVERY_EXTRA_TOKENS=96 \
+TRUNCATION_RECOVERY_DATASETS="gsm8k,hendrycks_math" \
+TRUNCATION_RECOVERY_REQUIRE_FINAL_SIGNAL=1 \
 LOG_EVERY=5 \
 MAX_PROGRESS_LINES=5 \
 BATCH_SIZE=1 \
@@ -486,11 +591,61 @@ OOM_BACKOFF=1 \
 bash scripts/run_phase_a_benchmark_suite.sh
 ```
 
+For full-dataset preparation/eval runs, use:
+- `LIMIT=None` or `LIMIT=all` (both are supported).
+
 Notes:
 - The script no longer blocks concurrent runs.
 - If concurrent runs are detected, it prints a warning and continues.
 
-### 9.7 Batching Hands-On: How To See Speed Difference
+### 9.7 Truncation Recovery: Hands-On Fix Path
+
+If GSM8K/CoT runs show high `hit_cap_rate` or frequent `last_number` fallback, run with stronger recovery:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -u scripts/phase_a_generate_and_eval.py \
+  --input-jsonl assets/artifacts/phase_a_prepared/gsm8k/09d73d23f451/validation.jsonl \
+  --run-name gsm8k_cot_t192_trunc_fix \
+  --require-cuda --dtype bfloat16 --device-map auto \
+  --no-do-sample --seed 42 \
+  --max-new-tokens 192 \
+  --truncation-recovery \
+  --truncation-recovery-rounds 2 \
+  --truncation-recovery-extra-tokens 96 \
+  --truncation-recovery-datasets gsm8k,hendrycks_math \
+  --truncation-recovery-require-final-answer-signal \
+  --batch-size 1 --oom-backoff \
+  --log-every 5 --max-progress-lines 5 \
+  --no-compare-latest-same-name
+```
+
+More aggressive variant (slower, stronger truncation guard):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -u scripts/phase_a_generate_and_eval.py \
+  --input-jsonl assets/artifacts/phase_a_prepared/gsm8k/09d73d23f451/validation.jsonl \
+  --run-name gsm8k_cot_t192_trunc_fix_aggr \
+  --require-cuda --dtype bfloat16 --device-map auto \
+  --no-do-sample --seed 42 \
+  --max-new-tokens 192 \
+  --truncation-recovery \
+  --truncation-recovery-rounds 3 \
+  --truncation-recovery-extra-tokens 128 \
+  --truncation-recovery-datasets gsm8k,hendrycks_math \
+  --truncation-recovery-require-final-answer-signal \
+  --batch-size 1 --oom-backoff \
+  --log-every 5 --max-progress-lines 5 \
+  --no-compare-latest-same-name
+```
+
+What to compare in `metrics.json`:
+1. `accuracy`,
+2. `math_diagnostics.hit_token_limit_rate`,
+3. `math_diagnostics.last_number_rate`,
+4. `generation_stats.truncation_recovery_rows`,
+5. `generation_stats.truncation_recovery_rounds`.
+
+### 9.8 Batching Hands-On: How To See Speed Difference
 
 Run the same config twice, only changing `--batch-size`.
 

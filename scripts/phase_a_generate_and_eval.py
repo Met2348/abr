@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 import sys
 import time
 from collections import Counter
@@ -70,6 +71,14 @@ class GenerationStats:
     sample_per_second: float
     batch_size: int
     oom_backoff_events: int
+    truncation_recovery_rows: int
+    truncation_recovery_rounds: int
+    vram_sample_count: int
+    vram_mean_total_reserved_gib_sampled: float | None
+    vram_max_total_reserved_gib_sampled: float | None
+    vram_mean_total_allocated_gib_sampled: float | None
+    vram_max_total_allocated_gib_sampled: float | None
+    vram_per_device: list[dict[str, Any]]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -78,7 +87,60 @@ class GenerationStats:
             "sample_per_second": float(self.sample_per_second),
             "batch_size": int(self.batch_size),
             "oom_backoff_events": int(self.oom_backoff_events),
+            "truncation_recovery_rows": int(self.truncation_recovery_rows),
+            "truncation_recovery_rounds": int(self.truncation_recovery_rounds),
+            "vram_sample_count": int(self.vram_sample_count),
+            "vram_mean_total_reserved_gib_sampled": (
+                float(self.vram_mean_total_reserved_gib_sampled)
+                if self.vram_mean_total_reserved_gib_sampled is not None
+                else None
+            ),
+            "vram_max_total_reserved_gib_sampled": (
+                float(self.vram_max_total_reserved_gib_sampled)
+                if self.vram_max_total_reserved_gib_sampled is not None
+                else None
+            ),
+            "vram_mean_total_allocated_gib_sampled": (
+                float(self.vram_mean_total_allocated_gib_sampled)
+                if self.vram_mean_total_allocated_gib_sampled is not None
+                else None
+            ),
+            "vram_max_total_allocated_gib_sampled": (
+                float(self.vram_max_total_allocated_gib_sampled)
+                if self.vram_max_total_allocated_gib_sampled is not None
+                else None
+            ),
+            "vram_per_device": list(self.vram_per_device),
         }
+
+
+@dataclass(slots=True)
+class TruncationRecoveryConfig:
+    """Control policy for continuation-based truncation recovery."""
+
+    enabled: bool = True
+    max_rounds: int = 2
+    extra_tokens_per_round: int = 96
+    datasets: tuple[str, ...] = ("gsm8k", "hendrycks_math")
+    require_final_answer_signal: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": bool(self.enabled),
+            "max_rounds": int(self.max_rounds),
+            "extra_tokens_per_round": int(self.extra_tokens_per_round),
+            "datasets": list(self.datasets),
+            "require_final_answer_signal": bool(self.require_final_answer_signal),
+        }
+
+
+@dataclass(slots=True)
+class FreeformGenerationResult:
+    raw_prediction: str
+    generated_token_count: int
+    hit_token_limit: bool
+    truncation_recovery_applied: bool = False
+    truncation_recovery_rounds: int = 0
 
 
 def parse_args() -> argparse.Namespace:
@@ -155,6 +217,44 @@ def parse_args() -> argparse.Namespace:
         help=(
             "If a batch OOM happens, retry automatically by splitting into smaller batches. "
             "Recommended on shared servers for robust sweeps."
+        ),
+    )
+    parser.add_argument(
+        "--truncation-recovery",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "If a free-form output hits token cap and appears incomplete, "
+            "run continuation decoding rounds to recover a clean final answer."
+        ),
+    )
+    parser.add_argument(
+        "--truncation-recovery-rounds",
+        type=int,
+        default=2,
+        help="Maximum continuation rounds per sample when truncation recovery is enabled.",
+    )
+    parser.add_argument(
+        "--truncation-recovery-extra-tokens",
+        type=int,
+        default=96,
+        help="Extra decode budget (`max_new_tokens`) used by each recovery round.",
+    )
+    parser.add_argument(
+        "--truncation-recovery-datasets",
+        default="gsm8k,hendrycks_math",
+        help=(
+            "Comma-separated dataset names where truncation recovery is active. "
+            "Example: gsm8k,hendrycks_math,strategyqa"
+        ),
+    )
+    parser.add_argument(
+        "--truncation-recovery-require-final-answer-signal",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Only trigger recovery when output still lacks a dataset-appropriate "
+            "final-answer signal after hitting token cap."
         ),
     )
 
@@ -246,6 +346,15 @@ def main() -> int:
         top_p=args.top_p,
         top_k=args.top_k,
     )
+    trunc_recovery_cfg = TruncationRecoveryConfig(
+        enabled=bool(args.truncation_recovery),
+        max_rounds=int(args.truncation_recovery_rounds),
+        extra_tokens_per_round=int(args.truncation_recovery_extra_tokens),
+        datasets=_parse_csv_datasets(args.truncation_recovery_datasets),
+        require_final_answer_signal=bool(
+            args.truncation_recovery_require_final_answer_signal
+        ),
+    )
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = args.output_root / f"{args.run_name}_{stamp}"
@@ -280,6 +389,14 @@ def main() -> int:
         print(f"max_prog_ln : {args.max_progress_lines}")
         print(f"batch_size  : {args.batch_size}")
         print(f"oom_backoff : {args.oom_backoff}")
+        print(
+            "trunc_recov : "
+            f"enabled={trunc_recovery_cfg.enabled} "
+            f"rounds={trunc_recovery_cfg.max_rounds} "
+            f"extra_tokens={trunc_recovery_cfg.extra_tokens_per_round} "
+            f"datasets={list(trunc_recovery_cfg.datasets)} "
+            f"require_final_signal={trunc_recovery_cfg.require_final_answer_signal}"
+        )
         print(f"console_log : {console_log_path if args.persist_console_log else '<disabled>'}")
         print(f"torch       : {torch.__version__} (build CUDA={torch.version.cuda})")
         cuda_available = torch.cuda.is_available()
@@ -338,6 +455,7 @@ def main() -> int:
             truncate_chat_markers=bool(args.truncate_chat_markers),
             batch_size=int(args.batch_size),
             oom_backoff=bool(args.oom_backoff),
+            truncation_recovery_cfg=trunc_recovery_cfg,
         )
 
         scored_rows, summary = _run_evaluation(predictions_path)
@@ -401,6 +519,7 @@ def main() -> int:
             "max_samples": args.max_samples,
             "batch_size": args.batch_size,
             "oom_backoff": bool(args.oom_backoff),
+            "truncation_recovery": trunc_recovery_cfg.to_dict(),
             "persist_console_log": bool(args.persist_console_log),
             "files": {
                 "predictions": str(predictions_path),
@@ -427,6 +546,19 @@ def main() -> int:
         print(f"gen_elapsed_sec  : {generation_stats.elapsed_seconds:.2f}")
         print(f"gen_sample_rate  : {generation_stats.sample_per_second:.3f} sample/s")
         print(f"oom_backoff_evts : {generation_stats.oom_backoff_events}")
+        print(f"trunc_recov_rows : {generation_stats.truncation_recovery_rows}")
+        print(f"trunc_recov_rnds : {generation_stats.truncation_recovery_rounds}")
+        if generation_stats.vram_sample_count > 0:
+            print(
+                "vram_mean_gib   : "
+                f"{generation_stats.vram_mean_total_reserved_gib_sampled:.2f} "
+                "(total reserved, sampled)"
+            )
+            print(
+                "vram_max_gib    : "
+                f"{generation_stats.vram_max_total_reserved_gib_sampled:.2f} "
+                "(total reserved, sampled)"
+            )
         if comparison is not None:
             print(f"compared_with    : {previous_metrics_path}")
             print(f"delta_accuracy   : {comparison['delta_accuracy']:+.4f}")
@@ -479,6 +611,17 @@ def _resolve_dtype(dtype_name: str, torch_module: Any):
 
 
 def _load_prepared_rows(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Input file not found: {path}. "
+            "Pass a valid --input-jsonl path (for example: .../validation.jsonl)."
+        )
+    if path.is_dir():
+        raise IsADirectoryError(
+            f"--input-jsonl points to a directory, not a file: {path}. "
+            "If you used an env var, verify it with: echo \"$INPUT_JSONL\"."
+        )
+
     rows: list[dict[str, Any]] = []
     seen_sample_ids: set[str] = set()
     for idx, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
@@ -500,6 +643,156 @@ def _load_prepared_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _gib_from_bytes(num_bytes: int) -> float:
+    return float(num_bytes) / float(1024**3)
+
+
+def _create_vram_tracker(torch_module: Any) -> dict[str, Any] | None:
+    """Create per-run VRAM tracker state.
+
+    Notes
+    -----
+    - We sample memory once per processed batch to estimate mean/max usage.
+    - We also reset CUDA peak stats so per-device peaks are generation-scoped.
+    """
+    cuda = getattr(torch_module, "cuda", None)
+    if cuda is None or not cuda.is_available():
+        return None
+
+    device_count = int(cuda.device_count())
+    devices: list[dict[str, Any]] = []
+    for device_index in range(device_count):
+        try:
+            device_name = str(cuda.get_device_name(device_index))
+        except Exception:
+            device_name = f"cuda:{device_index}"
+        try:
+            cuda.reset_peak_memory_stats(device_index)
+        except Exception:
+            # Some backends may not support peak reset; continue with sampled stats.
+            pass
+        devices.append(
+            {
+                "device_index": int(device_index),
+                "device_name": device_name,
+                "sum_reserved_bytes": 0,
+                "sum_allocated_bytes": 0,
+                "max_reserved_bytes_sampled": 0,
+                "max_allocated_bytes_sampled": 0,
+            }
+        )
+
+    return {
+        "sample_count": 0,
+        "sum_total_reserved_bytes": 0,
+        "sum_total_allocated_bytes": 0,
+        "max_total_reserved_bytes_sampled": 0,
+        "max_total_allocated_bytes_sampled": 0,
+        "devices": devices,
+    }
+
+
+def _sample_vram_tracker(vram_tracker: dict[str, Any] | None, torch_module: Any) -> None:
+    """Take one VRAM sample from all visible CUDA devices."""
+    if vram_tracker is None:
+        return
+
+    cuda = getattr(torch_module, "cuda", None)
+    if cuda is None or not cuda.is_available():
+        return
+
+    total_reserved = 0
+    total_allocated = 0
+    for device_slot in vram_tracker["devices"]:
+        device_index = int(device_slot["device_index"])
+        reserved = int(cuda.memory_reserved(device_index))
+        allocated = int(cuda.memory_allocated(device_index))
+        device_slot["sum_reserved_bytes"] += reserved
+        device_slot["sum_allocated_bytes"] += allocated
+        device_slot["max_reserved_bytes_sampled"] = max(
+            int(device_slot["max_reserved_bytes_sampled"]), reserved
+        )
+        device_slot["max_allocated_bytes_sampled"] = max(
+            int(device_slot["max_allocated_bytes_sampled"]), allocated
+        )
+        total_reserved += reserved
+        total_allocated += allocated
+
+    vram_tracker["sample_count"] = int(vram_tracker["sample_count"]) + 1
+    vram_tracker["sum_total_reserved_bytes"] += total_reserved
+    vram_tracker["sum_total_allocated_bytes"] += total_allocated
+    vram_tracker["max_total_reserved_bytes_sampled"] = max(
+        int(vram_tracker["max_total_reserved_bytes_sampled"]), total_reserved
+    )
+    vram_tracker["max_total_allocated_bytes_sampled"] = max(
+        int(vram_tracker["max_total_allocated_bytes_sampled"]), total_allocated
+    )
+
+
+def _finalize_vram_tracker(
+    vram_tracker: dict[str, Any] | None,
+    torch_module: Any,
+) -> tuple[int, float | None, float | None, float | None, float | None, list[dict[str, Any]]]:
+    """Convert tracker state into report-ready summary fields."""
+    if vram_tracker is None:
+        return 0, None, None, None, None, []
+
+    sample_count = int(vram_tracker["sample_count"])
+    if sample_count <= 0:
+        return 0, None, None, None, None, []
+
+    mean_total_reserved = _gib_from_bytes(
+        int(vram_tracker["sum_total_reserved_bytes"]) // sample_count
+    )
+    max_total_reserved = _gib_from_bytes(
+        int(vram_tracker["max_total_reserved_bytes_sampled"])
+    )
+    mean_total_allocated = _gib_from_bytes(
+        int(vram_tracker["sum_total_allocated_bytes"]) // sample_count
+    )
+    max_total_allocated = _gib_from_bytes(
+        int(vram_tracker["max_total_allocated_bytes_sampled"])
+    )
+
+    cuda = getattr(torch_module, "cuda", None)
+    per_device: list[dict[str, Any]] = []
+    for device_slot in vram_tracker["devices"]:
+        device_index = int(device_slot["device_index"])
+        peak_reserved = int(device_slot["max_reserved_bytes_sampled"])
+        peak_allocated = int(device_slot["max_allocated_bytes_sampled"])
+        if cuda is not None and cuda.is_available():
+            try:
+                peak_reserved = max(peak_reserved, int(cuda.max_memory_reserved(device_index)))
+                peak_allocated = max(
+                    peak_allocated, int(cuda.max_memory_allocated(device_index))
+                )
+            except Exception:
+                pass
+        per_device.append(
+            {
+                "device_index": device_index,
+                "device_name": str(device_slot["device_name"]),
+                "mean_reserved_gib_sampled": _gib_from_bytes(
+                    int(device_slot["sum_reserved_bytes"]) // sample_count
+                ),
+                "max_reserved_gib": _gib_from_bytes(peak_reserved),
+                "mean_allocated_gib_sampled": _gib_from_bytes(
+                    int(device_slot["sum_allocated_bytes"]) // sample_count
+                ),
+                "max_allocated_gib": _gib_from_bytes(peak_allocated),
+            }
+        )
+
+    return (
+        sample_count,
+        mean_total_reserved,
+        max_total_reserved,
+        mean_total_allocated,
+        max_total_allocated,
+        per_device,
+    )
+
+
 def _run_generation(
     rows: list[dict[str, Any]],
     model: Any,
@@ -514,6 +807,7 @@ def _run_generation(
     truncate_chat_markers: bool,
     batch_size: int,
     oom_backoff: bool,
+    truncation_recovery_cfg: TruncationRecoveryConfig | None = None,
 ) -> GenerationStats:
     if log_every <= 0:
         raise ValueError(f"--log-every must be >= 1, got {log_every}")
@@ -521,6 +815,24 @@ def _run_generation(
         raise ValueError(f"--max-progress-lines must be >= 1, got {max_progress_lines}")
     if batch_size <= 0:
         raise ValueError(f"--batch-size must be >= 1, got {batch_size}")
+    if truncation_recovery_cfg is None:
+        truncation_recovery_cfg = TruncationRecoveryConfig(
+            enabled=False,
+            max_rounds=0,
+            extra_tokens_per_round=96,
+            datasets=(),
+            require_final_answer_signal=True,
+        )
+    if truncation_recovery_cfg.max_rounds < 0:
+        raise ValueError(
+            "--truncation-recovery-rounds must be >= 0, "
+            f"got {truncation_recovery_cfg.max_rounds}"
+        )
+    if truncation_recovery_cfg.extra_tokens_per_round <= 0:
+        raise ValueError(
+            "--truncation-recovery-extra-tokens must be >= 1, "
+            f"got {truncation_recovery_cfg.extra_tokens_per_round}"
+        )
 
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
     total = len(rows)
@@ -535,6 +847,10 @@ def _run_generation(
     )
     checkpoint_idx = 0
     oom_backoff_events = 0
+    truncation_recovery_rows = 0
+    truncation_recovery_rounds = 0
+    vram_tracker = _create_vram_tracker(torch_module=torch_module)
+    _sample_vram_tracker(vram_tracker=vram_tracker, torch_module=torch_module)
 
     with output_path.open("w", encoding="utf-8") as fout:
         done = 0
@@ -584,18 +900,24 @@ def _run_generation(
                     truncate_chat_markers=truncate_chat_markers,
                     torch_module=torch_module,
                     oom_backoff=oom_backoff,
+                    truncation_recovery_cfg=truncation_recovery_cfg,
                 )
                 oom_backoff_events += local_oom_events
                 for sub_idx, local_idx in enumerate(free_indices):
-                    raw_prediction, generated_token_count, hit_token_limit = free_outputs[sub_idx]
+                    free_result = free_outputs[sub_idx]
                     row = batch_rows[local_idx]
+                    if free_result.truncation_recovery_applied:
+                        truncation_recovery_rows += 1
+                        truncation_recovery_rounds += free_result.truncation_recovery_rounds
                     batch_results[local_idx] = _build_prediction_row(
                         row=row,
                         source_path=source_path,
                         row_index=batch_start + local_idx,
-                        raw_prediction=raw_prediction,
-                        generated_token_count=generated_token_count,
-                        hit_token_limit=hit_token_limit,
+                        raw_prediction=free_result.raw_prediction,
+                        generated_token_count=free_result.generated_token_count,
+                        hit_token_limit=free_result.hit_token_limit,
+                        truncation_recovery_applied=free_result.truncation_recovery_applied,
+                        truncation_recovery_rounds=free_result.truncation_recovery_rounds,
                     )
 
             for local_idx, pred_row in enumerate(batch_results):
@@ -624,13 +946,32 @@ def _run_generation(
                     )
                     checkpoint_idx += 1
 
+            # One sample per finished batch for stable, low-overhead VRAM telemetry.
+            _sample_vram_tracker(vram_tracker=vram_tracker, torch_module=torch_module)
+
     total_elapsed = max(time.perf_counter() - start_ts, 1e-6)
+    (
+        vram_sample_count,
+        vram_mean_total_reserved_gib_sampled,
+        vram_max_total_reserved_gib_sampled,
+        vram_mean_total_allocated_gib_sampled,
+        vram_max_total_allocated_gib_sampled,
+        vram_per_device,
+    ) = _finalize_vram_tracker(vram_tracker=vram_tracker, torch_module=torch_module)
     return GenerationStats(
         num_samples=total,
         elapsed_seconds=float(total_elapsed),
         sample_per_second=float(total / total_elapsed if total else 0.0),
         batch_size=int(batch_size),
         oom_backoff_events=int(oom_backoff_events),
+        truncation_recovery_rows=int(truncation_recovery_rows),
+        truncation_recovery_rounds=int(truncation_recovery_rounds),
+        vram_sample_count=int(vram_sample_count),
+        vram_mean_total_reserved_gib_sampled=vram_mean_total_reserved_gib_sampled,
+        vram_max_total_reserved_gib_sampled=vram_max_total_reserved_gib_sampled,
+        vram_mean_total_allocated_gib_sampled=vram_mean_total_allocated_gib_sampled,
+        vram_max_total_allocated_gib_sampled=vram_max_total_allocated_gib_sampled,
+        vram_per_device=vram_per_device,
     )
 
 
@@ -641,6 +982,8 @@ def _build_prediction_row(
     raw_prediction: str,
     generated_token_count: int,
     hit_token_limit: bool,
+    truncation_recovery_applied: bool = False,
+    truncation_recovery_rounds: int = 0,
 ) -> dict[str, Any]:
     """Build one prediction record in a single canonical place."""
     return {
@@ -657,6 +1000,8 @@ def _build_prediction_row(
             "row_index": row_index,
             "generated_tokens": int(generated_token_count),
             "hit_token_limit": bool(hit_token_limit),
+            "truncation_recovery_applied": bool(truncation_recovery_applied),
+            "truncation_recovery_rounds": int(truncation_recovery_rounds),
         },
     }
 
@@ -670,13 +1015,14 @@ def _generate_freeform_rows_with_optional_backoff(
     truncate_chat_markers: bool,
     torch_module: Any,
     oom_backoff: bool,
-) -> tuple[list[tuple[str, int, bool]], int]:
+    truncation_recovery_cfg: TruncationRecoveryConfig,
+) -> tuple[list[FreeformGenerationResult], int]:
     """Generate free-form outputs for a row batch.
 
     Returns
     -------
-    tuple[list[tuple[str, int, bool]], int]
-        - list per row: (`raw_prediction`, `generated_token_count`, `hit_token_limit`)
+    tuple[list[FreeformGenerationResult], int]
+        - list per row: generation result with recovery metadata
         - count of OOM backoff events in this call tree
     """
     prompts = [str(row["prompt_text"]) for row in rows]
@@ -689,6 +1035,17 @@ def _generate_freeform_rows_with_optional_backoff(
             pad_id=pad_id,
             truncate_chat_markers=truncate_chat_markers,
             torch_module=torch_module,
+        )
+        outputs = _apply_truncation_recovery_if_needed(
+            rows=rows,
+            outputs=outputs,
+            model=model,
+            tokenizer=tokenizer,
+            gen_cfg=gen_cfg,
+            pad_id=pad_id,
+            truncate_chat_markers=truncate_chat_markers,
+            torch_module=torch_module,
+            truncation_recovery_cfg=truncation_recovery_cfg,
         )
         return outputs, 0
     except RuntimeError as exc:
@@ -707,6 +1064,7 @@ def _generate_freeform_rows_with_optional_backoff(
             truncate_chat_markers=truncate_chat_markers,
             torch_module=torch_module,
             oom_backoff=oom_backoff,
+            truncation_recovery_cfg=truncation_recovery_cfg,
         )
         right_outputs, right_events = _generate_freeform_rows_with_optional_backoff(
             rows=rows[mid:],
@@ -717,6 +1075,7 @@ def _generate_freeform_rows_with_optional_backoff(
             truncate_chat_markers=truncate_chat_markers,
             torch_module=torch_module,
             oom_backoff=oom_backoff,
+            truncation_recovery_cfg=truncation_recovery_cfg,
         )
         return left_outputs + right_outputs, left_events + right_events + 1
 
@@ -729,7 +1088,7 @@ def _generate_freeform_rows_once(
     pad_id: int | None,
     truncate_chat_markers: bool,
     torch_module: Any,
-) -> list[tuple[str, int, bool]]:
+) -> list[FreeformGenerationResult]:
     """Run exactly one batched free-form generation call."""
     if not prompts:
         return []
@@ -765,7 +1124,7 @@ def _generate_freeform_rows_once(
         output_ids = model.generate(**inputs, **gen_kwargs)  # core generation call
 
     input_seq_len = int(inputs["input_ids"].shape[1])
-    outputs: list[tuple[str, int, bool]] = []
+    outputs: list[FreeformGenerationResult] = []
     for row_idx in range(len(prompts)):
         generated = output_ids[row_idx, input_seq_len:]
         generated = _trim_trailing_pad_tokens(
@@ -778,8 +1137,191 @@ def _generate_freeform_rows_once(
         raw_prediction = tokenizer.decode(generated, skip_special_tokens=True).strip()
         if truncate_chat_markers:
             raw_prediction = _truncate_output_at_chat_markers(raw_prediction)
-        outputs.append((raw_prediction, generated_token_count, hit_token_limit))
+        outputs.append(
+            FreeformGenerationResult(
+                raw_prediction=raw_prediction,
+                generated_token_count=generated_token_count,
+                hit_token_limit=hit_token_limit,
+            )
+        )
     return outputs
+
+
+def _apply_truncation_recovery_if_needed(
+    rows: list[dict[str, Any]],
+    outputs: list[FreeformGenerationResult],
+    model: Any,
+    tokenizer: Any,
+    gen_cfg: GenerationConfig,
+    pad_id: int | None,
+    truncate_chat_markers: bool,
+    torch_module: Any,
+    truncation_recovery_cfg: TruncationRecoveryConfig,
+) -> list[FreeformGenerationResult]:
+    """Apply continuation decoding for rows that likely ended by truncation."""
+    if not truncation_recovery_cfg.enabled:
+        return outputs
+    if truncation_recovery_cfg.max_rounds <= 0:
+        return outputs
+
+    recovered_outputs: list[FreeformGenerationResult] = []
+    for row, result in zip(rows, outputs, strict=True):
+        dataset = str(row.get("dataset", "")).strip().lower()
+        if not _needs_truncation_recovery(
+            dataset=dataset,
+            result=result,
+            truncation_recovery_cfg=truncation_recovery_cfg,
+        ):
+            recovered_outputs.append(result)
+            continue
+        recovered_outputs.append(
+            _recover_truncated_freeform_output(
+                row=row,
+                result=result,
+                model=model,
+                tokenizer=tokenizer,
+                gen_cfg=gen_cfg,
+                pad_id=pad_id,
+                truncate_chat_markers=truncate_chat_markers,
+                torch_module=torch_module,
+                truncation_recovery_cfg=truncation_recovery_cfg,
+            )
+        )
+    return recovered_outputs
+
+
+def _recover_truncated_freeform_output(
+    row: dict[str, Any],
+    result: FreeformGenerationResult,
+    model: Any,
+    tokenizer: Any,
+    gen_cfg: GenerationConfig,
+    pad_id: int | None,
+    truncate_chat_markers: bool,
+    torch_module: Any,
+    truncation_recovery_cfg: TruncationRecoveryConfig,
+) -> FreeformGenerationResult:
+    """Continue generation from partial output to reduce cap-hit truncation errors."""
+    dataset = str(row.get("dataset", "")).strip().lower()
+    current_text = str(result.raw_prediction)
+    total_generated_tokens = int(result.generated_token_count)
+    current_hit_limit = bool(result.hit_token_limit)
+    applied = False
+    rounds_used = 0
+
+    recovery_gen_cfg = GenerationConfig(
+        max_new_tokens=int(truncation_recovery_cfg.extra_tokens_per_round),
+        do_sample=bool(gen_cfg.do_sample),
+        temperature=float(gen_cfg.temperature),
+        top_p=float(gen_cfg.top_p),
+        top_k=int(gen_cfg.top_k),
+    )
+
+    for _ in range(int(truncation_recovery_cfg.max_rounds)):
+        if not _needs_truncation_recovery(
+            dataset=dataset,
+            result=FreeformGenerationResult(
+                raw_prediction=current_text,
+                generated_token_count=total_generated_tokens,
+                hit_token_limit=current_hit_limit,
+            ),
+            truncation_recovery_cfg=truncation_recovery_cfg,
+        ):
+            break
+
+        rounds_used += 1
+        continuation_prompt = f"{row['prompt_text']}{current_text}"
+        continuation_result = _generate_freeform_rows_once(
+            prompts=[continuation_prompt],
+            model=model,
+            tokenizer=tokenizer,
+            gen_cfg=recovery_gen_cfg,
+            pad_id=pad_id,
+            truncate_chat_markers=truncate_chat_markers,
+            torch_module=torch_module,
+        )[0]
+
+        if continuation_result.generated_token_count <= 0:
+            break
+
+        applied = True
+        current_text = _stitch_prediction_chunks(
+            prefix=current_text,
+            continuation=continuation_result.raw_prediction,
+        )
+        total_generated_tokens += int(continuation_result.generated_token_count)
+        current_hit_limit = bool(continuation_result.hit_token_limit)
+
+    return FreeformGenerationResult(
+        raw_prediction=current_text,
+        generated_token_count=total_generated_tokens,
+        hit_token_limit=current_hit_limit,
+        truncation_recovery_applied=applied,
+        truncation_recovery_rounds=(rounds_used if applied else 0),
+    )
+
+
+def _needs_truncation_recovery(
+    dataset: str,
+    result: FreeformGenerationResult,
+    truncation_recovery_cfg: TruncationRecoveryConfig,
+) -> bool:
+    """Decide whether one output likely needs continuation recovery."""
+    if not truncation_recovery_cfg.enabled:
+        return False
+    if dataset not in set(truncation_recovery_cfg.datasets):
+        return False
+    if not result.hit_token_limit:
+        return False
+    if not truncation_recovery_cfg.require_final_answer_signal:
+        return True
+    return not _has_dataset_final_answer_signal(
+        text=result.raw_prediction,
+        dataset=dataset,
+    )
+
+
+def _has_dataset_final_answer_signal(text: str, dataset: str) -> bool:
+    """Heuristic check for whether output already contains an answer-finalization cue."""
+    value = str(text).strip()
+    if value == "":
+        return False
+    lowered = value.lower()
+
+    if dataset in {"gsm8k", "hendrycks_math"}:
+        if re.search(r"final\s*answer(?:\s*is)?\s*:", lowered):
+            return True
+        if "####" in value:
+            return True
+        if "\\boxed" in value:
+            return True
+        # Accept a plain numeric-only tail as final signal.
+        if re.search(r"[-+]?\d*\.?\d+(?:/\d+)?\s*$", value):
+            return True
+        return False
+
+    if dataset == "strategyqa":
+        if re.search(
+            r"(?:final\s*answer|answer|verdict)\s*[:\-]\s*(yes|no|true|false)\b",
+            lowered,
+        ):
+            return True
+        if re.search(r"^\s*(yes|no|true|false)\s*$", lowered):
+            return True
+        return False
+
+    return True
+
+
+def _stitch_prediction_chunks(prefix: str, continuation: str) -> str:
+    """Join continuation text while preserving readable spacing."""
+    left = str(prefix).rstrip()
+    right = str(continuation).lstrip()
+    if left == "":
+        return right
+    if right == "":
+        return left
+    return f"{left}\n{right}".strip()
 
 
 def _resolve_model_input_device(model: Any):
@@ -1130,6 +1672,21 @@ def _build_progress_checkpoints(
         selected.append(candidates[idx])
     selected[-1] = total
     return set(selected)
+
+
+def _parse_csv_datasets(raw: str) -> tuple[str, ...]:
+    """Parse comma-separated dataset list into a normalized tuple."""
+    parts = [p.strip().lower() for p in str(raw).split(",")]
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        if part == "":
+            continue
+        if part in seen:
+            continue
+        seen.add(part)
+        deduped.append(part)
+    return tuple(deduped)
 
 
 class _TeeWriter:
