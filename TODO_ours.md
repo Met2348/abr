@@ -92,6 +92,34 @@ Use this as the final pre-Phase-B gate before committing Phase A baseline.
 
 ---
 
+## 0.3 Phase B Lifecycle Status (Authoritative)
+
+Source of truth:
+- `phase_B_plan.md`
+
+Lifecycle checklist:
+- [x] `B0` Scope Freeze (completed):
+  - PEFT-first path selected,
+  - first milestone task and artifact set frozen,
+  - evaluation/reporting contract frozen.
+- [ ] `B1` Train Pipeline Skeleton
+- [ ] `B1` Train Pipeline Skeleton (code implemented; smoke exit gate pending)
+- [ ] `B2` Data Contract Wiring
+- [ ] `B3` Smoke Stability
+- [ ] `B4` Development Tuning
+- [ ] `B5` First Official SFT/PEFT Run
+- [ ] `B6` Handoff to next stage (value-head/BCR-lite expansion)
+
+Phase B first-run target (frozen in B0):
+1. StrategyQA direct-answer training on prepared artifact set:
+   - `assets/artifacts/phase_a_prepared/strategyqa/b0f373610f96/`
+2. Base model:
+   - `assets/models/Qwen2.5-7B-Instruct`
+3. First path:
+   - PEFT (LoRA) default, full SFT fallback only if blocked.
+
+---
+
 ## 1. Method Scope Freeze (Do This First)
 
 Before coding, freeze a minimal v1 method to prevent scope drift.

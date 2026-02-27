@@ -1,6 +1,6 @@
 # Phase A Report: Current Experiment Status and Handoff
 
-Last updated: 2026-02-27 01:16:23 +0800
+Last updated: 2026-02-27 01:35:45 +0800
 
 ## 1. Purpose
 
@@ -186,3 +186,12 @@ Before tagging/committing Phase A as baseline:
    - metrics with evaluator version,
    - persisted console log.
 4. Keep a frozen "do-not-edit" note for `scripts/phase_a_*` during early Phase B development.
+
+## 12. Phase B Kickoff Status
+
+1. Phase B lifecycle and goals are now documented in:
+   - `phase_B_plan.md`
+2. Lifecycle `B0` (scope freeze) is complete.
+3. Next active step is `B1` (training pipeline skeleton).
+4. Supervisor-ready Phase A slide reference is maintained in:
+   - `phase_A_ppt_reference.md`

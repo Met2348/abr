@@ -2,6 +2,166 @@
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
 
+## 2026-02-27 18:58:34 +08 (+0800)
+- Type: Documentation Policy Update / System Prompt Refresh
+- Summary: Added dual-README policy and command-recording requirements to persistent system prompts.
+- Details:
+  - Updated `chat_system_prompts.md` with new rules:
+    - `readme.md` is public and concise,
+    - `readme_full.md` is private and detailed,
+    - major code changes must update both README files,
+    - regular/minor changes should update `readme_full.md`,
+    - assistant-provided shell commands should be recorded in `readme_full.md`,
+    - public README must stay environment-agnostic.
+  - Updated acknowledgement metadata source-scope text accordingly.
+- Files changed:
+  - `chat_system_prompts.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-02-27 17:50:42 +08 (+0800)
+- Type: Documentation / Supervisor Reporting Reference
+- Summary: Added a dedicated Phase A PPT-reference document and linked it from core docs for future reporting reuse.
+- Details:
+  - Added `phase_A_ppt_reference.md`:
+    - slide-ready summary structure (3+1 pages),
+    - consolidated numeric outcomes table,
+    - glossary for non-technical audience,
+    - interpretation caveat on model-potential vs protocol baseline,
+    - recommended ceiling-calibration mini-track.
+  - Updated `readme.md` context-file list:
+    - added link to `phase_A_ppt_reference.md`.
+  - Updated `phase_A_report.md`:
+    - added pointer to the new supervisor-ready reference doc.
+- Files changed:
+  - `phase_A_ppt_reference.md` (new)
+  - `readme.md`
+  - `phase_A_report.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-02-27 02:01:22 +08 (+0800)
+- Type: Bug Fix / Phase B CLI Config Parsing
+- Summary: Fixed Phase B training CLI so config-only invocation works without explicitly passing `--train-jsonl`.
+- Details:
+  - Root cause:
+    - `--train-jsonl` was marked `required=True` at parser definition,
+    - argparse enforced this before config defaults from `--config-json` were applied.
+  - Fix in `scripts/phase_b_train_sft.py`:
+    - changed `--train-jsonl` to optional at parser level (`default=None`),
+    - made `parse_args` accept optional argv list for testability,
+    - added post-merge validation: require `train_jsonl` after config defaults + CLI overrides are resolved.
+  - Regression tests:
+    - updated `tests/unit/test_phase_b_train_script.py` with config-only parse test.
+  - Validation:
+    - `python -m py_compile scripts/phase_b_train_sft.py` passed,
+    - `python -m pytest -q tests/unit/test_phase_b_train_script.py tests/unit/test_phase_b_data.py` passed (`5 passed`).
+- Files changed:
+  - `scripts/phase_b_train_sft.py`
+  - `tests/unit/test_phase_b_train_script.py`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-02-27 01:48:57 +08 (+0800)
+- Type: Phase B B1 Workflow Integration / Param-Group Runner
+- Summary: Added one-click Phase B training suite shell workflow with named param groups and updated usage docs.
+- Details:
+  - Added `scripts/run_phase_b_training_suite.sh`:
+    - param groups:
+      - `B1_SMOKE` (default),
+      - `B1_FIRST`,
+    - prints group intention/observe/expectation metadata,
+    - persists suite logs and summary under `assets/artifacts/phase_b_logs/<RUN_PREFIX>/`,
+    - supports extra CLI passthrough via `PHASE_B_EXTRA_ARGS`.
+  - Updated `readme.md`:
+    - added section `10.5 One-Click Phase B Param Groups` with usage examples.
+  - Validation:
+    - `bash -n scripts/run_phase_b_training_suite.sh` passed,
+    - full tests passed: `48 passed, 1 skipped`.
+- Files changed:
+  - `scripts/run_phase_b_training_suite.sh` (new)
+  - `readme.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-02-27 01:47:19 +08 (+0800)
+- Type: Phase B B1 Implementation / Training Skeleton
+- Summary: Implemented B1 training pipeline skeleton (PEFT-first SFT runner), Phase B eval bridge, starter configs, and unit tests.
+- Details:
+  - Added new Phase B core package:
+    - `src/ours/phase_b/contracts.py`
+    - `src/ours/phase_b/data.py`
+    - `src/ours/phase_b/__init__.py`
+    - includes strict row validation and duplicate sample-id guard for train/eval JSONL.
+  - Added Phase B training script:
+    - `scripts/phase_b_train_sft.py`
+    - features:
+      - PEFT-first (`--training-mode peft`) with safe fallback to SFT,
+      - batching-first defaults (`per_device_train_batch_size=4`),
+      - OOM safety net (`--auto-find-batch-size`),
+      - run manifest + train/eval metrics + summary outputs,
+      - version-tolerant `TrainingArguments` construction.
+  - Added Phase B eval bridge:
+    - `scripts/phase_b_eval.py`
+    - delegates to frozen Phase A generation/eval pipeline for fair comparison.
+  - Added starter configs:
+    - `configs/phase_b/peft_smoke_strategyqa.json`
+    - `configs/phase_b/peft_first_run_strategyqa.json`
+  - Updated planning/docs:
+    - `phase_B_plan.md` with B1 implementation status note,
+    - `TODO_ours.md` lifecycle status refined for B1 pending smoke exit gate,
+    - `readme.md` with Phase B B1 quick-start commands and safety notes.
+  - Added new tests:
+    - `tests/unit/test_phase_b_data.py`
+    - `tests/unit/test_phase_b_train_script.py`
+  - Validation:
+    - `python -m py_compile scripts/phase_b_train_sft.py scripts/phase_b_eval.py src/ours/phase_b/contracts.py src/ours/phase_b/data.py src/ours/phase_b/__init__.py` passed.
+    - `python -m pytest -q tests/unit/test_phase_b_data.py tests/unit/test_phase_b_train_script.py` passed (`4 passed`).
+- Files changed:
+  - `src/ours/phase_b/contracts.py` (new)
+  - `src/ours/phase_b/data.py` (new)
+  - `src/ours/phase_b/__init__.py` (new)
+  - `scripts/phase_b_train_sft.py` (new)
+  - `scripts/phase_b_eval.py` (new)
+  - `configs/phase_b/peft_smoke_strategyqa.json` (new)
+  - `configs/phase_b/peft_first_run_strategyqa.json` (new)
+  - `tests/unit/test_phase_b_data.py` (new)
+  - `tests/unit/test_phase_b_train_script.py` (new)
+  - `phase_B_plan.md`
+  - `TODO_ours.md`
+  - `readme.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-02-27 01:35:45 +08 (+0800)
+- Type: Planning Milestone / Phase B B0 Implementation
+- Summary: Implemented Phase B Lifecycle B0 by freezing first-run scope and publishing a full Phase B lifecycle plan with explicit goals, gates, and next actions.
+- Details:
+  - Added new root planning document:
+    - `phase_B_plan.md`
+    - includes full lifecycle `B0` -> `B6`, B0 freeze contract, deliverables, risks, and immediate B1 actions.
+  - Updated `TODO_ours.md`:
+    - added `0.3 Phase B Lifecycle Status` section with checklist and frozen first-run target details,
+    - linked to `phase_B_plan.md` as authoritative lifecycle source.
+  - Updated `readme.md`:
+    - milestone status now indicates Phase B B0 completion,
+    - added references to `phase_B_plan.md` in roadmap and context file list.
+  - Updated `phase_A_report.md`:
+    - added `Phase B Kickoff Status` note and handoff pointer to the new plan.
+- Files changed:
+  - `phase_B_plan.md` (new)
+  - `TODO_ours.md`
+  - `readme.md`
+  - `phase_A_report.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
 ## 2026-02-27 01:16:23 +08 (+0800)
 - Type: Documentation Consolidation / Phase A Retrospective
 - Summary: Performed a full Phase A retrospective pass and added consolidated conclusions, notices, and lessons-learned guidance across core docs to support clean handoff into Phase B.

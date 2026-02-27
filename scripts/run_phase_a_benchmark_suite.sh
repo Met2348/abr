@@ -51,6 +51,24 @@ OOM_BACKOFF="${OOM_BACKOFF:-1}"
 STRATEGYQA_DECODE_MODE="${STRATEGYQA_DECODE_MODE:-freeform}"
 TRUNCATE_CHAT_MARKERS="${TRUNCATE_CHAT_MARKERS:-1}"
 
+# Template slots used by groups.
+# Groups can override these values to compare prompt styles while reusing
+# the same suite execution logic.
+DIRECT_TEMPLATE_ID="${DIRECT_TEMPLATE_ID:-qa_direct}"
+DIRECT_TARGET_STYLE="${DIRECT_TARGET_STYLE:-answer_only}"
+COT_TEMPLATE_ID="${COT_TEMPLATE_ID:-qa_cot_then_final}"
+COT_TARGET_STYLE="${COT_TARGET_STYLE:-cot_then_answer}"
+STRICT_TEMPLATE_ID="${STRICT_TEMPLATE_ID:-qa_binary_strict}"
+STRICT_TARGET_STYLE="${STRICT_TARGET_STYLE:-answer_only}"
+
+# Keep a copy of baseline slot values so each group starts from a clean reset.
+BASE_DIRECT_TEMPLATE_ID="${DIRECT_TEMPLATE_ID}"
+BASE_DIRECT_TARGET_STYLE="${DIRECT_TARGET_STYLE}"
+BASE_COT_TEMPLATE_ID="${COT_TEMPLATE_ID}"
+BASE_COT_TARGET_STYLE="${COT_TARGET_STYLE}"
+BASE_STRICT_TEMPLATE_ID="${STRICT_TEMPLATE_ID}"
+BASE_STRICT_TARGET_STYLE="${STRICT_TARGET_STYLE}"
+
 # Sweep defaults used by some groups.
 COT_SWEEP_TOKENS="${COT_SWEEP_TOKENS:-128 192 256 320 384}"
 DIRECT_SWEEP_TOKENS="${DIRECT_SWEEP_TOKENS:-16 24 32 48 64}"
@@ -253,6 +271,12 @@ configure_param_group() {
   GROUP_NEED_DIRECT=0
   GROUP_NEED_COT=0
   GROUP_NEED_STRICT=0
+  DIRECT_TEMPLATE_ID="${BASE_DIRECT_TEMPLATE_ID}"
+  DIRECT_TARGET_STYLE="${BASE_DIRECT_TARGET_STYLE}"
+  COT_TEMPLATE_ID="${BASE_COT_TEMPLATE_ID}"
+  COT_TARGET_STYLE="${BASE_COT_TARGET_STYLE}"
+  STRICT_TEMPLATE_ID="${BASE_STRICT_TEMPLATE_ID}"
+  STRICT_TARGET_STYLE="${BASE_STRICT_TARGET_STYLE}"
 
   case "${group_id}" in
     A1)
@@ -400,38 +424,104 @@ configure_param_group() {
         "direct_binchoice_repro|direct|${RUN_PREFIX}_direct_binchoice|16|yes"
       )
       ;;
+    A7)
+      # Intention:
+      # Prompt-style A/B/C test for StrategyQA.
+      #
+      # Observe:
+      # - style-level differences in parse_error and accuracy,
+      # - whether compact CoT helps or hurts under fixed decoding.
+      #
+      # Expectation:
+      # - minimal binary style should be strongest on compliance,
+      # - evidence/verdict style may improve interpretability,
+      # - compact CoT may trade speed for quality.
+      GROUP_TITLE="StrategyQA Prompt Style Sweep"
+      GROUP_INTENTION="Compare three StrategyQA prompt styles under one reproducible setup."
+      GROUP_OBSERVE="Check style ranking on accuracy, parse_error_rate, and generation speed."
+      GROUP_EXPECTATION="Minimal-binary style should be cleanest; CoT style may help only if token budget is sufficient."
+      DATASET="strategyqa"
+      STRATEGYQA_DECODE_MODE="freeform"
+      DIRECT_TEMPLATE_ID="qa_strategyqa_minimal_binary"
+      DIRECT_TARGET_STYLE="answer_only"
+      COT_TEMPLATE_ID="qa_strategyqa_cot_compact"
+      COT_TARGET_STYLE="cot_then_answer"
+      STRICT_TEMPLATE_ID="qa_strategyqa_evidence_verdict"
+      STRICT_TARGET_STYLE="answer_only"
+      GROUP_NEED_DIRECT=1
+      GROUP_NEED_COT=1
+      GROUP_NEED_STRICT=1
+      GROUP_RUN_SPECS=(
+        "style_minimal_t16|direct|${RUN_PREFIX}_style_minimal_t16|16|no"
+        "style_cot_compact_t96|cot|${RUN_PREFIX}_style_cot_compact_t96|96|no"
+        "style_evidence_verdict_t32|strict|${RUN_PREFIX}_style_evidence_verdict_t32|32|no"
+      )
+      ;;
+    A8)
+      # Intention:
+      # Prompt-style A/B/C test for GSM8K.
+      #
+      # Observe:
+      # - direct final-only vs compact CoT vs equation-first formats,
+      # - extraction reliability and accuracy under each style.
+      #
+      # Expectation:
+      # - direct-final should be fastest,
+      # - compact CoT can improve quality if decode budget is large enough,
+      # - equation-first can be a balanced middle point.
+      GROUP_TITLE="GSM8K Prompt Style Sweep"
+      GROUP_INTENTION="Compare three GSM8K prompt styles with deterministic decode settings."
+      GROUP_OBSERVE="Check accuracy first, then runtime and extraction diagnostics."
+      GROUP_EXPECTATION="CoT style may win on quality; direct style should win on speed."
+      DATASET="gsm8k"
+      STRATEGYQA_DECODE_MODE="freeform"
+      DIRECT_TEMPLATE_ID="qa_gsm8k_direct_final_only"
+      DIRECT_TARGET_STYLE="answer_only"
+      COT_TEMPLATE_ID="qa_gsm8k_cot_compact_final"
+      COT_TARGET_STYLE="cot_then_answer"
+      STRICT_TEMPLATE_ID="qa_gsm8k_equation_then_final"
+      STRICT_TARGET_STYLE="answer_only"
+      GROUP_NEED_DIRECT=1
+      GROUP_NEED_COT=1
+      GROUP_NEED_STRICT=1
+      GROUP_RUN_SPECS=(
+        "style_direct_final_t32|direct|${RUN_PREFIX}_style_direct_final_t32|32|no"
+        "style_cot_compact_t192|cot|${RUN_PREFIX}_style_cot_compact_t192|192|no"
+        "style_equation_t64|strict|${RUN_PREFIX}_style_equation_t64|64|no"
+      )
+      ;;
     *)
-      die "Unsupported ACTIVE_PARAM_GROUP=${group_id}. Supported: A1, A2, A3, A4, A5, A6"
+      die "Unsupported ACTIVE_PARAM_GROUP=${group_id}. Supported: A1, A2, A3, A4, A5, A6, A7, A8"
       ;;
   esac
 }
 
 prepare_needed_inputs() {
   if [[ "${GROUP_NEED_DIRECT}" == "1" ]]; then
-    prepare_variant "qa_direct" "answer_only"
+    prepare_variant "${DIRECT_TEMPLATE_ID}" "${DIRECT_TARGET_STYLE}"
     local direct_prep_dir
-    direct_prep_dir="$(resolve_prepared_dir "answer_only" "qa_direct")"
+    direct_prep_dir="$(resolve_prepared_dir "${DIRECT_TARGET_STYLE}" "${DIRECT_TEMPLATE_ID}")"
     DIRECT_VAL_JSONL="${direct_prep_dir}/validation.jsonl"
     assert_file "${DIRECT_VAL_JSONL}"
-    log "Prepared direct validation file: ${DIRECT_VAL_JSONL}"
+    log "Prepared direct validation file: ${DIRECT_VAL_JSONL} (${DIRECT_TEMPLATE_ID}, ${DIRECT_TARGET_STYLE})"
   fi
 
   if [[ "${GROUP_NEED_COT}" == "1" ]]; then
-    prepare_variant "qa_cot_then_final" "cot_then_answer"
+    prepare_variant "${COT_TEMPLATE_ID}" "${COT_TARGET_STYLE}"
     local cot_prep_dir
-    cot_prep_dir="$(resolve_prepared_dir "cot_then_answer" "qa_cot_then_final")"
+    cot_prep_dir="$(resolve_prepared_dir "${COT_TARGET_STYLE}" "${COT_TEMPLATE_ID}")"
     COT_VAL_JSONL="${cot_prep_dir}/validation.jsonl"
     assert_file "${COT_VAL_JSONL}"
-    log "Prepared CoT validation file   : ${COT_VAL_JSONL}"
+    log "Prepared CoT validation file   : ${COT_VAL_JSONL} (${COT_TEMPLATE_ID}, ${COT_TARGET_STYLE})"
   fi
 
   if [[ "${GROUP_NEED_STRICT}" == "1" ]]; then
-    prepare_variant "qa_binary_strict" "answer_only"
+    prepare_variant "${STRICT_TEMPLATE_ID}" "${STRICT_TARGET_STYLE}"
     local strict_prep_dir
-    strict_prep_dir="$(resolve_prepared_dir "answer_only" "qa_binary_strict")"
+    strict_prep_dir="$(resolve_prepared_dir "${STRICT_TARGET_STYLE}" "${STRICT_TEMPLATE_ID}")"
     STRICT_VAL_JSONL="${strict_prep_dir}/validation.jsonl"
     assert_file "${STRICT_VAL_JSONL}"
-    log "Prepared strict validation file: ${STRICT_VAL_JSONL}"
+    log "Prepared strict validation file: ${STRICT_VAL_JSONL} (${STRICT_TEMPLATE_ID}, ${STRICT_TARGET_STYLE})"
   fi
 }
 
@@ -496,6 +586,12 @@ print_summary_table() {
   PHASEA_TRUNCATE_CHAT_MARKERS="${TRUNCATE_CHAT_MARKERS}" \
   PHASEA_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
   PHASEA_MODEL_PATH="${MODEL_PATH}" \
+  PHASEA_DIRECT_TEMPLATE_ID="${DIRECT_TEMPLATE_ID}" \
+  PHASEA_DIRECT_TARGET_STYLE="${DIRECT_TARGET_STYLE}" \
+  PHASEA_COT_TEMPLATE_ID="${COT_TEMPLATE_ID}" \
+  PHASEA_COT_TARGET_STYLE="${COT_TARGET_STYLE}" \
+  PHASEA_STRICT_TEMPLATE_ID="${STRICT_TEMPLATE_ID}" \
+  PHASEA_STRICT_TARGET_STYLE="${STRICT_TARGET_STYLE}" \
   PHASEA_DIRECT_VAL_JSONL="${DIRECT_VAL_JSONL}" \
   PHASEA_COT_VAL_JSONL="${COT_VAL_JSONL}" \
   PHASEA_STRICT_VAL_JSONL="${STRICT_VAL_JSONL}" \
@@ -608,6 +704,18 @@ out_lines.append(f"strategyqa_decode : {os.environ['PHASEA_STRATEGYQA_DECODE_MOD
 out_lines.append(f"truncate_markers  : {os.environ['PHASEA_TRUNCATE_CHAT_MARKERS']}")
 out_lines.append(f"cuda_devices      : {os.environ['PHASEA_CUDA_VISIBLE_DEVICES']}")
 out_lines.append(f"model_path        : {os.environ['PHASEA_MODEL_PATH']}")
+out_lines.append(
+    "direct_template  : "
+    f"{os.environ['PHASEA_DIRECT_TEMPLATE_ID']} ({os.environ['PHASEA_DIRECT_TARGET_STYLE']})"
+)
+out_lines.append(
+    "cot_template     : "
+    f"{os.environ['PHASEA_COT_TEMPLATE_ID']} ({os.environ['PHASEA_COT_TARGET_STYLE']})"
+)
+out_lines.append(
+    "strict_template  : "
+    f"{os.environ['PHASEA_STRICT_TEMPLATE_ID']} ({os.environ['PHASEA_STRICT_TARGET_STYLE']})"
+)
 direct_path = os.environ.get("PHASEA_DIRECT_VAL_JSONL", "")
 cot_path = os.environ.get("PHASEA_COT_VAL_JSONL", "")
 strict_path = os.environ.get("PHASEA_STRICT_VAL_JSONL", "")
@@ -670,15 +778,12 @@ main() {
   log "Run prefix     : ${RUN_PREFIX}"
   log "Log settings   : log_every=${LOG_EVERY}, max_progress_lines=${MAX_PROGRESS_LINES}"
   log "Batch settings : batch_size=${BATCH_SIZE}, oom_backoff=${OOM_BACKOFF}"
-  log "Decode mode    : strategyqa_decode_mode=${STRATEGYQA_DECODE_MODE}, truncate_chat_markers=${TRUNCATE_CHAT_MARKERS}"
   if [[ "${ENABLE_PERSISTED_LOGS}" == "1" ]]; then
     log "Suite log file : ${SUITE_LOG_FILE}"
   else
     log "Suite log file : <disabled>"
   fi
   log "Summary file   : ${SUITE_SUMMARY_FILE}"
-  log "Dataset config : dataset=${DATASET}, source_split=${SOURCE_SPLIT}, split_policy=${SPLIT_POLICY}, limit=${LIMIT}"
-
   assert_file "scripts/phase_a_prepare.py"
   assert_file "scripts/phase_a_generate_and_eval.py"
   assert_dir "${MODEL_PATH}"
@@ -690,6 +795,9 @@ main() {
   log "Intention      : ${GROUP_INTENTION}"
   log "Observe        : ${GROUP_OBSERVE}"
   log "Expectation    : ${GROUP_EXPECTATION}"
+  log "Dataset config : dataset=${DATASET}, source_split=${SOURCE_SPLIT}, split_policy=${SPLIT_POLICY}, limit=${LIMIT}"
+  log "Decode mode    : strategyqa_decode_mode=${STRATEGYQA_DECODE_MODE}, truncate_chat_markers=${TRUNCATE_CHAT_MARKERS}"
+  log "Template slots : direct=${DIRECT_TEMPLATE_ID}/${DIRECT_TARGET_STYLE}, cot=${COT_TEMPLATE_ID}/${COT_TARGET_STYLE}, strict=${STRICT_TEMPLATE_ID}/${STRICT_TARGET_STYLE}"
 
   prepare_needed_inputs
   execute_group_runs

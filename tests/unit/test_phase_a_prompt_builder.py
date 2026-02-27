@@ -23,6 +23,16 @@ def test_list_template_versions_contains_math_direct() -> None:
     assert "1.0.0" in versions
 
 
+def test_list_template_versions_contains_strategyqa_style_template() -> None:
+    versions = list_template_versions("qa_strategyqa_minimal_binary")
+    assert "1.0.0" in versions
+
+
+def test_list_template_versions_contains_gsm8k_style_template() -> None:
+    versions = list_template_versions("qa_gsm8k_direct_final_only")
+    assert "1.0.0" in versions
+
+
 def test_build_prepared_sample_answer_only() -> None:
     sample = CanonicalSample(
         id="toy:1",
@@ -62,3 +72,42 @@ def test_build_prepared_sample_cot_then_answer_fallback_without_cot() -> None:
     )
 
     assert prepared.target_text == "Final answer: yes"
+
+
+def test_build_prepared_sample_strategyqa_verdict_style() -> None:
+    sample = CanonicalSample(
+        id="toy:3",
+        dataset="strategyqa",
+        question="Can penguins fly?",
+        answer="no",
+        cot=None,
+    )
+    prepared = build_prepared_sample(
+        sample=sample,
+        split="validation",
+        target_style="answer_only",
+        template_id="qa_strategyqa_evidence_verdict",
+        template_version="1.0.0",
+    )
+
+    assert prepared.target_text == "Verdict: no"
+    assert "Evidence:" in prepared.prompt_text
+
+
+def test_build_prepared_sample_gsm8k_direct_final_only_style() -> None:
+    sample = CanonicalSample(
+        id="toy:4",
+        dataset="gsm8k",
+        question="What is 3 + 4?",
+        answer="7",
+        cot=None,
+    )
+    prepared = build_prepared_sample(
+        sample=sample,
+        split="train",
+        target_style="answer_only",
+        template_id="qa_gsm8k_direct_final_only",
+        template_version="1.0.0",
+    )
+
+    assert prepared.target_text == "Final answer: 7"

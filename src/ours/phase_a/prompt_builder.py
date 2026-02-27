@@ -94,6 +94,127 @@ PROMPT_TEMPLATE_REGISTRY: dict[str, dict[str, PromptTemplateSpec]] = {
             answer_prefix="",
         )
     },
+    "qa_strategyqa_minimal_binary": {
+        "1.0.0": PromptTemplateSpec(
+            template_id="qa_strategyqa_minimal_binary",
+            template_version="1.0.0",
+            description=(
+                "StrategyQA style A: minimal binary decision contract. "
+                "Optimized for short answers and low format drift."
+            ),
+            system_prompt=(
+                "You are a careful assistant for yes/no questions. "
+                "Think silently, then output one token: yes or no."
+            ),
+            user_prefix=(
+                "Question:\n{question}\n\n"
+                "Return exactly one token: yes or no.\n"
+                "Answer:"
+            ),
+            answer_prefix="",
+        )
+    },
+    "qa_strategyqa_cot_compact": {
+        "1.0.0": PromptTemplateSpec(
+            template_id="qa_strategyqa_cot_compact",
+            template_version="1.0.0",
+            description=(
+                "StrategyQA style B: compact reasoning then explicit final line. "
+                "Balances reasoning visibility and extraction stability."
+            ),
+            system_prompt=(
+                "You are a careful reasoning assistant. "
+                "Use at most two short reasoning lines, then write "
+                "'Final answer: yes' or 'Final answer: no'."
+            ),
+            user_prefix=(
+                "Question:\n{question}\n\n"
+                "Reason briefly, then give the final answer line."
+            ),
+            answer_prefix="Final answer: ",
+        )
+    },
+    "qa_strategyqa_evidence_verdict": {
+        "1.0.0": PromptTemplateSpec(
+            template_id="qa_strategyqa_evidence_verdict",
+            template_version="1.0.0",
+            description=(
+                "StrategyQA style C: evidence-first structure with explicit verdict tag."
+            ),
+            system_prompt=(
+                "You are a fact-checking assistant. "
+                "Give one short evidence line, then one final verdict line "
+                "in the form 'Verdict: yes' or 'Verdict: no'."
+            ),
+            user_prefix=(
+                "Question:\n{question}\n\n"
+                "Format:\n"
+                "Evidence: <short reason>\n"
+                "Verdict: <yes or no>"
+            ),
+            answer_prefix="Verdict: ",
+        )
+    },
+    "qa_gsm8k_direct_final_only": {
+        "1.0.0": PromptTemplateSpec(
+            template_id="qa_gsm8k_direct_final_only",
+            template_version="1.0.0",
+            description=(
+                "GSM8K style A: direct numeric answer with strict final-answer line."
+            ),
+            system_prompt=(
+                "You are a careful math assistant. "
+                "Solve internally, then output exactly one line: "
+                "'Final answer: <number>'."
+            ),
+            user_prefix=(
+                "Question:\n{question}\n\n"
+                "Output exactly one line:\n"
+                "Final answer: <number>"
+            ),
+            answer_prefix="Final answer: ",
+        )
+    },
+    "qa_gsm8k_cot_compact_final": {
+        "1.0.0": PromptTemplateSpec(
+            template_id="qa_gsm8k_cot_compact_final",
+            template_version="1.0.0",
+            description=(
+                "GSM8K style B: short chain-of-thought and strict final line."
+            ),
+            system_prompt=(
+                "You are a careful math tutor. "
+                "Show concise reasoning, then write one final line: "
+                "'Final answer: <number>'."
+            ),
+            user_prefix=(
+                "Question:\n{question}\n\n"
+                "Use up to 3 short reasoning lines, then output:\n"
+                "Final answer: <number>"
+            ),
+            answer_prefix="Final answer: ",
+        )
+    },
+    "qa_gsm8k_equation_then_final": {
+        "1.0.0": PromptTemplateSpec(
+            template_id="qa_gsm8k_equation_then_final",
+            template_version="1.0.0",
+            description=(
+                "GSM8K style C: enforce one equation line before the final number."
+            ),
+            system_prompt=(
+                "You are a precise math assistant. "
+                "Provide one equation line and then a final answer line."
+            ),
+            user_prefix=(
+                "Question:\n{question}\n\n"
+                "Format:\n"
+                "Equation: <main equation>\n"
+                "Final answer: <number>"
+            ),
+            answer_prefix="Final answer: ",
+        )
+    },
 }
 
 

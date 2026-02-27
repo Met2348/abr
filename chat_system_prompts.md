@@ -29,8 +29,16 @@ Changes to this file are user-authorized only.
 16. For new implementations that may affect experiment speed, always evaluate batching-first design as the default approach.
 17. When batching is introduced, always include safety nets (for example OOM backoff, fallback path, deterministic checks) so experiments remain robust.
 18. Treat batching-specific correctness risks as first-class concerns; explicitly guard and test for batching-introduced bugs (for example padding side, ordering, decode parity).
+19. README policy is dual-track:
+    - `readme.md` is the public, concise README.
+    - `readme_full.md` is the private, detailed operations logbook.
+20. Documentation update scope:
+    - major code changes must be reflected in both `readme.md` and `readme_full.md`,
+    - regular/minor changes should be reflected in `readme_full.md` only.
+21. All shell commands provided by the assistant for user reruns must be recorded in `readme_full.md`.
+22. Public README environment guidance must remain environment-agnostic and avoid private hardcoded setup assumptions.
 
 ## Acknowledgement Metadata
 
 - Last explicit user instruction to refresh this file: `2026-02-27`
-- Source scope: includes math-rendering requirement, experiment-workflow requirements (param groups + one-click shell execution), experiment-diagnosis record maintenance in `result_records.md`, and batching-first implementation policy with safety/correctness guards.
+- Source scope: includes math-rendering requirement, experiment-workflow requirements (param groups + one-click shell execution), experiment-diagnosis record maintenance in `result_records.md`, batching-first implementation policy with safety/correctness guards, and dual-README documentation policy (`readme.md` public concise, `readme_full.md` private detailed).
