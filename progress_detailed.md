@@ -2,6 +2,219 @@
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
 
+## 2026-02-28 18:52:35 +08 (+0800)
+- Type: Documentation Policy Update / Beginner-Oriented File and Function Documentation Sweep
+- Summary: Added a persistent documentation-style requirement for beginner-facing code explanations and started a repo-wide documentation sweep beginning with the active Phase B stack.
+- Details:
+  - Updated `chat_system_prompts.md` to require:
+    - a top-of-file abstract for every `py` and `sh` file,
+    - complete function/class docstrings,
+    - short examples in docstrings/comments where appropriate,
+    - continued adherence to this style in future code changes.
+  - Started applying the new style to active Phase B files first so the currently used training path becomes readable before the rest of the repo.
+  - Documented the active Phase B stack with richer file headers and docstrings:
+    - `scripts/phase_b_train_sft.py`
+    - `scripts/phase_b_eval.py`
+    - `scripts/run_phase_b_training_suite.sh`
+    - `src/ours/phase_b/contracts.py`
+    - `src/ours/phase_b/data.py`
+    - `src/ours/phase_b/__init__.py`
+  - Documented shared package entrypoints/helpers used frequently while reading the training path:
+    - `src/ours/__init__.py`
+    - `src/ours/phase_a/__init__.py`
+    - `src/ours/phase_a/prompt_builder.py`
+    - `src/ours/data/schema.py`
+    - `src/ours/phase_a/evaluator.py`
+    - `src/ours/phase_a/instability.py`
+    - `src/ours/phase_a/splitting.py`
+  - Extended the first pass to additional user-facing entrypoints:
+    - `download_datasets.sh`
+    - `check_gsm8k.py`
+    - `scripts/check_data.py`
+    - `scripts/phase_a_eval_predictions.py`
+    - `scripts/preprocess_steps.py`
+  - Updated README policy references:
+    - `readme.md`
+    - `readme_full.md`
+  - Scope rationale:
+    - the repository already contains many scripts/modules,
+    - Phase B is the active development track,
+    - documenting active runtime files first gives the fastest understanding payoff while the remaining sweep proceeds.
+- Validation:
+  - repo-wide audit of undocumented non-test `py` and `sh` files completed before edits,
+  - active Phase B targets selected from that audit for first-pass documentation hardening.
+  - `python -m py_compile scripts/phase_b_train_sft.py scripts/phase_b_eval.py src/ours/phase_b/contracts.py src/ours/phase_b/data.py src/ours/phase_a/prompt_builder.py src/ours/phase_b/__init__.py src/ours/phase_a/__init__.py src/ours/__init__.py` passed.
+  - `python -m py_compile check_gsm8k.py scripts/check_data.py scripts/phase_a_eval_predictions.py scripts/preprocess_steps.py` passed.
+  - `python -m py_compile src/ours/data/schema.py src/ours/phase_a/evaluator.py src/ours/phase_a/instability.py src/ours/phase_a/splitting.py` passed.
+  - `bash -n download_datasets.sh scripts/run_phase_b_training_suite.sh` passed.
+  - `python -m pytest -q tests/unit/test_phase_b_train_script.py tests/unit/test_phase_b_data.py` passed (`6 passed`).
+- Files changed:
+  - `chat_system_prompts.md`
+  - `progress_detailed.md`
+  - `scripts/phase_b_train_sft.py`
+  - `scripts/phase_b_eval.py`
+  - `scripts/run_phase_b_training_suite.sh`
+  - `src/ours/__init__.py`
+  - `src/ours/data/schema.py`
+  - `src/ours/phase_a/__init__.py`
+  - `src/ours/phase_a/evaluator.py`
+  - `src/ours/phase_a/instability.py`
+  - `src/ours/phase_a/prompt_builder.py`
+  - `src/ours/phase_a/splitting.py`
+  - `src/ours/phase_b/__init__.py`
+  - `src/ours/phase_b/contracts.py`
+  - `src/ours/phase_b/data.py`
+  - `download_datasets.sh`
+  - `check_gsm8k.py`
+  - `scripts/check_data.py`
+  - `scripts/phase_a_eval_predictions.py`
+  - `scripts/preprocess_steps.py`
+  - `readme.md`
+  - `readme_full.md`
+- Breaking changes:
+  - None.
+
+## 2026-02-28 02:47:39 +08 (+0800)
+- Type: Phase B Runtime Compatibility Fix / `data_seed`-Accelerate Mismatch
+- Summary: Fixed Phase B crash `NotImplementedError: data_seed requires Accelerate >= 1.1.0` by removing forced `data_seed` injection from training args and correcting env guidance.
+- Details:
+  - Updated `scripts/phase_b_train_sft.py`:
+    - `_resolve_training_args` no longer injects `data_seed` unconditionally.
+    - This avoids `TrainingArguments.__post_init__` failures on environments where `accelerate` is below the feature gate for `data_seed`.
+    - Determinism remains controlled by:
+      - `seed` in `TrainingArguments`,
+      - explicit `_set_seed(...)` before training.
+  - Updated docs:
+    - corrected recommended env command in `readme_full.md` and `readme.md`:
+      - `accelerate>=1.1,<2` (instead of `<1`).
+  - Context:
+    - This issue surfaced after PEFT became active and `TrainingArguments` runtime checks reached post-init validation.
+- Validation:
+  - `python -m py_compile scripts/phase_b_train_sft.py tests/unit/test_phase_b_train_script.py` passed.
+  - `python -m pytest -q tests/unit/test_phase_b_train_script.py` passed (`4 passed`).
+  - compatibility probe with reduced `TrainingArguments` signature passed.
+- Files changed:
+  - `scripts/phase_b_train_sft.py`
+  - `tests/unit/test_phase_b_train_script.py`
+  - `readme_full.md`
+  - `readme.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-02-28 02:39:35 +08 (+0800)
+- Type: Phase B Compatibility Fix / TrainingArguments + Env Robustness
+- Summary: Fixed Phase B training crash on mixed transformers versions (`unexpected keyword argument 'overwrite_output_dir'`) and documented env-repair commands for PEFT training.
+- Details:
+  - Updated `scripts/phase_b_train_sft.py`:
+    - `_resolve_training_args` now:
+      - only sets `overwrite_output_dir` if runtime `TrainingArguments` supports it,
+      - filters kwargs by runtime signature before constructor call (version-tolerant guard),
+    - model loading now uses version-aware dtype keyword:
+      - `dtype` when supported,
+      - fallback to `torch_dtype` for older versions.
+  - Added regression test in `tests/unit/test_phase_b_train_script.py`:
+    - `test_resolve_training_args_tolerates_missing_optional_kwargs`
+    - verifies no crash when optional TrainingArguments params are absent.
+  - Updated docs:
+    - `readme_full.md`: added Phase B env repair commands + sanity check + compatibility notes.
+    - `readme.md`: added concise env repair command for PEFT/transformers issues.
+- Validation:
+  - `python -m py_compile scripts/phase_b_train_sft.py tests/unit/test_phase_b_train_script.py` passed.
+  - `python -m pytest -q tests/unit/test_phase_b_train_script.py` passed (`4 passed`).
+  - local compatibility probe for `_resolve_training_args` with reduced stub signature passed.
+- Files changed:
+  - `scripts/phase_b_train_sft.py`
+  - `tests/unit/test_phase_b_train_script.py`
+  - `readme_full.md`
+  - `readme.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-02-28 02:34:56 +08 (+0800)
+- Type: Project-State Update / Official Phase B Transition
+- Summary: Updated project docs to officially switch active execution focus from Phase A to Phase B, while keeping Phase A as frozen benchmark reference.
+- Details:
+  - Updated `phase_B_plan.md`:
+    - added `Official Transition Notice` section,
+    - clarified operational policy:
+      - `scripts/phase_a_*` frozen for baseline/reference,
+      - new development in `src/ours/phase_b/*` and `scripts/phase_b_*`,
+      - explicit Phase B entrypoints.
+  - Updated `TODO_ours.md`:
+    - added authoritative status flags for official Phase B activation,
+    - removed duplicated B1 checklist line and kept single B1 gate item.
+  - Updated `readme.md`:
+    - status now explicitly states Phase B is the active track,
+    - added recommended kickoff command using `run_phase_b_training_suite.sh`.
+  - Updated `readme_full.md`:
+    - milestone date refreshed to `2026-02-28`,
+    - added explicit transition note under Phase B quick-start section.
+  - Verified Phase B config parsing path:
+    - `scripts/phase_b_train_sft.py --config-json configs/phase_b/peft_smoke_strategyqa.json`
+    - correctly resolves `train_jsonl` and runtime defaults.
+- Validation:
+  - `python` parse check for Phase B config-default loading passed.
+  - `bash -n scripts/run_phase_b_training_suite.sh` passed.
+  - `python -m py_compile scripts/phase_b_train_sft.py scripts/phase_b_eval.py` passed.
+- Files changed:
+  - `phase_B_plan.md`
+  - `TODO_ours.md`
+  - `readme.md`
+  - `readme_full.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-02-28 02:28:25 +08 (+0800)
+- Type: Phase A Reliability Fix / JSONL Unicode Line-Separator Handling
+- Summary: Fixed A12-class crashes caused by `U+2028` inside JSON string fields by removing `.splitlines()`-based JSONL parsing from Phase A readers and suite summary analyzer.
+- Details:
+  - Root cause:
+    - prepared/prediction JSONL records may contain literal Unicode line separators (`U+2028`),
+    - Python `.splitlines()` treats `U+2028` as a line boundary, splitting one valid JSON object into multiple fragments,
+    - downstream `json.loads(...)` then raises `JSONDecodeError` (for example `Unterminated string`).
+  - Updated JSONL readers to newline-stream iteration (`with open(...): for line in f`) with explicit decode diagnostics:
+    - `scripts/phase_a_generate_and_eval.py`
+      - `_load_prepared_rows`
+      - `_run_evaluation`
+      - `_load_pred_map`
+    - `scripts/phase_a_eval_predictions.py`
+      - `_load_prediction_records`
+    - `scripts/phase_a_analyze_instability.py`
+      - `_load_scored_rows`
+    - `scripts/run_phase_a_benchmark_suite.sh`
+      - embedded Python summary block now reads run/spec/scored files via stream iteration and validates JSON decode with line numbers.
+  - Added prevention guard in `scripts/phase_a_prepare.py`:
+    - `_write_jsonl` now escapes `U+2028`/`U+2029` explicitly for line-tool compatibility,
+    - added `_validate_jsonl_outputs(run_dir)` and resume-time validation:
+      - if matching fingerprint artifacts are invalid, suite auto-regenerates the prepared run.
+  - Added regression test:
+    - `tests/unit/test_phase_a_generate_script.py::test_load_prepared_rows_handles_u2028_without_splitting_jsonl`.
+  - Updated docs:
+    - `readme_full.md`: bug explanation + rerun and artifact-health commands.
+    - `readme.md`: concise note on JSONL robustness.
+- Validation:
+  - `python` snippet using `_load_prepared_rows` successfully parsed previously failing file:
+    - `assets/artifacts/phase_a_prepared/gsm8k/e3abe2fb9883/test.jsonl`
+    - parsed rows: `804`.
+  - `bash -n scripts/run_phase_a_benchmark_suite.sh` passed.
+  - `python -m py_compile scripts/phase_a_generate_and_eval.py scripts/phase_a_eval_predictions.py scripts/phase_a_prepare.py scripts/phase_a_analyze_instability.py src/ours/phase_a/instability.py` passed.
+  - `python -m pytest -q tests/unit/test_phase_a_generate_script.py tests/unit/test_phase_a_instability.py tests/unit/test_phase_a_extraction_eval.py` passed (`23 passed`).
+- Files changed:
+  - `scripts/phase_a_generate_and_eval.py`
+  - `scripts/phase_a_eval_predictions.py`
+  - `scripts/phase_a_prepare.py`
+  - `scripts/phase_a_analyze_instability.py`
+  - `scripts/run_phase_a_benchmark_suite.sh`
+  - `tests/unit/test_phase_a_generate_script.py`
+  - `readme_full.md`
+  - `readme.md`
+  - `progress_detailed.md`
+- Breaking changes:
+  - None.
+
 ## 2026-02-28 02:06:01 +08 (+0800)
 - Type: Phase A Instability Analysis Integration
 - Summary: Added artifact-only instability analysis tooling and integrated automatic instability sections into suite final summaries directly below `RESULT TABLE`.

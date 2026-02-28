@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
-"""Evaluate prediction JSONL files with dataset-aware extraction.
+"""Evaluate prediction JSONL files with dataset-aware answer extraction.
 
-Input JSONL contract (one object per line)
-------------------------------------------
+Why this file exists
+--------------------
+Sometimes inference has already finished and only evaluation needs to be rerun.
+This script scores saved prediction artifacts without repeating generation.
+
+What this file does
+-------------------
+1. Parse the prediction-file path and output location.
+2. Load prediction records from JSONL with strict validation.
+3. Delegate scoring to the shared Phase A evaluator.
+4. Persist scored predictions and summary metrics to a fresh run directory.
+
+Input JSONL contract
+--------------------
 Required fields:
 - sample_id
 - dataset
@@ -13,6 +25,20 @@ Required fields:
 Optional fields:
 - question
 - metadata
+
+Interaction with other files
+----------------------------
+- `src/ours/phase_a/contracts.py`: prediction/scored row contracts
+- `src/ours/phase_a/evaluator.py`: actual extraction/evaluation logic
+- `scripts/phase_a_generate_and_eval.py`: upstream producer of prediction JSONL files
+
+Example
+-------
+```bash
+python scripts/phase_a_eval_predictions.py \
+  --predictions assets/artifacts/phase_a_runs/example_run/predictions.jsonl \
+  --run-name reeval_example
+```
 """
 
 from __future__ import annotations
@@ -26,6 +52,14 @@ from typing import Any, Iterable
 
 
 def _bootstrap_src_path() -> None:
+    """Add the repo-local `src/` directory to `sys.path`.
+
+    Example
+    -------
+    ```bash
+    python scripts/phase_a_eval_predictions.py --help
+    ```
+    """
     repo_root = Path(__file__).resolve().parents[1]
     src_dir = repo_root / "src"
     if str(src_dir) not in sys.path:
@@ -38,6 +72,14 @@ from ours.phase_a import PredictionRecord, evaluate_predictions  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for offline evaluation of saved predictions.
+
+    Example
+    -------
+    ```python
+    args = parse_args()
+    ```
+    """
     parser = argparse.ArgumentParser(
         description="Score prediction JSONL files using Phase A evaluators."
     )
@@ -62,6 +104,19 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """Run offline evaluation on a saved prediction JSONL file.
+
+    Returns
+    -------
+    int
+        `0` when evaluation completed successfully.
+
+    Example
+    -------
+    ```bash
+    python scripts/phase_a_eval_predictions.py --predictions predictions.jsonl
+    ```
+    """
     args = parse_args()
     if not args.predictions.exists():
         raise FileNotFoundError(f"Prediction file not found: {args.predictions}")
@@ -103,26 +158,40 @@ def main() -> int:
 
 
 def _load_prediction_records(path: Path) -> Iterable[PredictionRecord]:
-    for idx, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
-        if line.strip() == "":
-            continue
-        payload = json.loads(line)
-        try:
-            record = PredictionRecord(
-                sample_id=str(payload["sample_id"]),
-                dataset=str(payload["dataset"]),
-                split=str(payload["split"]),
-                raw_prediction=str(payload["raw_prediction"]),
-                gold_answer=str(payload["gold_answer"]),
-                question=str(payload["question"]) if "question" in payload and payload["question"] is not None else None,
-                metadata=dict(payload.get("metadata", {})),
-            )
-            record.validate()
-            yield record
-        except Exception as exc:  # noqa: BLE001
-            raise ValueError(
-                f"Invalid prediction row at line={idx+1} in file={path}: {exc}"
-            ) from exc
+    """Yield validated `PredictionRecord` objects from a JSONL file.
+
+    Example
+    -------
+    ```python
+    records = list(_load_prediction_records(Path("predictions.jsonl")))
+    ```
+    """
+    with path.open("r", encoding="utf-8") as f:
+        for idx, line in enumerate(f, start=1):
+            if line.strip() == "":
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid JSONL row at line={idx} in file={path}: {exc}"
+                ) from exc
+            try:
+                record = PredictionRecord(
+                    sample_id=str(payload["sample_id"]),
+                    dataset=str(payload["dataset"]),
+                    split=str(payload["split"]),
+                    raw_prediction=str(payload["raw_prediction"]),
+                    gold_answer=str(payload["gold_answer"]),
+                    question=str(payload["question"]) if "question" in payload and payload["question"] is not None else None,
+                    metadata=dict(payload.get("metadata", {})),
+                )
+                record.validate()
+                yield record
+            except Exception as exc:  # noqa: BLE001
+                raise ValueError(
+                    f"Invalid prediction row at line={idx} in file={path}: {exc}"
+                ) from exc
 
 
 if __name__ == "__main__":

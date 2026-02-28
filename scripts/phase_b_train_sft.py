@@ -1,22 +1,53 @@
 #!/usr/bin/env python3
-"""Phase B (B1) training skeleton: first SFT/PEFT training entry point.
+"""Train one Phase B SFT/PEFT run from prepared Phase A JSONL artifacts.
 
-This script is intentionally explicit and beginner-friendly.
-It is the first training bridge from Phase A prepared artifacts to
-trainable checkpoints.
-
-Key design decisions
+Why this file exists
 --------------------
-1) PEFT-first by default (LoRA), with safe fallback to full SFT.
-2) Batching-first defaults for speed (`per_device_train_batch_size=4`).
-3) Safety nets enabled by default:
-   - `auto_find_batch_size`,
-   - gradient checkpointing,
-   - strict data validation and duplicate-id checks.
-4) Reproducibility:
-   - run manifests,
-   - fixed-seed behavior,
-   - deterministic split/artifact references logged.
+Phase A ends with validated prompt/target records that are suitable for language
+model supervision. Phase B begins by training a model or adapter from those
+records. This script is the first training bridge for that transition.
+
+What this file does
+-------------------
+1. Parse CLI flags and optional JSON config defaults.
+2. Load normalized training rows from `src/ours/phase_b/`.
+3. Load tokenizer/model weights from a local Hugging Face directory.
+4. Optionally attach LoRA adapters (`peft`) or fall back to full SFT (`sft`).
+5. Convert prompt/target text into causal-LM training features.
+6. Run training and optional evaluation through Hugging Face `Trainer`.
+7. Persist manifests, metrics, checkpoints, and the final model directory.
+
+What this file contains
+-----------------------
+- argument/config parsing helpers
+- runtime dependency loading helpers
+- feature construction helpers
+- dataset/collator wrappers for `Trainer`
+- version-tolerant `TrainingArguments` creation
+- LoRA attachment logic
+- top-level training orchestration in `main()`
+
+Execution logic inside the file
+-------------------------------
+`parse_args()` reads config -> `load_phase_b_rows()` validates inputs ->
+tokenizer/model load -> optional LoRA attachment -> feature building ->
+`Trainer` construction -> training -> evaluation -> artifact writing.
+
+Interaction with other files
+----------------------------
+- `src/ours/phase_b/data.py`: loads and summarizes training rows.
+- `src/ours/phase_b/contracts.py`: defines the row contract.
+- `scripts/run_phase_b_training_suite.sh`: calls this file with named configs.
+- `scripts/phase_b_eval.py`: evaluates saved checkpoints/adapters with the frozen
+  Phase A inference/evaluation stack.
+
+Example
+-------
+```bash
+python -u scripts/phase_b_train_sft.py \
+  --config-json configs/phase_b/peft_smoke_strategyqa.json \
+  --run-name phase_b_smoke
+```
 """
 
 from __future__ import annotations
@@ -34,6 +65,17 @@ from typing import Any
 
 
 def _bootstrap_src_path() -> None:
+    """Add the repo-local `src/` directory to `sys.path`.
+
+    This keeps direct script execution simple for novice users who run the file from
+    the repository root without installing the package in editable mode.
+
+    Example
+    -------
+    ```bash
+    python scripts/phase_b_train_sft.py --help
+    ```
+    """
     repo_root = Path(__file__).resolve().parents[1]
     src_dir = repo_root / "src"
     if str(src_dir) not in sys.path:
@@ -47,7 +89,19 @@ from ours.phase_b import load_phase_b_rows, summarize_rows  # noqa: E402
 
 @dataclass(slots=True)
 class LoRAConfigSpec:
-    """Minimal LoRA settings saved in manifests."""
+    """Small LoRA configuration snapshot stored in run manifests.
+
+    Example
+    -------
+    ```python
+    spec = LoRAConfigSpec(
+        rank=16,
+        alpha=32,
+        dropout=0.05,
+        target_modules=["q_proj", "k_proj"],
+    )
+    ```
+    """
 
     rank: int
     alpha: int
@@ -56,6 +110,20 @@ class LoRAConfigSpec:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Construct the CLI parser for Phase B training.
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        Parser containing config, data, model, optimization, and runtime flags.
+
+    Example
+    -------
+    ```python
+    parser = _build_parser()
+    namespace = parser.parse_args(["--train-jsonl", "train.jsonl"])
+    ```
+    """
     parser = argparse.ArgumentParser(
         description="Phase B training script (B1): SFT/PEFT skeleton.",
     )
@@ -173,6 +241,28 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse arguments, apply config defaults, and validate key numeric fields.
+
+    Parameters
+    ----------
+    argv:
+        Optional explicit argument list. Tests use this to bypass the process
+        command line; normal CLI execution leaves it as `None`.
+
+    Returns
+    -------
+    argparse.Namespace
+        Validated runtime arguments for `main()`.
+
+    Example
+    -------
+    ```python
+    args = parse_args([
+        "--config-json", "configs/phase_b/peft_smoke_strategyqa.json",
+        "--run-name", "demo_run",
+    ])
+    ```
+    """
     parser = _build_parser()
 
     # Two-phase parse so config file can set defaults.
@@ -203,6 +293,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _load_config_defaults(path: Path) -> dict[str, Any]:
+    """Load parser default values from a JSON config file.
+
+    The file must contain one JSON object whose keys match CLI destination names.
+
+    Example
+    -------
+    ```python
+    defaults = _load_config_defaults(Path("configs/phase_b/peft_smoke_strategyqa.json"))
+    ```
+    """
     if not path.exists():
         raise FileNotFoundError(f"Config JSON not found: {path}")
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -214,6 +314,17 @@ def _load_config_defaults(path: Path) -> dict[str, Any]:
 
 
 def _import_runtime_deps():
+    """Import heavy runtime dependencies lazily.
+
+    Importing torch/transformers only when needed makes CLI help and unit tests
+    lighter and surfaces env issues closer to the actual training path.
+
+    Example
+    -------
+    ```python
+    torch, AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments = _import_runtime_deps()
+    ```
+    """
     import torch
     from transformers import (
         AutoModelForCausalLM,
@@ -226,6 +337,16 @@ def _import_runtime_deps():
 
 
 def _resolve_dtype(name: str, torch_module):
+    """Translate a user-facing dtype string into a torch dtype object.
+
+    The `auto` policy prefers `bfloat16` on CUDA and `float32` on CPU.
+
+    Example
+    -------
+    ```python
+    dtype = _resolve_dtype("auto", torch)
+    ```
+    """
     if name == "float32":
         return torch_module.float32
     if name == "float16":
@@ -238,6 +359,14 @@ def _resolve_dtype(name: str, torch_module):
 
 
 def _set_seed(seed: int, torch_module) -> None:
+    """Seed Python and torch RNGs for reproducible training behavior.
+
+    Example
+    -------
+    ```python
+    _set_seed(42, torch)
+    ```
+    """
     random.seed(seed)
     torch_module.manual_seed(seed)
     if torch_module.cuda.is_available():
@@ -245,6 +374,14 @@ def _set_seed(seed: int, torch_module) -> None:
 
 
 def _fmt_seconds(seconds: float) -> str:
+    """Format a duration as `HH:MM:SS` for console output.
+
+    Example
+    -------
+    ```python
+    _fmt_seconds(65.2)  # -> "00:01:05"
+    ```
+    """
     whole = max(int(seconds), 0)
     h = whole // 3600
     m = (whole % 3600) // 60
@@ -260,6 +397,31 @@ def _build_features(
     """Convert prompt/target rows into causal-LM training features.
 
     Labels are masked (`-100`) on prompt tokens so loss is computed only on target.
+
+    Parameters
+    ----------
+    rows:
+        Normalized Phase B rows containing `prompt_text` and `target_text`.
+    tokenizer:
+        Hugging Face tokenizer compatible with the selected causal LM.
+    max_seq_length:
+        Hard cap applied after prompt and target tokens are concatenated.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Pre-tokenized feature dictionaries with `input_ids`, `attention_mask`,
+        `labels`, and `sample_id`.
+
+    Example
+    -------
+    ```python
+    features = _build_features(
+        rows=train_rows,
+        tokenizer=tokenizer,
+        max_seq_length=512,
+    )
+    ```
     """
 
     features: list[dict[str, Any]] = []
@@ -300,25 +462,73 @@ def _build_features(
 
 
 class _ListFeatureDataset:
-    """Simple dataset wrapper over pre-tokenized feature dicts."""
+    """Minimal dataset wrapper over pre-tokenized feature dictionaries.
+
+    This class intentionally stays small because Phase B already performs tokenization
+    before dataset construction.
+    """
 
     def __init__(self, features: list[dict[str, Any]]) -> None:
+        """Store pre-tokenized feature rows.
+
+        Example
+        -------
+        ```python
+        dataset = _ListFeatureDataset(train_features)
+        ```
+        """
         self._features = features
 
     def __len__(self) -> int:
+        """Return the number of stored feature rows.
+
+        Example
+        -------
+        ```python
+        num_rows = len(dataset)
+        ```
+        """
         return len(self._features)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
+        """Return one feature dictionary by integer index.
+
+        Example
+        -------
+        ```python
+        first_feature = dataset[0]
+        ```
+        """
         return self._features[idx]
 
 
 class _CausalLMCollator:
-    """Dynamic-padding collator for causal-LM SFT with label masking."""
+    """Dynamic-padding collator for causal-LM SFT with label masking.
+
+    Each batch is padded to the longest sequence inside that batch. Prompt tokens
+    remain masked with `-100` in `labels`, so the loss only supervises target text.
+    """
 
     def __init__(self, pad_token_id: int) -> None:
+        """Store the tokenizer pad token used during dynamic padding.
+
+        Example
+        -------
+        ```python
+        collator = _CausalLMCollator(pad_token_id=tokenizer.pad_token_id)
+        ```
+        """
         self.pad_token_id = int(pad_token_id)
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
+        """Pad one feature list into a torch tensor batch.
+
+        Example
+        -------
+        ```python
+        batch = collator([train_features[0], train_features[1]])
+        ```
+        """
         import torch
 
         max_len = max(len(f["input_ids"]) for f in features)
@@ -349,14 +559,30 @@ def _resolve_training_args(
     use_bf16: bool,
     use_fp16: bool,
 ):
-    """Create version-tolerant TrainingArguments."""
+    """Create version-tolerant Hugging Face `TrainingArguments`.
+
+    Different `transformers` releases expose slightly different constructor
+    signatures. This helper only forwards kwargs supported by the runtime version.
+
+    Example
+    -------
+    ```python
+    training_args = _resolve_training_args(
+        TrainingArguments=TrainingArguments,
+        output_dir=Path("tmp/run"),
+        args=args,
+        has_eval=True,
+        use_bf16=True,
+        use_fp16=False,
+    )
+    ```
+    """
 
     signature = inspect.signature(TrainingArguments.__init__)
     params = signature.parameters
 
     kwargs: dict[str, Any] = {
         "output_dir": str(output_dir),
-        "overwrite_output_dir": False,
         "per_device_train_batch_size": args.per_device_train_batch_size,
         "per_device_eval_batch_size": args.per_device_eval_batch_size,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
@@ -371,11 +597,12 @@ def _resolve_training_args(
         "save_total_limit": args.save_total_limit,
         "max_grad_norm": args.max_grad_norm,
         "seed": args.seed,
-        "data_seed": args.seed,
         "report_to": [],
         "remove_unused_columns": False,
         "auto_find_batch_size": args.auto_find_batch_size,
     }
+    if "overwrite_output_dir" in params:
+        kwargs["overwrite_output_dir"] = False
 
     if "bf16" in params:
         kwargs["bf16"] = bool(use_bf16)
@@ -392,11 +619,28 @@ def _resolve_training_args(
     elif "eval_strategy" in params:
         kwargs["eval_strategy"] = eval_mode
 
-    return TrainingArguments(**kwargs)
+    # Extra guard for highly variant transformers versions:
+    # pass only parameters that exist in this runtime signature.
+    supported_kwargs = {k: v for k, v in kwargs.items() if k in params}
+    return TrainingArguments(**supported_kwargs)
 
 
 def _attach_lora_if_requested(model, args: argparse.Namespace):
-    """Attach LoRA adapters or fallback safely."""
+    """Attach LoRA adapters when PEFT mode is requested.
+
+    Returns
+    -------
+    tuple
+        `(model, effective_mode, lora_spec, warning_message)`.
+        The warning message is populated only when PEFT import fails and the script
+        falls back to full SFT.
+
+    Example
+    -------
+    ```python
+    model, effective_mode, lora_spec, warning = _attach_lora_if_requested(model, args)
+    ```
+    """
 
     effective_mode = args.training_mode
     lora_spec = LoRAConfigSpec(
@@ -439,10 +683,33 @@ def _attach_lora_if_requested(model, args: argparse.Namespace):
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Write a UTF-8 JSON artifact with stable pretty formatting.
+
+    Example
+    -------
+    ```python
+    _write_json(Path("summary.json"), {"status": "ok"})
+    ```
+    """
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def main() -> int:
+    """Run the end-to-end Phase B training lifecycle for one configuration.
+
+    Returns
+    -------
+    int
+        Process exit code. `0` indicates a successful training/evaluation run.
+
+    Example
+    -------
+    ```bash
+    python -u scripts/phase_b_train_sft.py \
+      --config-json configs/phase_b/peft_smoke_strategyqa.json \
+      --run-name phase_b_smoke
+    ```
+    """
     args = parse_args()
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -515,12 +782,18 @@ def main() -> int:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_path,
-        torch_dtype=dtype,
-        trust_remote_code=False,
-        low_cpu_mem_usage=True,
-    )
+    model_load_kwargs: dict[str, Any] = {
+        "trust_remote_code": False,
+        "low_cpu_mem_usage": True,
+    }
+    # transformers versions differ in preferred dtype keyword.
+    # Newer versions deprecate `torch_dtype` in favor of `dtype`.
+    from_pretrained_sig = inspect.signature(AutoModelForCausalLM.from_pretrained)
+    if "dtype" in from_pretrained_sig.parameters:
+        model_load_kwargs["dtype"] = dtype
+    else:
+        model_load_kwargs["torch_dtype"] = dtype
+    model = AutoModelForCausalLM.from_pretrained(args.model_path, **model_load_kwargs)
     if args.gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
     load_elapsed = time.perf_counter() - load_start

@@ -2,10 +2,11 @@
 
 This repository is building an in-house reasoning-faithfulness pipeline from scratch.
 
-Current milestone status (2026-02-27):
+Current milestone status (2026-02-28):
 - Phase A is concluded.
 - Phase B B0 (scope freeze) is completed.
 - Phase B B1 code skeleton is implemented (smoke gate pending).
+- Project execution focus is officially switched to Phase B.
 - Phase A core conclusion:
   - parse-error inflation was mostly protocol/extraction/free-form formatting related,
   - after binary-choice decode, StrategyQA parse error reaches `0.0000`,
@@ -54,6 +55,43 @@ Treat these as operational lessons from the full Phase A cycle:
    - cap hit rate,
    - final-answer tag rate,
    - fallback extraction rate.
+
+## Documentation Convention (Active from 2026-02-28)
+
+This repo is now being documented for novice-readability by default.
+
+Required style for maintained runtime files:
+- every `py` and `sh` file should begin with a short abstract explaining:
+  - why the file exists,
+  - what it contains,
+  - how control flows through it,
+  - how it interacts with other files.
+- every function and class should have a docstring or nearby explanatory comment that covers:
+  - purpose,
+  - important inputs/outputs,
+  - safety/edge-case behavior when relevant,
+  - at least one short usage example when practical.
+
+Current first-pass coverage focus:
+- active Phase B runtime path,
+- shared files directly used by current Phase B work.
+
+Useful maintenance commands:
+
+```bash
+python -m py_compile \
+  scripts/phase_b_train_sft.py \
+  scripts/phase_b_eval.py \
+  src/ours/phase_b/contracts.py \
+  src/ours/phase_b/data.py \
+  src/ours/phase_a/prompt_builder.py
+
+bash -n scripts/run_phase_b_training_suite.sh
+
+python -m pytest -q \
+  tests/unit/test_phase_b_train_script.py \
+  tests/unit/test_phase_b_data.py
+```
 
 ## 1. Model files
 
@@ -597,6 +635,43 @@ For full-dataset preparation/eval runs, use:
 Notes:
 - The script no longer blocks concurrent runs.
 - If concurrent runs are detected, it prints a warning and continues.
+- JSONL parsing is robust to Unicode line separators (for example `U+2028`):
+  - readers now use newline-stream iteration (not `splitlines()`),
+  - this prevents false `JSONDecodeError` on valid records containing `U+2028` inside strings.
+- `phase_a_prepare.py` now validates resumed JSONL artifacts:
+  - if a matching run fingerprint exists but split JSONLs are invalid, the run is auto-regenerated.
+
+If a long run fails after one split with a JSON decode issue, you can safely rerun the same group:
+
+```bash
+ACTIVE_PARAM_GROUP=A12 \
+CUDA_VISIBLE_DEVICES=0 \
+BATCH_SIZE=256 \
+RUN_PREFIX=gsm8k_whole_corpus_b256 \
+bash scripts/run_phase_a_benchmark_suite.sh
+```
+
+Quick JSONL health check (artifact-only):
+
+```bash
+python - <<'PY'
+from pathlib import Path
+import json
+path = Path("assets/artifacts/phase_a_prepared/gsm8k/e3abe2fb9883/test.jsonl")
+bad = 0
+with path.open("r", encoding="utf-8") as f:
+    for i, line in enumerate(f, start=1):
+        if not line.strip():
+            continue
+        try:
+            json.loads(line)
+        except Exception as e:
+            bad += 1
+            print("bad", i, e)
+            break
+print("status", "ok" if bad == 0 else "invalid")
+PY
+```
 
 ### 9.7 Truncation Recovery: Hands-On Fix Path
 
@@ -707,6 +782,11 @@ This project currently uses a PEFT-first B1 training skeleton:
 - evaluation bridge: `scripts/phase_b_eval.py`
 - starter configs: `configs/phase_b/*.json`
 
+Official transition note:
+1. Starting now, Phase B is the default task stream.
+2. Phase A runs are baseline/reference only unless explicitly requested for diagnostics.
+3. New experiments for milestone progress should use Phase B groups first (`B1_SMOKE` then `B1_FIRST`).
+
 ### 10.1 Run a tiny smoke training job
 
 ```bash
@@ -748,6 +828,45 @@ CUDA_VISIBLE_DEVICES=0 python -u scripts/phase_b_eval.py \
 2. Batching-first defaults are used (`per_device_train_batch_size=4`).
 3. OOM safety for training is enabled via `--auto-find-batch-size` by default.
 4. Keep `--seed` fixed when comparing run behavior.
+5. `TrainingArguments` compatibility is version-tolerant:
+   - script now filters kwargs by runtime signature (older/newer transformers won’t crash on unknown args).
+6. Model loading uses version-aware dtype arg (`dtype` vs `torch_dtype`) to avoid deprecation-only failures.
+
+### 10.4.1 Conda Environment Repair (Phase B)
+
+If you see errors like:
+- `No module named 'peft'`
+- `TrainingArguments.__init__() got an unexpected keyword argument ...`
+- transformers/hub version conflicts
+
+run these in your `bcr` env:
+
+```bash
+conda activate bcr
+python -m pip install -U \
+  "transformers>=4.44,<5" \
+  "huggingface-hub>=0.23.2,<1.0" \
+  "accelerate>=1.1,<2" \
+  "peft>=0.11,<0.14" \
+  "datasets>=2.20,<3" \
+  "safetensors>=0.4.3"
+```
+
+Quick sanity check:
+
+```bash
+python - <<'PY'
+import transformers, huggingface_hub, accelerate
+print("transformers", transformers.__version__)
+print("huggingface_hub", huggingface_hub.__version__)
+print("accelerate", accelerate.__version__)
+try:
+    import peft
+    print("peft", peft.__version__)
+except Exception as e:
+    print("peft import failed:", e)
+PY
+```
 
 ### 10.5 One-Click Phase B Param Groups
 

@@ -1,4 +1,19 @@
 #!/usr/bin/env bash
+# Download the external datasets used by this project into a local folder.
+#
+# Why this file exists:
+# - dataset repo IDs occasionally move or break,
+# - the project wants one simple command for local dataset setup,
+# - fallback repos should be kept in one place rather than repeated in notes.
+#
+# What this file does:
+# 1. choose an output directory,
+# 2. try primary and fallback Hugging Face dataset repos,
+# 3. write each downloaded dataset under a stable local folder name.
+#
+# Example:
+#   bash download_datasets.sh
+#   bash download_datasets.sh assets/datasets
 set -euo pipefail
 
 # Usage:
@@ -15,6 +30,7 @@ MAX_WORKERS="${HF_MAX_WORKERS:-8}"
 mkdir -p "${OUT_DIR}"
 
 download_one() {
+  # Download one dataset repo into one stable local directory.
   local repo_id="$1"
   local local_name="$2"
   echo "==> Trying ${repo_id} -> ${OUT_DIR}/${local_name}"
@@ -25,6 +41,10 @@ download_one() {
 }
 
 download_with_fallbacks() {
+  # Try several candidate repos until one download succeeds.
+  #
+  # Example:
+  #   download_with_fallbacks "strategyqa" "tasksource/strategy-qa" "wics/strategy-qa"
   local local_name="$1"
   shift
   local repos=("$@")

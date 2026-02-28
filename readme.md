@@ -20,6 +20,7 @@ A research codebase for building and evaluating reasoning-faithfulness workflows
 - Phase A infrastructure is stable and reproducible.
 - Batched inference path is enabled and validated.
 - Phase B B0 planning is complete; B1 training skeleton is implemented.
+- Phase B is now the official active development track.
 
 ## Quick Start
 
@@ -80,6 +81,7 @@ python -u scripts/phase_a_generate_and_eval.py \
 ```
 
 Run output and `metrics.json` now include sampled VRAM usage stats (`vram_mean_gib`, `vram_max_gib`) for reporting.
+Phase A JSONL readers are robust to Unicode line separators (for example `U+2028`) in prompt/prediction text.
 
 Truncation recovery is enabled by default for math datasets (`gsm8k`, `hendrycks_math`).
 You can tune it with:
@@ -121,11 +123,23 @@ For whole-corpus groups (`A11`/`A12`), env runtime overrides such as `BATCH_SIZE
 
 ## Phase B Public Entry Points
 
+Official Phase B kickoff (recommended):
+
+```bash
+ACTIVE_PHASE_B_GROUP=B1_SMOKE RUN_PREFIX=phase_b_kickoff bash scripts/run_phase_b_training_suite.sh
+```
+
 Smoke training run:
 
 ```bash
 python -u scripts/phase_b_train_sft.py \
   --config-json configs/phase_b/peft_smoke_strategyqa.json
+```
+
+If PEFT/transformers env errors appear, repair in your env:
+
+```bash
+python -m pip install -U "transformers>=4.44,<5" "huggingface-hub>=0.23.2,<1.0" "accelerate>=1.1,<2" "peft>=0.11,<0.14"
 ```
 
 Training suite:
@@ -144,3 +158,8 @@ bash scripts/run_phase_b_training_suite.sh
 ## Note for Maintainers
 
 Detailed/private operational notes and hardcoded local workflow details are maintained in `readme_full.md`.
+
+Documentation convention for maintained runtime files:
+- every `py`/`sh` file should begin with a short abstract,
+- every function/class should carry a beginner-friendly docstring or nearby comment,
+- examples should be included when they materially improve readability.

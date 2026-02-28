@@ -1,9 +1,32 @@
 #!/usr/bin/env python3
-"""Phase B evaluation bridge.
+"""Evaluate a Phase B model or adapter through the frozen Phase A evaluator path.
 
-This script evaluates a Phase B checkpoint/model by delegating inference+eval
-to the stable Phase A evaluator pipeline. Keeping Phase A eval frozen is a
-design requirement for fair comparisons.
+Why this file exists
+--------------------
+Phase B changes the model weights, but it should not quietly change the evaluation
+logic. This bridge keeps evaluation anchored to the already-tested Phase A
+generation/evaluation script.
+
+What this file does
+-------------------
+1. Parse evaluation options.
+2. Validate the requested input JSONL and the delegated target script.
+3. Rebuild a Phase A `generate_and_eval` command line.
+4. Forward execution to that script and return its exit code.
+
+Interaction with other files
+----------------------------
+- `scripts/phase_a_generate_and_eval.py`: the actual frozen evaluator.
+- `scripts/phase_b_train_sft.py`: produces the model or adapter being evaluated.
+
+Example
+-------
+```bash
+python -u scripts/phase_b_eval.py \
+  --input-jsonl assets/artifacts/phase_a_prepared/strategyqa/b0f373610f96/validation.jsonl \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_b_eval_smoke
+```
 """
 
 from __future__ import annotations
@@ -15,6 +38,20 @@ from pathlib import Path
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the Phase B evaluation bridge.
+
+    Returns
+    -------
+    argparse.Namespace
+        Validated arguments controlling which prepared set and model path are passed
+        to the frozen Phase A evaluator.
+
+    Example
+    -------
+    ```python
+    args = parse_args()
+    ```
+    """
     parser = argparse.ArgumentParser(
         description=(
             "Run Phase B model evaluation using the frozen Phase A generation+eval script."
@@ -47,6 +84,19 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """Delegate Phase B evaluation to `scripts/phase_a_generate_and_eval.py`.
+
+    Returns
+    -------
+    int
+        Exit code returned by the delegated subprocess.
+
+    Example
+    -------
+    ```bash
+    python scripts/phase_b_eval.py --input-jsonl validation.jsonl --model-path my_model
+    ```
+    """
     args = parse_args()
     if not args.input_jsonl.exists():
         raise FileNotFoundError(f"Input JSONL not found: {args.input_jsonl}")

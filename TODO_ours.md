@@ -97,12 +97,15 @@ Use this as the final pre-Phase-B gate before committing Phase A baseline.
 Source of truth:
 - `phase_B_plan.md`
 
+Official execution status:
+- [x] Project active phase switched to Phase B (`2026-02-28`).
+- [x] Phase A scripts are now treated as frozen benchmark references for comparison only.
+
 Lifecycle checklist:
 - [x] `B0` Scope Freeze (completed):
   - PEFT-first path selected,
   - first milestone task and artifact set frozen,
   - evaluation/reporting contract frozen.
-- [ ] `B1` Train Pipeline Skeleton
 - [ ] `B1` Train Pipeline Skeleton (code implemented; smoke exit gate pending)
 - [ ] `B2` Data Contract Wiring
 - [ ] `B3` Smoke Stability

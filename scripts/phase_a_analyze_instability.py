@@ -79,10 +79,16 @@ def parse_args() -> argparse.Namespace:
 
 def _load_scored_rows(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip() == "":
-            continue
-        rows.append(json.loads(line))
+    with path.open("r", encoding="utf-8") as f:
+        for idx, line in enumerate(f, start=1):
+            if line.strip() == "":
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid scored JSONL row at line={idx} in {path}: {exc}"
+                ) from exc
     return rows
 
 
@@ -207,4 +213,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

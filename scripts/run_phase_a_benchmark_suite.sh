@@ -951,80 +951,88 @@ summary_path = Path(os.environ["PHASEA_SUITE_SUMMARY_FILE"])
 rows = []
 instability_by_label = {}
 sample_index_by_label = {}
-for raw in results_path.read_text(encoding="utf-8").splitlines():
-    if not raw.strip():
-        continue
-    label, run_dir_str = raw.split("|", 1)
-    run_dir = Path(run_dir_str)
-    metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
-    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    scored_path = run_dir / "scored_predictions.jsonl"
-
-    scored_rows = []
-    parsed = []
-    for line in scored_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
+with results_path.open("r", encoding="utf-8") as results_f:
+    for result_line_idx, raw in enumerate(results_f, start=1):
+        if not raw.strip():
             continue
-        row = json.loads(line)
-        scored_rows.append(row)
-        if not bool(row.get("parse_error", False)):
-            parsed.append(row)
-    inst = summarize_strategyqa_instability(scored_rows)
-    instability_by_label[label] = inst
-    sample_index_by_label[label] = index_rows_by_sample_id(scored_rows)
-    parseable_correct = sum(1 for r in parsed if bool(r.get("is_correct", False)))
-    acc_parsed = (parseable_correct / len(parsed)) if parsed else 0.0
+        label, run_dir_str = raw.strip().split("|", 1)
+        run_dir = Path(run_dir_str)
+        metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
+        manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+        scored_path = run_dir / "scored_predictions.jsonl"
 
-    gen_cfg = manifest.get("generation_config", {})
-    gen_stats = metrics.get("generation_stats", {}) if isinstance(metrics.get("generation_stats"), dict) else {}
-    comparison = metrics.get("comparison", {}) if isinstance(metrics.get("comparison"), dict) else {}
-    delta_acc = comparison.get("delta_accuracy")
-    delta_parse = comparison.get("delta_parse_error_rate")
-    changed = comparison.get("changed_prediction_count")
+        scored_rows = []
+        parsed = []
+        with scored_path.open("r", encoding="utf-8") as scored_f:
+            for scored_line_idx, line in enumerate(scored_f, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"Invalid scored JSONL row at line={scored_line_idx} in {scored_path}: {exc}"
+                    ) from exc
+                scored_rows.append(row)
+                if not bool(row.get("parse_error", False)):
+                    parsed.append(row)
+        inst = summarize_strategyqa_instability(scored_rows)
+        instability_by_label[label] = inst
+        sample_index_by_label[label] = index_rows_by_sample_id(scored_rows)
+        parseable_correct = sum(1 for r in parsed if bool(r.get("is_correct", False)))
+        acc_parsed = (parseable_correct / len(parsed)) if parsed else 0.0
 
-    rows.append(
-        {
-            "label": label,
-            "run_dir": str(run_dir),
-            "max_new_tokens": int(gen_cfg.get("max_new_tokens", 0)),
-            "n": int(metrics.get("n_total", 0)),
-            "n_correct": int(metrics.get("n_correct", 0)),
-            "n_parse_error": int(metrics.get("n_parse_error", 0)),
-            "acc": float(metrics.get("accuracy", 0.0)),
-            "parse_err": float(metrics.get("parse_error_rate", 0.0)),
-            "parseable_n": len(parsed),
-            "parseable_correct": int(parseable_correct),
-            "acc_parseable": float(acc_parsed),
-            "delta_acc": delta_acc,
-            "delta_parse": delta_parse,
-            "changed": changed,
-            "vram_mean_gib": (
-                float(gen_stats.get("vram_mean_total_reserved_gib_sampled"))
-                if gen_stats.get("vram_mean_total_reserved_gib_sampled") is not None
-                else None
-            ),
-            "vram_max_gib": (
-                float(gen_stats.get("vram_max_total_reserved_gib_sampled"))
-                if gen_stats.get("vram_max_total_reserved_gib_sampled") is not None
-                else None
-            ),
-        }
-    )
+        gen_cfg = manifest.get("generation_config", {})
+        gen_stats = metrics.get("generation_stats", {}) if isinstance(metrics.get("generation_stats"), dict) else {}
+        comparison = metrics.get("comparison", {}) if isinstance(metrics.get("comparison"), dict) else {}
+        delta_acc = comparison.get("delta_accuracy")
+        delta_parse = comparison.get("delta_parse_error_rate")
+        changed = comparison.get("changed_prediction_count")
+
+        rows.append(
+            {
+                "label": label,
+                "run_dir": str(run_dir),
+                "max_new_tokens": int(gen_cfg.get("max_new_tokens", 0)),
+                "n": int(metrics.get("n_total", 0)),
+                "n_correct": int(metrics.get("n_correct", 0)),
+                "n_parse_error": int(metrics.get("n_parse_error", 0)),
+                "acc": float(metrics.get("accuracy", 0.0)),
+                "parse_err": float(metrics.get("parse_error_rate", 0.0)),
+                "parseable_n": len(parsed),
+                "parseable_correct": int(parseable_correct),
+                "acc_parseable": float(acc_parsed),
+                "delta_acc": delta_acc,
+                "delta_parse": delta_parse,
+                "changed": changed,
+                "vram_mean_gib": (
+                    float(gen_stats.get("vram_mean_total_reserved_gib_sampled"))
+                    if gen_stats.get("vram_mean_total_reserved_gib_sampled") is not None
+                    else None
+                ),
+                "vram_max_gib": (
+                    float(gen_stats.get("vram_max_total_reserved_gib_sampled"))
+                    if gen_stats.get("vram_max_total_reserved_gib_sampled") is not None
+                    else None
+                ),
+            }
+        )
 
 spec_rows = []
-for raw in specs_path.read_text(encoding="utf-8").splitlines():
-    if not raw.strip():
-        continue
-    label, input_kind, run_name, max_new_tokens, compare_mode = raw.split("|", 4)
-    spec_rows.append(
-        {
-            "label": label,
-            "input_kind": input_kind,
-            "run_name": run_name,
-            "max_new_tokens": max_new_tokens,
-            "compare_mode": compare_mode,
-        }
-    )
+with specs_path.open("r", encoding="utf-8") as specs_f:
+    for raw in specs_f:
+        if not raw.strip():
+            continue
+        label, input_kind, run_name, max_new_tokens, compare_mode = raw.strip().split("|", 4)
+        spec_rows.append(
+            {
+                "label": label,
+                "input_kind": input_kind,
+                "run_name": run_name,
+                "max_new_tokens": max_new_tokens,
+                "compare_mode": compare_mode,
+            }
+        )
 
 spec_compare_mode_by_label = {s["label"]: s["compare_mode"] for s in spec_rows}
 

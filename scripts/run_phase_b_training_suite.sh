@@ -1,4 +1,24 @@
 #!/usr/bin/env bash
+# Phase B suite launcher.
+#
+# Why this file exists:
+# - provide one-click named Phase B training groups,
+# - keep supervisor-reportable intentions/observations/expectations beside the run,
+# - persist suite-level logs separately from per-run training artifacts.
+#
+# What this file does:
+# 1. resolve `ACTIVE_PHASE_B_GROUP` into a concrete config JSON,
+# 2. build the `scripts/phase_b_train_sft.py` command,
+# 3. tee suite-level logs to `assets/artifacts/phase_b_logs/<RUN_PREFIX>/`,
+# 4. write a concise markdown summary for later review.
+#
+# Interaction with other files:
+# - `scripts/phase_b_train_sft.py` performs the real training run.
+# - `configs/phase_b/*.json` define the concrete training defaults.
+#
+# Example:
+#   ACTIVE_PHASE_B_GROUP=B1_SMOKE RUN_PREFIX=phase_b_kickoff \
+#   bash scripts/run_phase_b_training_suite.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,15 +31,24 @@ RUN_PREFIX="${RUN_PREFIX:-phase_b}"
 ENABLE_PERSISTED_LOGS="${ENABLE_PERSISTED_LOGS:-1}"
 
 timestamp() {
+  # Print timestamps in a format that matches other suite logs.
   date "+%Y-%m-%d %H:%M:%S %z"
 }
 
 log_line() {
+  # Add a timestamp prefix to one human-readable log message.
+  #
+  # Example:
+  #   log_line "Group run start"
   local msg="$1"
   echo "[$(timestamp)] $msg"
 }
 
 resolve_group() {
+  # Map a short group id to a stable config block.
+  #
+  # Keep this function explicit rather than data-driven so a novice can inspect
+  # all supported Phase B entrypoints in one place.
   case "$ACTIVE_PHASE_B_GROUP" in
     B1_SMOKE)
       GROUP_TITLE="B1 Smoke Training"

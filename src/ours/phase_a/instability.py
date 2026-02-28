@@ -23,6 +23,14 @@ FINAL_ANSWER_PATTERN = re.compile(
 
 
 def _normalize_binary_token(text: str | None) -> str | None:
+    """Normalize common binary-answer variants to `yes` or `no`.
+
+    Example
+    -------
+    ```python
+    _normalize_binary_token("True")  # -> "yes"
+    ```
+    """
     if text is None:
         return None
     token = str(text).strip().lower()
@@ -195,4 +203,3 @@ def compute_pairwise_prediction_flip(
         "n_yes_to_no": int(n_yes_to_no),
         "n_no_to_yes": int(n_no_to_yes),
     }
-

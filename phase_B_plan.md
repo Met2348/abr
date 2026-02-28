@@ -1,6 +1,19 @@
 # Phase B Plan: From Phase A Baselines to First SFT/PEFT Run
 
-Last updated: 2026-02-27 01:47:19 +0800
+Last updated: 2026-02-28 02:35:00 +0800
+
+## 0. Official Transition Notice
+
+As of `2026-02-28`, project execution focus is officially switched to **Phase B**.
+
+Operational policy:
+1. `scripts/phase_a_*` remain benchmark references and should not be used for new method development.
+2. New development for SFT/PEFT/value-head/BCR-lite work must go to `src/ours/phase_b/*` and `scripts/phase_b_*`.
+3. Phase A outputs are now used as fixed baselines and training/evaluation inputs for Phase B.
+
+Immediate execution entrypoints:
+1. `scripts/run_phase_b_training_suite.sh` for one-click group runs (`B1_SMOKE`, `B1_FIRST`).
+2. `scripts/phase_b_train_sft.py --config-json ...` for direct training control.
 
 ## 1. Phase B Mission
 

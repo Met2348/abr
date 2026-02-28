@@ -1,4 +1,28 @@
-"""Data-loading helpers for Phase B training scripts."""
+"""Load and summarize Phase B training rows from prepared JSONL artifacts.
+
+Why this file exists
+--------------------
+The training script should not mix JSON parsing, schema validation, duplicate-id
+checks, and dataset summaries into one long function. This module isolates those
+responsibilities.
+
+What this file contains
+-----------------------
+- `load_phase_b_rows(...)`: strict JSONL loader with duplicate-id detection
+- `summarize_rows(...)`: compact row statistics for manifests and debug prints
+
+Interaction with other files
+----------------------------
+- `src/ours/phase_b/contracts.py`: row schema and field validation.
+- `scripts/phase_b_train_sft.py`: main caller during training startup.
+
+Example
+-------
+```python
+rows = load_phase_b_rows(Path("train.jsonl"), max_samples=256)
+summary = summarize_rows(rows)
+```
+"""
 
 from __future__ import annotations
 
@@ -18,6 +42,12 @@ def load_phase_b_rows(
 
     This function is strict on duplicate IDs because duplicates can silently
     bias training and evaluation.
+
+    Example
+    -------
+    ```python
+    rows = load_phase_b_rows(Path("train.jsonl"), max_samples=128)
+    ```
     """
 
     if not path.exists():
@@ -47,7 +77,15 @@ def load_phase_b_rows(
 
 
 def summarize_rows(rows: list[PhaseBTrainRow]) -> dict[str, Any]:
-    """Return compact stats for run manifests and debug prints."""
+    """Return compact stats for run manifests and debug prints.
+
+    Example
+    -------
+    ```python
+    summary = summarize_rows(rows)
+    print(summary["dataset_counts"])
+    ```
+    """
 
     by_dataset = Counter(row.dataset for row in rows)
     by_split = Counter(row.split for row in rows)

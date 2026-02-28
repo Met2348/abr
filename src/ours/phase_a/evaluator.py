@@ -31,6 +31,14 @@ class EvalSummary:
     evaluator_version: str = EVALUATOR_VERSION
 
     def to_dict(self) -> dict[str, Any]:
+        """Convert aggregate metrics into a JSON-serializable dictionary.
+
+        Example
+        -------
+        ```python
+        payload = summary.to_dict()
+        ```
+        """
         return {
             "n_total": self.n_total,
             "n_correct": self.n_correct,

@@ -1,10 +1,18 @@
-"""Phase A baseline utilities.
+"""Expose the public Phase A baseline API.
 
-Phase A scope:
-- prompt construction
-- deterministic split
-- inference-time answer extraction
-- evaluation utilities
+Why this file exists
+--------------------
+Phase A is reused by scripts, tests, and Phase B evaluation bridges. This package
+entrypoint gathers the stable symbols so callers do not need to import many internal
+modules one by one.
+
+What this file contains
+-----------------------
+- prompt/template helpers
+- splitting helpers
+- answer extraction helpers
+- evaluation helpers
+- instability-analysis helpers
 """
 
 from .answer_extraction import ExtractedAnswer, answers_equivalent, extract_answer, normalize_gold_answer

@@ -37,8 +37,21 @@ Changes to this file are user-authorized only.
     - regular/minor changes should be reflected in `readme_full.md` only.
 21. All shell commands provided by the assistant for user reruns must be recorded in `readme_full.md`.
 22. Public README environment guidance must remain environment-agnostic and avoid private hardcoded setup assumptions.
+23. Documentation style must be beginner-oriented by default:
+    - every `py` and `sh` file should begin with a short abstract explaining why the file exists,
+    - what responsibilities the file owns,
+    - what major functions/classes it contains,
+    - how control flows through the file,
+    - and how it interacts with other files/modules.
+24. Every function and class should have a complete docstring or nearby explanatory comment that covers:
+    - purpose,
+    - key inputs/outputs,
+    - important edge cases or safety behavior,
+    - and at least one short usage/example snippet when practical.
+25. When modifying existing code, the assistant should raise documentation quality along with code quality instead of leaving new or edited logic under-documented.
+26. Future code added by the assistant should follow this documentation style without needing repeated reminders.
 
 ## Acknowledgement Metadata
 
-- Last explicit user instruction to refresh this file: `2026-02-27`
-- Source scope: includes math-rendering requirement, experiment-workflow requirements (param groups + one-click shell execution), experiment-diagnosis record maintenance in `result_records.md`, batching-first implementation policy with safety/correctness guards, and dual-README documentation policy (`readme.md` public concise, `readme_full.md` private detailed).
+- Last explicit user instruction to refresh this file: `2026-02-28`
+- Source scope: includes math-rendering requirement, experiment-workflow requirements (param groups + one-click shell execution), experiment-diagnosis record maintenance in `result_records.md`, batching-first implementation policy with safety/correctness guards, dual-README documentation policy (`readme.md` public concise, `readme_full.md` private detailed), and beginner-oriented file/function documentation requirements.

@@ -624,22 +624,28 @@ def _load_prepared_rows(path: Path) -> list[dict[str, Any]]:
 
     rows: list[dict[str, Any]] = []
     seen_sample_ids: set[str] = set()
-    for idx, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
-        if line.strip() == "":
-            continue
-        row = json.loads(line)
-        required = ["sample_id", "dataset", "split", "prompt_text", "answer", "question"]
-        missing = [k for k in required if k not in row]
-        if missing:
-            raise KeyError(f"Missing keys {missing} at line={idx+1} in {path}")
-        sample_id = str(row["sample_id"])
-        if sample_id in seen_sample_ids:
-            raise ValueError(
-                f"Duplicate sample_id={sample_id!r} at line={idx+1} in {path}. "
-                "Prepared input must have unique sample IDs for trustworthy metrics."
-            )
-        seen_sample_ids.add(sample_id)
-        rows.append(row)
+    with path.open("r", encoding="utf-8") as f:
+        for idx, line in enumerate(f, start=1):
+            if line.strip() == "":
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid JSONL row at line={idx} in {path}: {exc}"
+                ) from exc
+            required = ["sample_id", "dataset", "split", "prompt_text", "answer", "question"]
+            missing = [k for k in required if k not in row]
+            if missing:
+                raise KeyError(f"Missing keys {missing} at line={idx} in {path}")
+            sample_id = str(row["sample_id"])
+            if sample_id in seen_sample_ids:
+                raise ValueError(
+                    f"Duplicate sample_id={sample_id!r} at line={idx} in {path}. "
+                    "Prepared input must have unique sample IDs for trustworthy metrics."
+                )
+            seen_sample_ids.add(sample_id)
+            rows.append(row)
     return rows
 
 
@@ -1432,30 +1438,36 @@ def _configure_model_generation(model: Any, gen_cfg: GenerationConfig) -> None:
 
 def _run_evaluation(predictions_path: Path):
     records: list[PredictionRecord] = []
-    for idx, line in enumerate(predictions_path.read_text(encoding="utf-8").splitlines()):
-        if line.strip() == "":
-            continue
-        payload = json.loads(line)
-        rec = PredictionRecord(
-            sample_id=str(payload["sample_id"]),
-            dataset=str(payload["dataset"]),
-            split=str(payload["split"]),
-            raw_prediction=str(payload["raw_prediction"]),
-            gold_answer=str(payload["gold_answer"]),
-            question=(
-                str(payload["question"])
-                if "question" in payload and payload["question"] is not None
-                else None
-            ),
-            metadata=dict(payload.get("metadata", {})),
-        )
-        try:
-            rec.validate()
-        except Exception as exc:  # noqa: BLE001
-            raise ValueError(
-                f"Invalid prediction record at line={idx+1} in {predictions_path}: {exc}"
-            ) from exc
-        records.append(rec)
+    with predictions_path.open("r", encoding="utf-8") as f:
+        for idx, line in enumerate(f, start=1):
+            if line.strip() == "":
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid prediction JSONL row at line={idx} in {predictions_path}: {exc}"
+                ) from exc
+            rec = PredictionRecord(
+                sample_id=str(payload["sample_id"]),
+                dataset=str(payload["dataset"]),
+                split=str(payload["split"]),
+                raw_prediction=str(payload["raw_prediction"]),
+                gold_answer=str(payload["gold_answer"]),
+                question=(
+                    str(payload["question"])
+                    if "question" in payload and payload["question"] is not None
+                    else None
+                ),
+                metadata=dict(payload.get("metadata", {})),
+            )
+            try:
+                rec.validate()
+            except Exception as exc:  # noqa: BLE001
+                raise ValueError(
+                    f"Invalid prediction record at line={idx} in {predictions_path}: {exc}"
+                ) from exc
+            records.append(rec)
 
     return evaluate_predictions(records)
 
@@ -1598,11 +1610,17 @@ def _compare_metrics(
 
 def _load_pred_map(path: Path) -> dict[str, str]:
     data: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip() == "":
-            continue
-        payload = json.loads(line)
-        data[str(payload["sample_id"])] = str(payload.get("raw_prediction", ""))
+    with path.open("r", encoding="utf-8") as f:
+        for idx, line in enumerate(f, start=1):
+            if line.strip() == "":
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid prediction JSONL row at line={idx} in {path}: {exc}"
+                ) from exc
+            data[str(payload["sample_id"])] = str(payload.get("raw_prediction", ""))
     return data
 
 

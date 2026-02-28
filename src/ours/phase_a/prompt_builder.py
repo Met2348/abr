@@ -1,9 +1,40 @@
-"""Dataset-agnostic prompt building for Phase A.
+"""Build prompt/target pairs for Phase A from canonical dataset samples.
 
-Key idea
---------
-All datasets are already normalized into `CanonicalSample`.
-So prompt-building should depend on that canonical shape, not dataset internals.
+Why this file exists
+--------------------
+Different datasets need different prompt wording, but the rest of the pipeline
+should not care about those wording details. This module centralizes prompt-template
+definitions and converts canonical samples into model-ready prompt/target records.
+
+What this file contains
+-----------------------
+- a prompt-template registry keyed by template id and version
+- helpers for resolving templates
+- the main conversion function `build_prepared_sample(...)`
+- low-level helpers for composing the final prompt text and target text
+
+Execution logic
+---------------
+`build_prepared_sample(...)` validates a canonical sample -> resolves the template ->
+formats the prompt -> formats the target -> emits a validated `PreparedSample`.
+
+Interaction with other files
+----------------------------
+- `src/ours/data/schema.py`: defines `CanonicalSample`.
+- `src/ours/phase_a/contracts.py`: defines `PreparedSample` and template specs.
+- `scripts/phase_a_prepare.py`: main caller that writes prepared JSONL artifacts.
+
+Example
+-------
+```python
+prepared = build_prepared_sample(
+    sample=canonical_sample,
+    split="train",
+    target_style="answer_only",
+    template_id="qa_direct",
+    template_version="1.0.0",
+)
+```
 """
 
 from __future__ import annotations
@@ -219,7 +250,14 @@ PROMPT_TEMPLATE_REGISTRY: dict[str, dict[str, PromptTemplateSpec]] = {
 
 
 def list_template_versions(template_id: str) -> list[str]:
-    """Return available versions for one template id."""
+    """Return available versions for one template id.
+
+    Example
+    -------
+    ```python
+    versions = list_template_versions("qa_direct")
+    ```
+    """
     if template_id not in PROMPT_TEMPLATE_REGISTRY:
         raise KeyError(
             f"Unknown template_id={template_id!r}. "
@@ -229,7 +267,14 @@ def list_template_versions(template_id: str) -> list[str]:
 
 
 def resolve_template(template_id: str, template_version: str) -> PromptTemplateSpec:
-    """Resolve and validate one template from registry."""
+    """Resolve and validate one template from the registry.
+
+    Example
+    -------
+    ```python
+    spec = resolve_template("qa_direct", "1.0.0")
+    ```
+    """
     if template_id not in PROMPT_TEMPLATE_REGISTRY:
         raise KeyError(
             f"Unknown template_id={template_id!r}. "
@@ -259,6 +304,18 @@ def build_prepared_sample(
     Output fields include:
     - prompt_text: what user/system asks model
     - target_text: supervised target used in SFT
+
+    Example
+    -------
+    ```python
+    prepared = build_prepared_sample(
+        sample=sample,
+        split="validation",
+        target_style="cot_then_answer",
+        template_id="qa_strategyqa_cot_compact",
+        template_version="1.0.0",
+    )
+    ```
     """
     sample.validate()
 
@@ -311,6 +368,12 @@ def _compose_chat_like_prompt(system_prompt: str, user_text: str) -> str:
 
     We intentionally keep this format readable and framework-agnostic.
     Later you can map it to model-specific chat templates if needed.
+
+    Example
+    -------
+    ```python
+    prompt_text = _compose_chat_like_prompt("You are helpful.", "Question: ...")
+    ```
     """
     return (
         "[SYSTEM]\n"
@@ -327,7 +390,19 @@ def _build_target_text(
     target_style: TargetStyle,
     answer_prefix: str,
 ) -> str:
-    """Build supervised target text based on selected style."""
+    """Build supervised target text based on selected style.
+
+    Example
+    -------
+    ```python
+    target = _build_target_text(
+        answer="yes",
+        cot="Because ...",
+        target_style="cot_then_answer",
+        answer_prefix="Final answer: ",
+    )
+    ```
+    """
     answer_clean = answer.strip()
     cot_clean = cot.strip() if cot is not None else ""
 

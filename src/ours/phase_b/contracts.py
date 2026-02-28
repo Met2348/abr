@@ -1,8 +1,33 @@
-"""Core dataclasses for Phase B training pipeline.
+"""Define the validated row contract used by Phase B training.
 
-Phase B focuses on training (SFT/PEFT) using Phase A prepared artifacts.
-This module defines explicit row contracts so training scripts can validate
-inputs early and fail with clear errors.
+Why this file exists
+--------------------
+Phase B training reads JSONL records produced earlier in the pipeline. Those records
+need one strict contract so the training code can fail early instead of discovering
+schema issues inside tokenization or model code.
+
+What this file contains
+-----------------------
+- `PhaseBTrainRow`: one normalized training record
+- small validation helpers used by dataclass methods
+
+Execution logic
+---------------
+Call `PhaseBTrainRow.from_dict(...)` on raw JSON payloads, then use
+`PhaseBTrainRow.validate()` and `PhaseBTrainRow.to_dict()` when persisting or
+re-checking values.
+
+Interaction with other files
+----------------------------
+- `src/ours/phase_b/data.py` loads JSONL lines and instantiates this dataclass.
+- `scripts/phase_b_train_sft.py` consumes validated row objects during training.
+
+Example
+-------
+```python
+row = PhaseBTrainRow.from_dict(payload)
+row.validate()
+```
 """
 
 from __future__ import annotations
@@ -16,6 +41,19 @@ class PhaseBTrainRow:
     """One normalized training row loaded from prepared JSONL.
 
     Required fields are aligned with `scripts/phase_a_prepare.py` outputs.
+
+    Example
+    -------
+    ```python
+    row = PhaseBTrainRow(
+        sample_id="strategyqa-train-1",
+        dataset="strategyqa",
+        split="train",
+        prompt_text="Question: ...",
+        target_text="yes",
+        answer="yes",
+    )
+    ```
     """
 
     sample_id: str
@@ -28,6 +66,14 @@ class PhaseBTrainRow:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def validate(self) -> None:
+        """Validate field types and required non-empty strings.
+
+        Example
+        -------
+        ```python
+        row.validate()
+        ```
+        """
         _validate_non_empty_str(self.sample_id, "sample_id")
         _validate_non_empty_str(self.dataset, "dataset")
         _validate_non_empty_str(self.split, "split")
@@ -40,11 +86,27 @@ class PhaseBTrainRow:
             raise TypeError("`metadata` must be dict[str, Any]")
 
     def to_dict(self) -> dict[str, Any]:
+        """Convert the row into a validated plain dictionary.
+
+        Example
+        -------
+        ```python
+        payload = row.to_dict()
+        ```
+        """
         self.validate()
         return asdict(self)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "PhaseBTrainRow":
+        """Build and validate one row from a JSON-like dictionary.
+
+        Example
+        -------
+        ```python
+        row = PhaseBTrainRow.from_dict(payload)
+        ```
+        """
         required = [
             "sample_id",
             "dataset",
@@ -72,6 +134,14 @@ class PhaseBTrainRow:
 
 
 def _validate_non_empty_str(value: Any, field_name: str) -> None:
+    """Validate that a field is a non-empty string after trimming.
+
+    Example
+    -------
+    ```python
+    _validate_non_empty_str("strategyqa", "dataset")
+    ```
+    """
     if not isinstance(value, str):
         raise TypeError(f"`{field_name}` must be str, got {type(value)!r}")
     if value.strip() == "":

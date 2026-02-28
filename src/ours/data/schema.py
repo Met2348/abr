@@ -116,8 +116,15 @@ def ensure_canonical_samples(
 
 
 def _validate_non_empty_str(value: Any, field_name: str) -> None:
+    """Validate that one schema field is a non-empty string.
+
+    Example
+    -------
+    ```python
+    _validate_non_empty_str("gsm8k", "dataset")
+    ```
+    """
     if not isinstance(value, str):
         raise TypeError(f"`{field_name}` must be str, got {type(value)!r}")
     if value.strip() == "":
         raise ValueError(f"`{field_name}` must be a non-empty string")
-

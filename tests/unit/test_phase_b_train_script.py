@@ -89,3 +89,63 @@ def test_build_features_masks_prompt_and_respects_max_seq_length() -> None:
     assert len(f["labels"]) == 5
     # At least one supervised label should exist.
     assert any(x != -100 for x in f["labels"])
+
+
+def test_resolve_training_args_tolerates_missing_optional_kwargs() -> None:
+    module = _load_phase_b_train_module()
+
+    class _TrainingArgsStub:
+        # Deliberately tiny signature: excludes overwrite_output_dir and many others.
+        def __init__(
+            self,
+            output_dir,
+            per_device_train_batch_size,
+            per_device_eval_batch_size,
+            gradient_accumulation_steps,
+            learning_rate,
+            weight_decay,
+            warmup_ratio,
+            num_train_epochs,
+            max_steps,
+            logging_steps,
+            save_steps,
+            eval_steps,
+            save_total_limit,
+            max_grad_norm,
+            seed,
+            report_to,
+            remove_unused_columns,
+            auto_find_batch_size,
+            bf16,
+            fp16,
+            gradient_checkpointing,
+            eval_strategy,
+        ):
+            self.payload = {
+                "output_dir": output_dir,
+                "per_device_train_batch_size": per_device_train_batch_size,
+                "eval_strategy": eval_strategy,
+                "bf16": bf16,
+                "fp16": fp16,
+                "gradient_checkpointing": gradient_checkpointing,
+            }
+
+    args = module.parse_args(
+        [
+            "--train-jsonl",
+            "assets/artifacts/phase_a_prepared/strategyqa/b0f/train.jsonl",
+            "--validation-jsonl",
+            "assets/artifacts/phase_a_prepared/strategyqa/b0f/validation.jsonl",
+        ]
+    )
+    out = module._resolve_training_args(
+        TrainingArguments=_TrainingArgsStub,
+        output_dir=Path("tmp/phase_b_test"),
+        args=args,
+        has_eval=True,
+        use_bf16=True,
+        use_fp16=False,
+    )
+    assert out.payload["output_dir"] == "tmp/phase_b_test"
+    assert out.payload["eval_strategy"] == "steps"
+    assert out.payload["bf16"] is True

@@ -250,7 +250,17 @@ def _prepare_one_dataset(
         if manifest_path.exists() and summary_path.exists():
             previous = json.loads(manifest_path.read_text(encoding="utf-8"))
             if previous.get("run_fingerprint") == run_fingerprint:
-                return None
+                valid, reason = _validate_jsonl_outputs(run_dir)
+                if valid:
+                    return None
+                print(
+                    "WARN: Existing prepared artifacts failed JSONL validation; regenerating.",
+                    f"dataset={dataset} run_dir={run_dir} reason={reason}",
+                )
+                for p in run_dir.glob("*.json"):
+                    p.unlink()
+                for p in run_dir.glob("*.jsonl"):
+                    p.unlink()
 
     if run_dir.exists() and overwrite:
         for p in run_dir.glob("*.json"):
@@ -361,7 +371,27 @@ def _stable_fingerprint(payload: dict[str, Any]) -> str:
 
 
 def _write_jsonl(writer: TextIO, record: dict[str, Any]) -> None:
-    writer.write(json.dumps(record, ensure_ascii=False) + "\n")
+    # Keep JSONL robust for line-based tooling by escaping Unicode line separators.
+    text = json.dumps(record, ensure_ascii=False)
+    text = text.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    writer.write(text + "\n")
+
+
+def _validate_jsonl_outputs(run_dir: Path) -> tuple[bool, str]:
+    """Check whether prepared split JSONLs are parseable row-by-row."""
+    for split_name in ("train", "validation", "test"):
+        path = run_dir / f"{split_name}.jsonl"
+        if not path.exists():
+            return False, f"missing_file:{path}"
+        with path.open("r", encoding="utf-8") as f:
+            for idx, line in enumerate(f, start=1):
+                if line.strip() == "":
+                    continue
+                try:
+                    json.loads(line)
+                except json.JSONDecodeError as exc:
+                    return False, f"invalid_json:{path}:line={idx}:{exc}"
+    return True, "ok"
 
 
 if __name__ == "__main__":

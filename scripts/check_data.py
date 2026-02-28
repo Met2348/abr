@@ -37,6 +37,14 @@ from ours.data.loaders import DATASET_LOADERS, load_dataset_canonical  # noqa: E
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for dataset readiness checks.
+
+    Example
+    -------
+    ```python
+    args = parse_args()
+    ```
+    """
     parser = argparse.ArgumentParser(
         description="Check and preview normalized dataset samples."
     )
@@ -92,6 +100,19 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """Run dataset-loading checks and print a readable summary for each dataset.
+
+    Returns
+    -------
+    int
+        `0` when all requested datasets load successfully, otherwise `1`.
+
+    Example
+    -------
+    ```bash
+    python scripts/check_data.py --datasets gsm8k strategyqa --split train --limit 3
+    ```
+    """
     args = parse_args()
     failures: list[tuple[str, str]] = []
 
@@ -140,6 +161,14 @@ def main() -> int:
 
 
 def _dataset_specific_kwargs(dataset_name: str, args: argparse.Namespace) -> dict[str, Any]:
+    """Build loader kwargs for datasets that need extra selectors.
+
+    Example
+    -------
+    ```python
+    kwargs = _dataset_specific_kwargs("gsm8k", args)
+    ```
+    """
     name = dataset_name.lower()
     kwargs: dict[str, Any] = {}
     if name == "gsm8k":
@@ -152,6 +181,14 @@ def _dataset_specific_kwargs(dataset_name: str, args: argparse.Namespace) -> dic
 
 
 def _print_summary(samples, dataset_name: str) -> None:
+    """Print compact completeness statistics for one sample list.
+
+    Example
+    -------
+    ```python
+    _print_summary(samples, "gsm8k")
+    ```
+    """
     n = len(samples)
     if n == 0:
         print(f"[WARN] {dataset_name}: no samples returned.")
@@ -168,6 +205,14 @@ def _print_summary(samples, dataset_name: str) -> None:
 
 
 def _print_example(samples) -> None:
+    """Print the first sample as formatted JSON for manual inspection.
+
+    Example
+    -------
+    ```python
+    _print_example(samples)
+    ```
+    """
     if not samples:
         return
     example = samples[0].to_dict()
@@ -177,4 +222,3 @@ def _print_example(samples) -> None:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

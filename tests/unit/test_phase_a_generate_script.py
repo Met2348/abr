@@ -380,6 +380,27 @@ def test_load_prepared_rows_rejects_duplicate_sample_ids(tmp_path: Path) -> None
     raise AssertionError("Expected duplicate sample_id failure")
 
 
+def test_load_prepared_rows_handles_u2028_without_splitting_jsonl(tmp_path: Path) -> None:
+    module = _load_phase_a_generate_module()
+
+    row = {
+        "sample_id": "gsm8k:unicode:1",
+        "dataset": "gsm8k",
+        "split": "validation",
+        "prompt_text": "[USER]\\nQ\\n[ASSISTANT]\\n",
+        "answer": "42",
+        "question": "Line A\u2028Line B",
+    }
+    path = tmp_path / "prepared_u2028.jsonl"
+    # Keep ensure_ascii=False so the JSON line contains literal U+2028.
+    path.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    rows = module._load_prepared_rows(path)
+    assert len(rows) == 1
+    assert rows[0]["sample_id"] == "gsm8k:unicode:1"
+    assert rows[0]["question"] == "Line A\u2028Line B"
+
+
 def test_compare_metrics_marks_evaluator_version_mismatch(tmp_path: Path) -> None:
     module = _load_phase_a_generate_module()
 

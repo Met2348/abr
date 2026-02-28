@@ -44,6 +44,14 @@ from ours.data.step_builder import (  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for step-artifact preprocessing.
+
+    Example
+    -------
+    ```python
+    args = parse_args()
+    ```
+    """
     parser = argparse.ArgumentParser(
         description=(
             "Build step-level artifacts from canonical dataset samples. "
@@ -182,6 +190,19 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """Run the step-preprocessing workflow for all requested datasets.
+
+    Returns
+    -------
+    int
+        `0` on success, otherwise `1` when one or more datasets fail.
+
+    Example
+    -------
+    ```bash
+    python scripts/preprocess_steps.py --datasets gsm8k strategyqa --split train --limit 200
+    ```
+    """
     args = parse_args()
 
     if args.batch_size < 1:
@@ -474,6 +495,14 @@ def _dataset_variant_name(dataset_name: str, kwargs: dict[str, Any]) -> str:
 
 
 def _stable_fingerprint(payload: dict[str, Any]) -> str:
+    """Return a short deterministic fingerprint for one run specification.
+
+    Example
+    -------
+    ```python
+    fingerprint = _stable_fingerprint({"dataset": "gsm8k", "split": "train"})
+    ```
+    """
     text = json.dumps(payload, sort_keys=True, ensure_ascii=True)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
@@ -492,16 +521,27 @@ class _NullWriter:
     """Small no-op writer used when optional outputs are disabled."""
 
     def write(self, _: str) -> int:
+        """Pretend to write one string and report zero bytes written."""
         return 0
 
     def __enter__(self) -> "_NullWriter":
+        """Support `with`-statement usage for optional file handles."""
         return self
 
     def __exit__(self, *_: Any) -> None:
+        """Exit the context manager without performing cleanup."""
         return None
 
 
 def _null_writer() -> _NullWriter:
+    """Create a `_NullWriter` for branches that skip optional artifact output.
+
+    Example
+    -------
+    ```python
+    writer = _null_writer()
+    ```
+    """
     return _NullWriter()
 
 

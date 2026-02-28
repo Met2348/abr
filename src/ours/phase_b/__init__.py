@@ -1,4 +1,16 @@
-"""Phase B training utilities (SFT/PEFT entry point helpers)."""
+"""Expose the small public surface of the Phase B training package.
+
+Why this file exists
+--------------------
+Callers such as `scripts/phase_b_train_sft.py` should import a compact Phase B API
+without needing to know which submodule defines each symbol.
+
+What this file contains
+-----------------------
+- `PhaseBTrainRow`: validated training-row contract
+- `load_phase_b_rows(...)`: strict JSONL loader
+- `summarize_rows(...)`: compact dataset/run summary helper
+"""
 
 from .contracts import PhaseBTrainRow
 from .data import load_phase_b_rows, summarize_rows

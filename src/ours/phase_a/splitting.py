@@ -22,6 +22,14 @@ class SplitConfig:
     seed: int = 42
 
     def validate(self) -> None:
+        """Validate ratio bounds and the requirement that they sum to `1.0`.
+
+        Example
+        -------
+        ```python
+        SplitConfig().validate()
+        ```
+        """
         ratios = [self.train_ratio, self.validation_ratio, self.test_ratio]
         if any(r < 0 or r > 1 for r in ratios):
             raise ValueError("All ratios must be in [0, 1]")
