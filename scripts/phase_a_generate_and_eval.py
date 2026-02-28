@@ -1,18 +1,69 @@
 #!/usr/bin/env python3
-"""Run Phase A inference and evaluation in one Python script.
+"""Run one full Phase A inference-and-evaluation experiment.
 
-What this script does
----------------------
-1) Reads prepared samples JSONL (for example validation.jsonl from phase_a_prepare).
-2) Runs model generation to create predictions JSONL.
-3) Runs Phase A evaluator to create scored outputs + metrics.
-4) Optionally compares against a previous run to show metric/prediction differences.
+Why this file exists
+--------------------
+Phase A experiments are repeated many times with different prompts, token budgets,
+batch sizes, and decoding modes. This script keeps the full loop in one reproducible
+entrypoint:
+- load prepared prompt/target rows,
+- run model inference,
+- score outputs with the frozen evaluator,
+- persist artifacts and optional comparisons.
 
-Why this script exists
-----------------------
-You asked for a Python-script workflow instead of many shell commands.
-This file is the beginner-friendly, reproducible entry point for
-"same experiment again, then compare differences".
+What this file does
+-------------------
+1. Read prepared samples JSONL (for example `validation.jsonl` from
+   `scripts/phase_a_prepare.py`).
+2. Load a local Hugging Face causal LM and tokenizer.
+3. Generate predictions using either:
+   - normal free-form generation, or
+   - StrategyQA binary-choice scoring.
+4. Apply optional batching, OOM backoff, truncation recovery, and chat-marker
+   trimming.
+5. Evaluate saved predictions into scored outputs and summary metrics.
+6. Optionally compare the current run against a previous run with the same name.
+7. Persist machine-readable artifacts such as:
+   - `predictions.jsonl`
+   - `scored_predictions.jsonl`
+   - `metrics.json`
+   - `manifest.json`
+   - `console.log`
+
+What this file contains
+-----------------------
+- CLI/config parsing
+- deterministic runtime setup
+- free-form and binary-choice generation helpers
+- truncation-recovery helpers
+- VRAM telemetry helpers
+- evaluation/comparison helpers
+- top-level orchestration in `main()`
+
+Execution logic
+---------------
+`parse_args()` -> runtime dependency import -> reproducibility setup -> run directory
+creation -> model/tokenizer load -> generation -> evaluation -> artifact writing ->
+optional run comparison.
+
+Interaction with other files
+----------------------------
+- `scripts/phase_a_prepare.py`: produces the prepared JSONL consumed here.
+- `src/ours/phase_a/evaluator.py`: scores predictions after inference.
+- `scripts/phase_a_eval_predictions.py`: re-evaluates saved predictions without
+  rerunning inference.
+- `scripts/run_phase_a_benchmark_suite.sh`: launches this script for named
+  experiment groups.
+
+Example
+-------
+```bash
+python -u scripts/phase_a_generate_and_eval.py \
+  --input-jsonl assets/artifacts/phase_a_prepared/strategyqa/.../validation.jsonl \
+  --run-name strategyqa_baseline \
+  --require-cuda \
+  --max-new-tokens 64
+```
 """
 
 from __future__ import annotations
@@ -34,6 +85,17 @@ if TYPE_CHECKING:
 
 
 def _bootstrap_src_path() -> None:
+    """Add the repo-local `src/` directory to `sys.path`.
+
+    This allows direct execution with `python scripts/phase_a_generate_and_eval.py`
+    from the repository root, without requiring an editable package install.
+
+    Example
+    -------
+    ```bash
+    python scripts/phase_a_generate_and_eval.py --help
+    ```
+    """
     repo_root = Path(__file__).resolve().parents[1]
     src_dir = repo_root / "src"
     if str(src_dir) not in sys.path:
@@ -47,7 +109,14 @@ from ours.phase_a import PredictionRecord, evaluate_predictions  # noqa: E402
 
 @dataclass(slots=True)
 class GenerationConfig:
-    """Generation settings saved to run manifest for reproducibility."""
+    """Generation settings saved to the run manifest for reproducibility.
+
+    Example
+    -------
+    ```python
+    cfg = GenerationConfig(max_new_tokens=128, do_sample=False)
+    ```
+    """
 
     max_new_tokens: int = 64
     do_sample: bool = False
@@ -81,6 +150,14 @@ class GenerationStats:
     vram_per_device: list[dict[str, Any]]
 
     def to_dict(self) -> dict[str, Any]:
+        """Convert runtime telemetry into a JSON-serializable dictionary.
+
+        Example
+        -------
+        ```python
+        payload = generation_stats.to_dict()
+        ```
+        """
         return {
             "num_samples": int(self.num_samples),
             "elapsed_seconds": float(self.elapsed_seconds),
@@ -116,7 +193,19 @@ class GenerationStats:
 
 @dataclass(slots=True)
 class TruncationRecoveryConfig:
-    """Control policy for continuation-based truncation recovery."""
+    """Control policy for continuation-based truncation recovery.
+
+    Example
+    -------
+    ```python
+    cfg = TruncationRecoveryConfig(
+        enabled=True,
+        max_rounds=2,
+        extra_tokens_per_round=96,
+        datasets=("gsm8k", "hendrycks_math"),
+    )
+    ```
+    """
 
     enabled: bool = True
     max_rounds: int = 2
@@ -125,6 +214,7 @@ class TruncationRecoveryConfig:
     require_final_answer_signal: bool = True
 
     def to_dict(self) -> dict[str, Any]:
+        """Convert recovery policy into a JSON-serializable dictionary."""
         return {
             "enabled": bool(self.enabled),
             "max_rounds": int(self.max_rounds),
@@ -136,6 +226,18 @@ class TruncationRecoveryConfig:
 
 @dataclass(slots=True)
 class FreeformGenerationResult:
+    """Hold one free-form generation result plus truncation metadata.
+
+    Example
+    -------
+    ```python
+    result = FreeformGenerationResult(
+        raw_prediction="Final answer: 12",
+        generated_token_count=8,
+        hit_token_limit=False,
+    )
+    ```
+    """
     raw_prediction: str
     generated_token_count: int
     hit_token_limit: bool
@@ -144,6 +246,23 @@ class FreeformGenerationResult:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for one Phase A inference/evaluation run.
+
+    Returns
+    -------
+    argparse.Namespace
+        Validated run configuration used by `main()`.
+
+    Example
+    -------
+    ```python
+    args = parse_args([
+        "--input-jsonl", "validation.jsonl",
+        "--run-name", "debug_run",
+        "--max-new-tokens", "64",
+    ])
+    ```
+    """
     parser = argparse.ArgumentParser(
         description="Run Phase A inference + evaluation + optional comparison."
     )
@@ -332,13 +451,37 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """Run the full Phase A generation, evaluation, and artifact-writing lifecycle.
+
+    This is the core orchestration function for Phase A. It intentionally keeps the
+    major stages visible in order so a newcomer can map console output back to code.
+
+    Returns
+    -------
+    int
+        Process exit code. `0` indicates successful completion.
+
+    Example
+    -------
+    ```bash
+    python -u scripts/phase_a_generate_and_eval.py \
+      --input-jsonl validation.jsonl \
+      --run-name baseline_eval \
+      --max-new-tokens 64
+    ```
+    """
     args = parse_args()
     if not args.input_jsonl.exists():
         raise FileNotFoundError(f"Input file not found: {args.input_jsonl}")
 
+    # Import heavy ML runtime deps lazily so `--help` and lightweight tooling remain fast.
     torch, AutoTokenizer, AutoModelForCausalLM = _import_runtime_deps()
+
+    # Fix RNG behavior before any model work so repeated runs are comparable.
     _set_reproducibility(seed=args.seed, torch_module=torch)
 
+    # Freeze generation-policy and truncation-policy objects early so they can be
+    # logged into artifacts and reused consistently across helper calls.
     gen_cfg = GenerationConfig(
         max_new_tokens=args.max_new_tokens,
         do_sample=args.do_sample,
@@ -356,6 +499,7 @@ def main() -> int:
         ),
     )
 
+    # Create one timestamped run directory that will contain all persisted outputs.
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = args.output_root / f"{args.run_name}_{stamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -370,11 +514,15 @@ def main() -> int:
     orig_stderr = sys.stderr
     console_log_writer: TextIO | None = None
     if args.persist_console_log:
+        # Mirror terminal output into a file so long experiments remain debuggable
+        # after the terminal session ends.
         console_log_writer = console_log_path.open("w", encoding="utf-8")
         sys.stdout = _TeeWriter(orig_stdout, console_log_writer)
         sys.stderr = _TeeWriter(orig_stderr, console_log_writer)
 
     try:
+        # Stage 1: print a fully explicit run header. This is intentionally verbose
+        # because users often paste it directly into experiment notes.
         print("=" * 88)
         print("Phase A: Generate + Evaluate")
         print("=" * 88)
@@ -416,11 +564,13 @@ def main() -> int:
                 "warning     : CUDA unavailable; this run will use CPU and may be very slow.",
             )
 
+        # Stage 2: load prepared rows and optionally shrink them for a smoke run.
         rows = _load_prepared_rows(args.input_jsonl)
         if args.max_samples is not None:
             rows = rows[: args.max_samples]
         print(f"num_inputs  : {len(rows)}")
 
+        # Stage 3: load tokenizer/model and align generation config with runtime settings.
         _configure_transformers_progress_bar(disable=True)
         load_start = time.perf_counter()
         print("model_load  : start")
@@ -441,6 +591,7 @@ def main() -> int:
             map_counts = Counter(str(v) for v in hf_map.values())
             print(f"hf_device_map: {dict(sorted(map_counts.items()))}")
 
+        # Stage 4: run inference and persist raw predictions immediately to JSONL.
         generation_stats = _run_generation(
             rows=rows,
             model=model,
@@ -458,8 +609,11 @@ def main() -> int:
             truncation_recovery_cfg=trunc_recovery_cfg,
         )
 
+        # Stage 5: score saved predictions through the stable evaluator path.
         scored_rows, summary = _run_evaluation(predictions_path)
 
+        # Stage 6: compute extra diagnostics for math-style datasets where token-cap
+        # truncation and weak extraction are common hidden failure modes.
         math_diag = _build_math_generation_diagnostics(
             scored_rows=scored_rows,
             max_new_tokens=gen_cfg.max_new_tokens,
@@ -471,6 +625,8 @@ def main() -> int:
             for row in scored_rows:
                 fout.write(json.dumps(row.to_dict(), ensure_ascii=False) + "\n")
 
+        # Stage 7: assemble the summary metrics payload that downstream tools and
+        # benchmark-suite scripts consume.
         metrics = summary.to_dict()
         metrics["run_name"] = args.run_name
         metrics["input_jsonl"] = str(args.input_jsonl)
@@ -498,11 +654,13 @@ def main() -> int:
             )
             metrics["comparison"] = comparison
 
+        # Persist machine-readable metrics before writing the human-readable footer.
         metrics_path.write_text(
             json.dumps(metrics, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
 
+        # Write a manifest that captures how this run was configured, not just how it scored.
         manifest = {
             "schema_version": 1,
             "script": "scripts/phase_a_generate_and_eval.py",
@@ -538,6 +696,7 @@ def main() -> int:
             encoding="utf-8",
         )
 
+        # Final console footer: concise enough for humans, stable enough for logs.
         print("-" * 88)
         print(f"accuracy         : {summary.accuracy:.4f}")
         print(f"parse_error_rate : {summary.parse_error_rate:.4f}")
@@ -577,6 +736,7 @@ def main() -> int:
         print("=" * 88)
         return 0
     finally:
+        # Restore original streams even if the run fails, so later shell output is normal.
         if console_log_writer is not None:
             sys.stdout.flush()
             sys.stderr.flush()
@@ -586,6 +746,14 @@ def main() -> int:
 
 
 def _set_reproducibility(seed: int, torch_module: Any) -> None:
+    """Apply deterministic-friendly RNG settings for Python and torch.
+
+    Example
+    -------
+    ```python
+    _set_reproducibility(seed=42, torch_module=torch)
+    ```
+    """
     random.seed(seed)
     torch_module.manual_seed(seed)
     if torch_module.cuda.is_available():
@@ -596,6 +764,14 @@ def _set_reproducibility(seed: int, torch_module: Any) -> None:
 
 
 def _resolve_dtype(dtype_name: str, torch_module: Any):
+    """Map a CLI dtype name onto a concrete torch dtype object.
+
+    Example
+    -------
+    ```python
+    dtype = _resolve_dtype("auto", torch)
+    ```
+    """
     if dtype_name == "auto":
         if torch_module.cuda.is_available():
             # bfloat16 is stable for most modern GPUs and efficient.
@@ -611,6 +787,17 @@ def _resolve_dtype(dtype_name: str, torch_module: Any):
 
 
 def _load_prepared_rows(path: Path) -> list[dict[str, Any]]:
+    """Load and validate prepared Phase A rows from JSONL.
+
+    This function is strict about missing keys and duplicate `sample_id` values
+    because those errors can silently corrupt downstream metrics.
+
+    Example
+    -------
+    ```python
+    rows = _load_prepared_rows(Path("validation.jsonl"))
+    ```
+    """
     if not path.exists():
         raise FileNotFoundError(
             f"Input file not found: {path}. "
@@ -650,6 +837,14 @@ def _load_prepared_rows(path: Path) -> list[dict[str, Any]]:
 
 
 def _gib_from_bytes(num_bytes: int) -> float:
+    """Convert bytes to GiB using binary units.
+
+    Example
+    -------
+    ```python
+    gib = _gib_from_bytes(1024 ** 3)  # -> 1.0
+    ```
+    """
     return float(num_bytes) / float(1024**3)
 
 
@@ -815,6 +1010,36 @@ def _run_generation(
     oom_backoff: bool,
     truncation_recovery_cfg: TruncationRecoveryConfig | None = None,
 ) -> GenerationStats:
+    """Generate predictions for prepared rows and write them to JSONL.
+
+    This helper owns the main inference loop, including:
+    - batch routing,
+    - StrategyQA binary-choice handling,
+    - OOM backoff,
+    - truncation-recovery accounting,
+    - progress logging,
+    - VRAM telemetry.
+
+    Example
+    -------
+    ```python
+    stats = _run_generation(
+        rows=rows,
+        model=model,
+        tokenizer=tokenizer,
+        gen_cfg=gen_cfg,
+        output_path=predictions_path,
+        source_path=input_path,
+        torch_module=torch,
+        log_every=10,
+        max_progress_lines=5,
+        strategyqa_decode_mode="freeform",
+        truncate_chat_markers=True,
+        batch_size=4,
+        oom_backoff=True,
+    )
+    ```
+    """
     if log_every <= 0:
         raise ValueError(f"--log-every must be >= 1, got {log_every}")
     if max_progress_lines <= 0:
@@ -1437,6 +1662,14 @@ def _configure_model_generation(model: Any, gen_cfg: GenerationConfig) -> None:
 
 
 def _run_evaluation(predictions_path: Path):
+    """Load saved predictions and score them with the shared Phase A evaluator.
+
+    Example
+    -------
+    ```python
+    scored_rows, summary = _run_evaluation(predictions_path)
+    ```
+    """
     records: list[PredictionRecord] = []
     with predictions_path.open("r", encoding="utf-8") as f:
         for idx, line in enumerate(f, start=1):
@@ -1513,6 +1746,14 @@ def _build_math_generation_diagnostics(
 
 
 def _print_math_generation_diagnostics(math_diag: dict[str, Any]) -> None:
+    """Print human-readable math-generation diagnostics to the console.
+
+    Example
+    -------
+    ```python
+    _print_math_generation_diagnostics(math_diag)
+    ```
+    """
     print("-" * 88)
     print("math_diag       : extraction reliability check")
     print(
@@ -1545,6 +1786,20 @@ def _resolve_previous_metrics_path(
     compare_with: Path | None,
     compare_latest_same_name: bool,
 ) -> Path | None:
+    """Resolve which previous `metrics.json` file should be used for comparison.
+
+    Example
+    -------
+    ```python
+    previous = _resolve_previous_metrics_path(
+        output_root=Path("assets/artifacts/phase_a_runs"),
+        run_name="baseline",
+        current_run_dir=run_dir,
+        compare_with=None,
+        compare_latest_same_name=True,
+    )
+    ```
+    """
     if compare_with is not None:
         if not compare_with.exists():
             raise FileNotFoundError(f"compare-with file not found: {compare_with}")
@@ -1566,6 +1821,19 @@ def _compare_metrics(
     current_predictions_path: Path,
     previous_predictions_path: Path,
 ) -> dict[str, Any]:
+    """Compare current metrics/predictions against a previous run.
+
+    Example
+    -------
+    ```python
+    comparison = _compare_metrics(
+        current_metrics=metrics,
+        previous_metrics_path=prev_metrics,
+        current_predictions_path=cur_preds,
+        previous_predictions_path=prev_preds,
+    )
+    ```
+    """
     previous_metrics = json.loads(previous_metrics_path.read_text(encoding="utf-8"))
     current_eval_version = str(current_metrics.get("evaluator_version", "unknown"))
     previous_eval_version = str(previous_metrics.get("evaluator_version", "unknown"))
@@ -1609,6 +1877,14 @@ def _compare_metrics(
 
 
 def _load_pred_map(path: Path) -> dict[str, str]:
+    """Load a compact `sample_id -> raw_prediction` map from a prediction JSONL file.
+
+    Example
+    -------
+    ```python
+    pred_map = _load_pred_map(predictions_path)
+    ```
+    """
     data: dict[str, str] = {}
     with path.open("r", encoding="utf-8") as f:
         for idx, line in enumerate(f, start=1):
@@ -1714,26 +1990,39 @@ class _TeeWriter:
     """
 
     def __init__(self, primary: TextIO, mirror: TextIO) -> None:
+        """Store the live terminal stream and the mirrored log-file stream."""
         self._primary = primary
         self._mirror = mirror
 
     def write(self, data: str) -> int:
+        """Write one string to both target streams.
+
+        Example
+        -------
+        ```python
+        tee.write("hello\\n")
+        ```
+        """
         written = self._primary.write(data)
         self._mirror.write(data)
         return written
 
     def flush(self) -> None:
+        """Flush both target streams so logs stay up to date on disk."""
         self._primary.flush()
         self._mirror.flush()
 
     def isatty(self) -> bool:
+        """Proxy TTY detection to the primary stream."""
         return bool(getattr(self._primary, "isatty", lambda: False)())
 
     @property
     def encoding(self) -> str | None:
+        """Expose the primary stream encoding for code that queries it."""
         return getattr(self._primary, "encoding", None)
 
     def __getattr__(self, name: str) -> Any:
+        """Forward unknown attribute access to the primary stream object."""
         return getattr(self._primary, name)
 
 

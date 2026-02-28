@@ -775,6 +775,7 @@ def main() -> int:
     use_bf16 = dtype == torch.bfloat16
     use_fp16 = dtype == torch.float16
 
+    # prep for load time timer
     load_start = time.perf_counter()
     print("model_load       : start")
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=False)
@@ -793,9 +794,16 @@ def main() -> int:
         model_load_kwargs["dtype"] = dtype
     else:
         model_load_kwargs["torch_dtype"] = dtype
-    model = AutoModelForCausalLM.from_pretrained(args.model_path, **model_load_kwargs)
+
+
+    model = AutoModelForCausalLM.from_pretrained(args.model_path, **model_load_kwargs) # critical step: load the model
+
+
+    # enable gradient checkpointing
     if args.gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
+    
+    # calculate load time
     load_elapsed = time.perf_counter() - load_start
     print(f"model_load       : done in {_fmt_seconds(load_elapsed)}")
 

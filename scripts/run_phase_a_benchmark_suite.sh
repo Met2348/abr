@@ -1,20 +1,28 @@
 #!/usr/bin/env bash
 
-# Phase A benchmark runner with one-click "param groups".
+# Phase A benchmark suite launcher with one-click param groups.
 #
-# Why this exists
-# ---------------
-# We want reproducible experiments without repeatedly copy-pasting long commands.
-# This script lets you choose a param group (A1/A2/...) and run it end-to-end.
+# Why this file exists:
+# - centralize all Phase A experiment groups (A1, A2, ..., A12),
+# - avoid retyping long preparation/inference commands,
+# - persist suite-level logs and markdown summaries for later reporting.
 #
-# One-click usage
-# ---------------
-# 1) Open this file.
-# 2) Change ACTIVE_PARAM_GROUP from A1 to A2 (or others).
-# 3) Save.
-# 4) Run: bash scripts/run_phase_a_benchmark_suite.sh
+# What this file does:
+# 1. resolve `ACTIVE_PARAM_GROUP` into templates, decode settings, and run specs,
+# 2. prepare required prompt variants,
+# 3. launch `scripts/phase_a_generate_and_eval.py` for each planned run,
+# 4. aggregate run metrics into a final suite summary.
 #
-# You can also override from CLI:
+# Interaction with other files:
+# - `scripts/phase_a_prepare.py` builds the prepared JSONL inputs,
+# - `scripts/phase_a_generate_and_eval.py` performs inference/evaluation,
+# - `src/ours/phase_a/instability.py` enriches suite summaries with instability metrics.
+#
+# One-click usage:
+# 1. set `ACTIVE_PARAM_GROUP`,
+# 2. run `bash scripts/run_phase_a_benchmark_suite.sh`.
+#
+# Example:
 #   ACTIVE_PARAM_GROUP=A2 bash scripts/run_phase_a_benchmark_suite.sh
 
 set -Eeuo pipefail
@@ -68,6 +76,7 @@ TRUNCATION_RECOVERY_DATASETS="${TRUNCATION_RECOVERY_DATASETS:-gsm8k,hendrycks_ma
 TRUNCATION_RECOVERY_REQUIRE_FINAL_SIGNAL="${TRUNCATION_RECOVERY_REQUIRE_FINAL_SIGNAL:-1}"
 
 set_default_if_not_user_set() {
+  # Apply a param-group default only when the user did not explicitly export the env var.
   local user_flag="$1"
   local var_name="$2"
   local default_value="$3"
@@ -77,6 +86,7 @@ set_default_if_not_user_set() {
 }
 
 configure_a11_token_stress_variant() {
+  # Configure the family of long whole-corpus StrategyQA token-stress sweeps.
   local max_new_tokens="$1"
   local default_batch_size="$2"
 
@@ -178,30 +188,37 @@ STRICT_VAL_JSONL=""
 STRICT_TEST_JSONL=""
 
 log() {
+  # Print one suite-log line with timestamp.
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$*"
 }
 
 die() {
+  # Abort the suite with one clearly timestamped error.
   log "ERROR: $*"
   exit 1
 }
 
 run_cmd() {
+  # Echo a command before running it so logs are replayable by inspection.
   log "RUN: $*"
   "$@"
 }
 
 assert_file() {
+  # Fail early when a required file is missing.
   local path="$1"
   [[ -f "${path}" ]] || die "Required file not found: ${path}"
 }
 
 assert_dir() {
+  # Fail early when a required directory is missing.
   local path="$1"
   [[ -d "${path}" ]] || die "Required directory not found: ${path}"
 }
 
 warn_if_concurrent_generation() {
+  # Warn when other Phase A generation processes are already running.
+  # Concurrent runs can distort throughput numbers on shared GPUs.
   if pgrep -fa "scripts/phase_a_generate_and_eval.py" >/dev/null; then
     log "WARNING: Detected other running phase_a_generate_and_eval.py processes."
     log "WARNING: This suite will continue, but concurrent runs can distort speed/comparison fairness."
@@ -209,6 +226,7 @@ warn_if_concurrent_generation() {
 }
 
 resolve_prepared_dir() {
+  # Resolve the newest prepared-artifact directory matching one template/style spec.
   local target_style="$1"
   local template_id="$2"
 
@@ -264,6 +282,7 @@ PY
 }
 
 latest_run_dir() {
+  # Resolve the newest run directory for one run-name prefix.
   local run_name="$1"
   "${PYTHON_BIN}" - "${RUN_ROOT}" "${run_name}" <<'PY'
 import sys
@@ -279,6 +298,7 @@ PY
 }
 
 prepare_variant() {
+  # Prepare one prompt/template variant before the suite consumes its JSONL files.
   local template_id="$1"
   local target_style="$2"
   local cmd=("${PYTHON_BIN}" scripts/phase_a_prepare.py \
@@ -301,6 +321,7 @@ prepare_variant() {
 }
 
 run_infer_eval() {
+  # Launch one Phase A inference/evaluation run with current suite-wide knobs.
   local input_jsonl="$1"
   local run_name="$2"
   local max_new_tokens="$3"
@@ -356,6 +377,7 @@ run_infer_eval() {
 }
 
 configure_param_group() {
+  # Reset suite state and populate it from one named param group definition.
   local group_id="$1"
 
   GROUP_RUN_SPECS=()
@@ -756,6 +778,7 @@ configure_param_group() {
 }
 
 prepare_needed_inputs() {
+  # Materialize the prompt variants required by the selected param group.
   if [[ "${GROUP_NEED_DIRECT}" == "1" ]]; then
     prepare_variant "${DIRECT_TEMPLATE_ID}" "${DIRECT_TARGET_STYLE}"
     local direct_prep_dir
@@ -797,6 +820,7 @@ prepare_needed_inputs() {
 }
 
 execute_group_runs() {
+  # Execute each run spec in order and record its resolved run directory.
   local spec label input_kind run_name max_new_tokens compare_mode
   local input_jsonl run_dir
 
@@ -864,6 +888,7 @@ execute_group_runs() {
 }
 
 print_summary_table() {
+  # Aggregate all executed runs into one markdown summary plus instability section.
   local tmp_results_file
   local tmp_specs_file
   tmp_results_file="$(mktemp /tmp/phasea_group_results_XXXXXX.txt)"
@@ -1245,6 +1270,7 @@ PY
 }
 
 main() {
+  # Stage 1: print suite-level environment and runtime knobs.
   log "Repo root      : ${REPO_ROOT}"
   log "Python         : ${PYTHON_BIN}"
   log "CUDA devices   : ${CUDA_VISIBLE_DEVICES}"
@@ -1264,6 +1290,7 @@ main() {
   assert_dir "${MODEL_PATH}"
   warn_if_concurrent_generation
 
+  # Stage 2: resolve which experiment group is active and print its intent.
   configure_param_group "${ACTIVE_PARAM_GROUP}"
 
   log "Param group    : ${ACTIVE_PARAM_GROUP} (${GROUP_TITLE})"
@@ -1274,8 +1301,11 @@ main() {
   log "Decode mode    : strategyqa_decode_mode=${STRATEGYQA_DECODE_MODE}, truncate_chat_markers=${TRUNCATE_CHAT_MARKERS}"
   log "Template slots : direct=${DIRECT_TEMPLATE_ID}/${DIRECT_TARGET_STYLE}, cot=${COT_TEMPLATE_ID}/${COT_TARGET_STYLE}, strict=${STRICT_TEMPLATE_ID}/${STRICT_TARGET_STYLE}"
 
+  # Stage 3: build whatever prepared prompt variants this group requires.
   prepare_needed_inputs
+  # Stage 4: run the group experiments in order.
   execute_group_runs
+  # Stage 5: write the suite-level final summary.
   print_summary_table
 
   log "Group run complete."

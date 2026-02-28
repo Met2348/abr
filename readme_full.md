@@ -76,6 +76,35 @@ Current first-pass coverage focus:
 - active Phase B runtime path,
 - shared files directly used by current Phase B work.
 
+Completed first-pass runtime coverage so far:
+- Phase B:
+  - `scripts/phase_b_train_sft.py`
+  - `scripts/phase_b_eval.py`
+  - `scripts/run_phase_b_training_suite.sh`
+  - `src/ours/phase_b/__init__.py`
+  - `src/ours/phase_b/contracts.py`
+  - `src/ours/phase_b/data.py`
+- Phase A:
+  - `scripts/phase_a_generate_and_eval.py`
+  - `scripts/phase_a_prepare.py`
+  - `scripts/phase_a_analyze_instability.py`
+  - `scripts/run_phase_a_benchmark_suite.sh`
+  - `src/ours/phase_a/__init__.py`
+  - `src/ours/phase_a/prompt_builder.py`
+  - `src/ours/phase_a/contracts.py`
+  - `src/ours/phase_a/answer_extraction.py`
+  - `src/ours/phase_a/evaluator.py`
+  - `src/ours/phase_a/instability.py`
+  - `src/ours/phase_a/splitting.py`
+- Shared/support files:
+  - `download_datasets.sh`
+  - `check_gsm8k.py`
+  - `scripts/check_data.py`
+  - `scripts/phase_a_eval_predictions.py`
+  - `scripts/preprocess_steps.py`
+  - `src/ours/__init__.py`
+  - `src/ours/data/schema.py`
+
 Useful maintenance commands:
 
 ```bash

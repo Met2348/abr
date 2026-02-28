@@ -2,6 +2,49 @@
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
 
+## 2026-02-28 20:11:19 +08 (+0800)
+- Type: Phase A Documentation Sweep / Core Runtime Readability
+- Summary: Extended the beginner-oriented documentation pass into the remaining Phase A runtime path, prioritizing `scripts/phase_a_generate_and_eval.py` and its orchestration flow.
+- Details:
+  - Scope priority for this pass:
+    - `scripts/phase_a_generate_and_eval.py` as the core inference/evaluation entrypoint,
+    - remaining Phase A support scripts/modules that are still actively used for preparation, scoring, extraction, and instability analysis.
+  - Documentation goal:
+    - richer file-level abstracts,
+    - full function/class docstrings with examples,
+    - inline comments inside `main()` for the primary execution flow.
+  - Rationale:
+    - this script is the main place where batching, truncation recovery, logging, evaluation, and artifact writing meet,
+    - so it is the most important file for a novice to understand correctly.
+  - Completed documentation upgrades for the main Phase A runtime path:
+    - `scripts/phase_a_generate_and_eval.py`
+    - `scripts/phase_a_prepare.py`
+    - `scripts/phase_a_analyze_instability.py`
+    - `scripts/run_phase_a_benchmark_suite.sh`
+    - `src/ours/phase_a/contracts.py`
+    - `src/ours/phase_a/answer_extraction.py`
+  - Added inline flow comments inside:
+    - `scripts/phase_a_generate_and_eval.py:main`
+    - `scripts/phase_a_prepare.py:main`
+    - `scripts/phase_a_analyze_instability.py:main`
+- Validation:
+  - pre-edit structural scan completed for `scripts/phase_a_generate_and_eval.py` and remaining Phase A runtime files.
+  - `python -m py_compile scripts/phase_a_generate_and_eval.py scripts/phase_a_prepare.py scripts/phase_a_analyze_instability.py src/ours/phase_a/contracts.py src/ours/phase_a/answer_extraction.py` passed.
+  - `bash -n scripts/run_phase_a_benchmark_suite.sh` passed.
+  - AST docstring audit passed for the documented Phase A files.
+  - `python -m pytest -q tests/unit/test_phase_a_generate_script.py tests/unit/test_phase_a_prompt_builder.py tests/unit/test_phase_a_extraction_eval.py tests/unit/test_phase_a_instability.py tests/unit/test_phase_a_splitting.py` passed (`36 passed`).
+- Files changed:
+  - `progress_detailed.md`
+  - `readme_full.md`
+  - `scripts/phase_a_generate_and_eval.py`
+  - `scripts/phase_a_prepare.py`
+  - `scripts/phase_a_analyze_instability.py`
+  - `scripts/run_phase_a_benchmark_suite.sh`
+  - `src/ours/phase_a/contracts.py`
+  - `src/ours/phase_a/answer_extraction.py`
+- Breaking changes:
+  - None.
+
 ## 2026-02-28 18:52:35 +08 (+0800)
 - Type: Documentation Policy Update / Beginner-Oriented File and Function Documentation Sweep
 - Summary: Added a persistent documentation-style requirement for beginner-facing code explanations and started a repo-wide documentation sweep beginning with the active Phase B stack.

@@ -1,9 +1,31 @@
 #!/usr/bin/env python3
-"""Analyze inference inconsistency indicators from Phase A scored artifacts.
+"""Analyze inconsistency indicators from saved Phase A scored artifacts.
 
-This script can be used in two ways:
-1) Standalone artifact analysis for existing runs (manual diagnosis/reporting).
-2) Programmatic utility used by benchmark suite summary logic.
+Why this file exists
+--------------------
+Phase A experiments revealed output-instability patterns such as multiple final
+answer tags and answer flips across runs. This script makes those patterns visible
+without rerunning inference.
+
+What this file does
+-------------------
+1. Load one or more `scored_predictions.jsonl` files.
+2. Compute per-run instability indicators.
+3. Optionally compute pairwise flip rates across overlapping sample ids.
+4. Print a report-ready markdown table and optionally persist JSON/markdown copies.
+
+Interaction with other files
+----------------------------
+- `src/ours/phase_a/instability.py`: shared instability metric helpers.
+- `scripts/run_phase_a_benchmark_suite.sh`: can call this logic to enrich suite
+  summaries.
+
+Example
+-------
+```bash
+python scripts/phase_a_analyze_instability.py \
+  --run-dirs assets/artifacts/phase_a_runs/run_a assets/artifacts/phase_a_runs/run_b
+```
 """
 
 from __future__ import annotations
@@ -17,6 +39,7 @@ from typing import Any
 
 
 def _bootstrap_src_path() -> None:
+    """Add the repo-local `src/` directory to `sys.path`."""
     repo_root = Path(__file__).resolve().parents[1]
     src_dir = repo_root / "src"
     if str(src_dir) not in sys.path:
@@ -34,11 +57,14 @@ from ours.phase_a.instability import (  # noqa: E402
 
 @dataclass(slots=True)
 class AnalysisInput:
+    """Small input descriptor for one scored-artifact analysis target."""
+
     label: str
     scored_path: Path
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for instability analysis."""
     parser = argparse.ArgumentParser(
         description="Analyze multi-final-answer and flip indicators from scored predictions."
     )
@@ -78,6 +104,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _load_scored_rows(path: Path) -> list[dict[str, Any]]:
+    """Load a scored JSONL file into memory with strict JSON validation."""
     rows: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as f:
         for idx, line in enumerate(f, start=1):
@@ -93,6 +120,7 @@ def _load_scored_rows(path: Path) -> list[dict[str, Any]]:
 
 
 def _collect_inputs(args: argparse.Namespace) -> list[AnalysisInput]:
+    """Resolve CLI arguments into concrete analysis inputs."""
     items: list[AnalysisInput] = []
     for run_dir_str in args.run_dirs:
         run_dir = Path(run_dir_str)
@@ -117,6 +145,7 @@ def _render_markdown(
     run_rows: list[dict[str, Any]],
     pairwise_rows: list[dict[str, Any]],
 ) -> str:
+    """Render run-level and pairwise results into markdown tables."""
     lines: list[str] = []
     lines.append("## Inconsistency Analysis")
     lines.append("")
@@ -154,12 +183,17 @@ def _render_markdown(
 
 
 def main() -> int:
+    """Run the standalone instability-analysis workflow and print markdown output."""
     args = parse_args()
+
+    # First resolve all requested run directories/files into concrete scored-artifact inputs.
     items = _collect_inputs(args)
 
     run_rows: list[dict[str, Any]] = []
     index_by_label: dict[str, dict[str, dict[str, Any]]] = {}
     for item in items:
+        # Compute one row of per-run instability indicators and cache an index for
+        # later pairwise overlap analysis.
         scored_rows = _load_scored_rows(item.scored_path)
         inst = summarize_strategyqa_instability(scored_rows)
         run_rows.append(
@@ -173,6 +207,8 @@ def main() -> int:
 
     pairwise_rows: list[dict[str, Any]] = []
     if not args.no_pairwise and len(items) >= 2:
+        # Pairwise analysis is optional because it is only meaningful when several
+        # runs share sample ids and the user wants cross-run flip statistics.
         for i in range(len(items)):
             for j in range(i + 1, len(items)):
                 a = items[i]
@@ -196,6 +232,7 @@ def main() -> int:
         "pairwise": pairwise_rows,
     }
 
+    # Markdown goes to stdout for immediate copy/paste into reports or notes.
     md = _render_markdown(run_rows=run_rows, pairwise_rows=pairwise_rows)
     print(md, end="")
 

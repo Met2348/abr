@@ -82,6 +82,14 @@ def answers_equivalent(pred: str, gold: str, dataset: str) -> bool:
 
 
 def _extract_strategyqa(raw_text: str) -> ExtractedAnswer:
+    """Extract a binary StrategyQA answer from free-form text.
+
+    Example
+    -------
+    ```python
+    extracted = _extract_strategyqa("Final answer: yes")
+    ```
+    """
     text = _truncate_chat_leakage(raw_text.strip())
     if text == "":
         return ExtractedAnswer(text="", method="plain_text_fallback", parse_error=True)
@@ -145,6 +153,7 @@ def _extract_strategyqa(raw_text: str) -> ExtractedAnswer:
 
 
 def _extract_math_style(raw_text: str) -> ExtractedAnswer:
+    """Extract a math-style final answer using dataset-specific heuristics."""
     text = raw_text.strip()
 
     # 1) explicit final-answer tags
@@ -203,6 +212,7 @@ def _extract_math_style(raw_text: str) -> ExtractedAnswer:
 
 
 def _extract_plain(raw_text: str) -> ExtractedAnswer:
+    """Extract a plain-text answer when no task-specific parser applies."""
     text = _normalize_text(raw_text)
     if text == "":
         return ExtractedAnswer(text="", method="plain_text_fallback", parse_error=True)
@@ -210,6 +220,7 @@ def _extract_plain(raw_text: str) -> ExtractedAnswer:
 
 
 def _extract_last_boxed(text: str) -> str | None:
+    """Return the content of the last LaTeX `\\boxed{...}` expression if present."""
     marker = "\\boxed"
     pos = text.rfind(marker)
     while pos != -1:
@@ -229,12 +240,14 @@ def _extract_last_boxed(text: str) -> str | None:
 
 
 def _normalize_text(text: str) -> str:
+    """Lowercase and whitespace-normalize generic text answers."""
     # Lowercase + whitespace normalization + remove trailing punctuation noise.
     value = re.sub(r"\s+", " ", text.strip().lower())
     return value.strip(" .,!;:")
 
 
 def _normalize_yes_no(text: str) -> str:
+    """Map common boolean surface forms onto canonical `yes`/`no` labels."""
     value = _normalize_text(text)
     mapping = {
         "yes": "yes",
@@ -248,6 +261,7 @@ def _normalize_yes_no(text: str) -> str:
 
 
 def _normalize_numeric_text(text: str) -> str | None:
+    """Normalize a strictly numeric answer string into canonical decimal text."""
     value = _strip_wrapping(text.strip())
     value = value.replace(",", "")
     # Support simple fractions such as 1/2
@@ -286,6 +300,7 @@ def _normalize_numeric_text_relaxed(text: str) -> str | None:
 
 
 def _extract_first_numeric_token(text: str) -> str | None:
+    """Extract the first numeric-looking token from free text, if any."""
     value = _strip_wrapping(str(text).strip()).replace(",", "")
     m = re.search(r"[-+]?\d*\.?\d+(?:/\d+)?", value)
     if not m:
@@ -294,6 +309,7 @@ def _extract_first_numeric_token(text: str) -> str | None:
 
 
 def _decimal_to_str(value: Decimal) -> str:
+    """Render a `Decimal` without redundant trailing zeros."""
     # Normalize 1.2300 -> 1.23, 2.0 -> 2
     normalized = value.normalize()
     text = format(normalized, "f")
@@ -303,6 +319,7 @@ def _decimal_to_str(value: Decimal) -> str:
 
 
 def _strip_wrapping(text: str) -> str:
+    """Remove common lightweight wrappers such as backticks or dollar signs."""
     value = text.strip()
     # Remove common wrappers around predicted answer.
     wrappers = ["$", "`"]

@@ -34,6 +34,14 @@ class PromptTemplateSpec:
     answer_prefix: str
 
     def validate(self) -> None:
+        """Validate the prompt-template fields before use or persistence.
+
+        Example
+        -------
+        ```python
+        spec.validate()
+        ```
+        """
         _validate_non_empty_str(self.template_id, "template_id")
         _validate_non_empty_str(self.template_version, "template_version")
         _validate_non_empty_str(self.description, "description")
@@ -43,13 +51,33 @@ class PromptTemplateSpec:
         _validate_str(self.answer_prefix, "answer_prefix")
 
     def to_dict(self) -> dict[str, Any]:
+        """Convert the template spec into a validated plain dictionary."""
         self.validate()
         return asdict(self)
 
 
 @dataclass(slots=True)
 class PreparedSample:
-    """One model-ready training/evaluation record for Phase A."""
+    """One model-ready training/evaluation record for Phase A.
+
+    Example
+    -------
+    ```python
+    prepared = PreparedSample(
+        sample_id="id-1",
+        dataset="strategyqa",
+        split="validation",
+        question="Is the sky blue?",
+        answer="yes",
+        cot=None,
+        target_style="answer_only",
+        template_id="qa_direct",
+        template_version="1.0.0",
+        prompt_text="...",
+        target_text="yes",
+    )
+    ```
+    """
 
     sample_id: str
     dataset: str
@@ -65,6 +93,7 @@ class PreparedSample:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def validate(self) -> None:
+        """Validate a prepared sample before writing or consuming it."""
         _validate_non_empty_str(self.sample_id, "sample_id")
         _validate_non_empty_str(self.dataset, "dataset")
         _validate_non_empty_str(self.split, "split")
@@ -84,13 +113,27 @@ class PreparedSample:
             raise TypeError("`metadata` must be dict[str, Any]")
 
     def to_dict(self) -> dict[str, Any]:
+        """Convert the prepared sample into a validated plain dictionary."""
         self.validate()
         return asdict(self)
 
 
 @dataclass(slots=True)
 class PredictionRecord:
-    """One prediction row for evaluator input/output."""
+    """One prediction row for evaluator input/output.
+
+    Example
+    -------
+    ```python
+    record = PredictionRecord(
+        sample_id="id-1",
+        dataset="strategyqa",
+        split="validation",
+        raw_prediction="yes",
+        gold_answer="yes",
+    )
+    ```
+    """
 
     sample_id: str
     dataset: str
@@ -101,6 +144,7 @@ class PredictionRecord:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def validate(self) -> None:
+        """Validate prediction fields before scoring or persistence."""
         _validate_non_empty_str(self.sample_id, "sample_id")
         _validate_non_empty_str(self.dataset, "dataset")
         _validate_non_empty_str(self.split, "split")
@@ -114,13 +158,31 @@ class PredictionRecord:
             raise TypeError("`metadata` must be dict[str, Any]")
 
     def to_dict(self) -> dict[str, Any]:
+        """Convert the prediction row into a validated plain dictionary."""
         self.validate()
         return asdict(self)
 
 
 @dataclass(slots=True)
 class ScoredPrediction:
-    """Prediction row enriched by extraction + correctness judgment."""
+    """Prediction row enriched by extraction and correctness judgment.
+
+    Example
+    -------
+    ```python
+    scored = ScoredPrediction(
+        sample_id="id-1",
+        dataset="strategyqa",
+        split="validation",
+        raw_prediction="yes",
+        extracted_prediction="yes",
+        normalized_gold="yes",
+        is_correct=True,
+        parse_error=False,
+        extraction_method="strategyqa_yes_no",
+    )
+    ```
+    """
 
     sample_id: str
     dataset: str
@@ -135,6 +197,7 @@ class ScoredPrediction:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def validate(self) -> None:
+        """Validate scored-prediction fields before writing artifacts."""
         _validate_non_empty_str(self.sample_id, "sample_id")
         _validate_non_empty_str(self.dataset, "dataset")
         _validate_non_empty_str(self.split, "split")
@@ -155,11 +218,13 @@ class ScoredPrediction:
             raise TypeError("`metadata` must be dict[str, Any]")
 
     def to_dict(self) -> dict[str, Any]:
+        """Convert the scored row into a validated plain dictionary."""
         self.validate()
         return asdict(self)
 
 
 def _validate_non_empty_str(value: Any, field_name: str) -> None:
+    """Validate that a field is a non-empty string after trimming."""
     if not isinstance(value, str):
         raise TypeError(f"`{field_name}` must be str, got {type(value)!r}")
     if value.strip() == "":
@@ -167,5 +232,6 @@ def _validate_non_empty_str(value: Any, field_name: str) -> None:
 
 
 def _validate_str(value: Any, field_name: str) -> None:
+    """Validate that a field is a string, allowing empty content."""
     if not isinstance(value, str):
         raise TypeError(f"`{field_name}` must be str, got {type(value)!r}")

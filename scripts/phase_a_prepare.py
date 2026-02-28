@@ -1,13 +1,37 @@
 #!/usr/bin/env python3
-"""Prepare Phase A baseline artifacts from canonical datasets.
+"""Prepare Phase A prompt/target artifacts from canonical dataset samples.
 
-This script builds model-ready records containing:
-- prompt_text
-- target_text
-- answer metadata
+Why this file exists
+--------------------
+Raw datasets are normalized into canonical samples first, but models still need
+prompt text and supervised target text. This script builds those model-ready Phase A
+artifacts in a reproducible format.
 
-It does not train a model by itself.
-Its purpose is to produce reproducible inputs for Stage-A training/eval.
+What this file does
+-------------------
+1. Load canonical samples from supported datasets.
+2. Assign each sample to train/validation/test using either official or hash-based
+   splitting.
+3. Convert each sample into a `PreparedSample` with prompt/target text.
+4. Write `train.jsonl`, `validation.jsonl`, `test.jsonl`, plus summary/manifest
+   files under a deterministic run directory.
+
+Interaction with other files
+----------------------------
+- `src/ours/data/loaders.py`: provides canonical samples.
+- `src/ours/phase_a/prompt_builder.py`: converts canonical samples into prepared rows.
+- `scripts/phase_a_generate_and_eval.py`: consumes the JSONL outputs of this script.
+
+Example
+-------
+```bash
+python scripts/phase_a_prepare.py \
+  --datasets strategyqa \
+  --source-split train \
+  --split-policy hash \
+  --target-style answer_only \
+  --template-id qa_direct
+```
 """
 
 from __future__ import annotations
@@ -22,6 +46,14 @@ from typing import Any, TextIO
 
 
 def _bootstrap_src_path() -> None:
+    """Add the repo-local `src/` directory to `sys.path`.
+
+    Example
+    -------
+    ```bash
+    python scripts/phase_a_prepare.py --help
+    ```
+    """
     repo_root = Path(__file__).resolve().parents[1]
     src_dir = repo_root / "src"
     if str(src_dir) not in sys.path:
@@ -40,6 +72,14 @@ from ours.phase_a import (  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for artifact preparation.
+
+    Example
+    -------
+    ```python
+    args = parse_args(["--datasets", "strategyqa"])
+    ```
+    """
     parser = argparse.ArgumentParser(
         description="Prepare Phase A prompt/target artifacts from canonical datasets."
     )
@@ -134,8 +174,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """Run the Phase A preparation workflow for all requested datasets.
+
+    Returns
+    -------
+    int
+        `0` on success, `1` if one or more datasets fail.
+    """
     args = parse_args()
 
+    # Freeze split policy first so every dataset uses the exact same ratios/seed.
     split_cfg = SplitConfig(
         train_ratio=args.train_ratio,
         validation_ratio=args.validation_ratio,
@@ -158,6 +206,7 @@ def main() -> int:
     failures: list[tuple[str, str]] = []
 
     for dataset in args.datasets:
+        # Each dataset gets its own deterministic run directory derived from the full spec.
         print("-" * 88)
         print(f"[Dataset] {dataset}")
         print("-" * 88)
@@ -183,6 +232,8 @@ def main() -> int:
         run_dir = args.output_dir / dataset.lower() / run_fingerprint
 
         try:
+            # Preparation is isolated per dataset so one failure does not hide all
+            # successful outputs from other requested datasets.
             summary = _prepare_one_dataset(
                 dataset=dataset,
                 source_split=args.source_split,
@@ -214,6 +265,8 @@ def main() -> int:
 
     print("=" * 88)
     if failures:
+        # Keep failure reporting explicit because preparation problems usually
+        # indicate bad loader settings or invalid cached artifacts.
         print("Result: FAILED")
         for name, err in failures:
             print(f"- {name}: {err}")
@@ -243,6 +296,37 @@ def _prepare_one_dataset(
     resume: bool,
     overwrite: bool,
 ) -> dict[str, Any] | None:
+    """Prepare one dataset and write its split JSONL artifacts.
+
+    Returns
+    -------
+    dict[str, Any] | None
+        Summary dict if work was performed, or `None` when resume mode reused a
+        matching existing artifact directory.
+
+    Example
+    -------
+    ```python
+    summary = _prepare_one_dataset(
+        dataset="strategyqa",
+        source_split="train",
+        split_policy="hash",
+        limit=200,
+        dataset_root=Path("assets/datasets"),
+        cache_dir=Path("assets/hf_cache/datasets"),
+        dataset_kwargs={},
+        target_style="answer_only",
+        template_id="qa_direct",
+        template_version="1.0.0",
+        split_cfg=split_cfg,
+        run_dir=run_dir,
+        run_spec=run_spec,
+        run_fingerprint="abc123",
+        resume=True,
+        overwrite=False,
+    )
+    ```
+    """
     manifest_path = run_dir / "manifest.json"
     summary_path = run_dir / "summary.json"
 
@@ -354,6 +438,14 @@ def _prepare_one_dataset(
 
 
 def _dataset_specific_kwargs(dataset_name: str, args: argparse.Namespace) -> dict[str, Any]:
+    """Build dataset-specific loader kwargs in one central place.
+
+    Example
+    -------
+    ```python
+    kwargs = _dataset_specific_kwargs("gsm8k", args)
+    ```
+    """
     name = dataset_name.lower()
     kwargs: dict[str, Any] = {}
     if name == "gsm8k":
@@ -366,11 +458,20 @@ def _dataset_specific_kwargs(dataset_name: str, args: argparse.Namespace) -> dic
 
 
 def _stable_fingerprint(payload: dict[str, Any]) -> str:
+    """Return a short deterministic fingerprint for one preparation spec."""
     text = json.dumps(payload, sort_keys=True, ensure_ascii=True)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
 
 def _write_jsonl(writer: TextIO, record: dict[str, Any]) -> None:
+    """Write one JSON object as one JSONL line with safe line-separator escaping.
+
+    Example
+    -------
+    ```python
+    _write_jsonl(writer, {"sample_id": "x"})
+    ```
+    """
     # Keep JSONL robust for line-based tooling by escaping Unicode line separators.
     text = json.dumps(record, ensure_ascii=False)
     text = text.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
@@ -378,7 +479,14 @@ def _write_jsonl(writer: TextIO, record: dict[str, Any]) -> None:
 
 
 def _validate_jsonl_outputs(run_dir: Path) -> tuple[bool, str]:
-    """Check whether prepared split JSONLs are parseable row-by-row."""
+    """Check whether prepared split JSONLs are parseable row-by-row.
+
+    Example
+    -------
+    ```python
+    valid, reason = _validate_jsonl_outputs(run_dir)
+    ```
+    """
     for split_name in ("train", "validation", "test"):
         path = run_dir / f"{split_name}.jsonl"
         if not path.exists():
