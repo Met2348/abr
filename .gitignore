@@ -23,7 +23,7 @@ __pycache__/
 # checkpoints/
 assets/hf_cache/*
 assets/artifacts/*
-.vscode/*
+
 
 # Distribution / packaging
 .Python
