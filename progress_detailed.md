@@ -2,6 +2,50 @@
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
 
+## 2026-03-03 02:20:00 +08 (+0800)
+- Type: Phase C C0/C1 Implemented / Prefix, Corruption, And Rollout-Target Preparation
+- Summary: Implemented the first executable Phase C layer, which freezes the ABR/BCR data contracts and prepares deterministic prefix-level artifacts for later value-head training.
+- Details:
+  - Added new planning/guidance file:
+    - `phase_C_plan.md`
+  - Added new runtime modules:
+    - `src/ours/phase_b/value_targets.py`
+      - deterministic conversion from validated Phase B rows into:
+        - `StepSequence`
+        - `PrefixArtifact`
+        - rollout target records
+    - `src/ours/phase_b/corruptions.py`
+      - deterministic corrupted-prefix generation for early faithfulness tests
+    - `scripts/phase_b_prepare_value_data.py`
+      - official C0/C1 CLI for writing:
+        - `step_sequences.jsonl`
+        - `prefixes.jsonl`
+        - `errors.jsonl`
+        - optional `corruptions.jsonl`
+        - optional `rollout_predictions.jsonl`
+        - optional `rollout_targets.jsonl`
+        - `manifest.json`
+        - `summary.json`
+        - `summary.md`
+  - Design decisions implemented:
+    - StrategyQA-first default for Phase C value bootstrap
+    - fail-loud contract validation
+    - rollouts are optional so contract bugs can be isolated from GPU/runtime bugs
+    - corruption artifacts must actually modify the prefix text
+    - prefix IDs and corruption IDs are deterministic and auditable
+  - Tests added:
+    - `tests/unit/test_phase_c_prepare_value.py`
+  - Validation:
+    - py_compile passed for all new Phase C files
+    - targeted tests passed for:
+      - `tests/unit/test_phase_c_prepare_value.py`
+      - `tests/unit/test_phase_b_data.py`
+      - `tests/unit/test_step_builder.py`
+  - Documentation:
+    - updated `TODO_ours.md`
+    - updated `readme.md`
+    - updated `readme_full.md`
+
 ## 2026-03-03 01:55:00 +08 (+0800)
 - Type: Phase B GSM8K Repair Group Added / Answer-Weighted Plus Checkpoint Sweep
 - Summary: Added a combined GSM8K repair group that directly implements the current Phase B diagnosis: answer-weighted long-CoT supervision plus dense checkpoint selection.

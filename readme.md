@@ -190,6 +190,38 @@ ACTIVE_CROSS_TASK_GROUP=B3_XTASK_GSM8K_EQUATION_TO_STRAT RUN_PREFIX=xtask_gsm8k_
 These groups measure whether a task-specific adapter transfers or interferes when
 evaluated on the other task, which is directly relevant to later BCR/ABR work.
 
+## Phase C Public Entry Points
+
+Phase C guidance:
+- `phase_C_plan.md`
+
+Current implemented scope:
+- `C0`: freeze the Phase C contracts and execution order
+- `C1`: build deterministic prefix, corruption, and optional rollout-target artifacts
+
+Main entrypoint:
+
+```bash
+python -u scripts/phase_b_prepare_value_data.py \
+  --input-jsonl assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl \
+  --run-name strategyqa_value_smoke \
+  --max-samples 128 \
+  --build-corruptions \
+  --no-build-rollouts
+```
+
+Phase C C0/C1 output directory:
+- `assets/artifacts/phase_c_data/<dataset>/<run_name>__<fingerprint>/`
+
+Key output files:
+- `step_sequences.jsonl`
+- `prefixes.jsonl`
+- `corruptions.jsonl` if enabled
+- `rollout_predictions.jsonl` and `rollout_targets.jsonl` if enabled
+- `manifest.json`
+- `summary.json`
+- `summary.md`
+
 Smoke training run:
 
 ```bash

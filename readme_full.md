@@ -7,6 +7,8 @@ Current milestone status (2026-02-28):
 - Phase B B0 (scope freeze) is completed.
 - Phase B B1 code skeleton is implemented (smoke gate pending).
 - Project execution focus is officially switched to Phase B.
+- Phase C planning is now frozen in `phase_C_plan.md`.
+- Phase C C0/C1 artifact-preparation code is implemented.
 - Phase A core conclusion:
   - parse-error inflation was mostly protocol/extraction/free-form formatting related,
   - after binary-choice decode, StrategyQA parse error reaches `0.0000`,
@@ -35,7 +37,143 @@ Context files:
 - `phase_A_ppt_reference.md` (PPT-ready supervisor summary + glossary + numeric outcomes)
 - `phase_B_plan.md` (Phase B lifecycle and first-run freeze contract)
 - `phase_B_report.md` (live Phase B experiment report and diagnosis log)
+- `phase_C_plan.md` (Phase C ABR/value-head implementation guidance)
 - `foundation_reliability_audit.md` (low-level risk scan + hardening plan before Phase B scale)
+
+## Phase C Entry Points (Current Implemented Scope)
+
+Phase C is the first stage that implements the unique BCR/ABR stack rather than
+plain PEFT tuning.
+
+Current implemented scope:
+- `C0`: freeze contracts, sequencing, and non-goals
+- `C1`: build deterministic step prefixes, corruption artifacts, and optional
+  rollout targets
+
+Authoritative guidance:
+- `phase_C_plan.md`
+
+Main implementation files:
+- `scripts/phase_b_prepare_value_data.py`
+- `src/ours/phase_b/value_targets.py`
+- `src/ours/phase_b/corruptions.py`
+
+Why this layer exists:
+- Phase B training rows are plain `(prompt_text, target_text)` records.
+- ABR/BCR needs prefix states `h_t`, corrupted variants, and empirical prefix
+  value targets.
+- This layer exists specifically to prevent silent data-contract bugs before
+  value-head or RL training begins.
+
+Recommended first run: contract smoke only
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_b_prepare_value_data.py \
+  --input-jsonl assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl \
+  --run-name strategyqa_value_smoke \
+  --max-samples 128 \
+  --build-corruptions \
+  --no-build-rollouts
+```
+
+Full prefix/corruption build without GPU rollouts:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_b_prepare_value_data.py \
+  --input-jsonl assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl \
+  --run-name strategyqa_value_prefix_full \
+  --build-corruptions \
+  --no-build-rollouts
+```
+
+Rollout-target smoke build:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_b_prepare_value_data.py \
+  --input-jsonl assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl \
+  --run-name strategyqa_value_rollouts \
+  --max-samples 256 \
+  --build-corruptions \
+  --build-rollouts \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --batch-size 64 \
+  --rollout-count 4 \
+  --max-new-tokens 96 \
+  --temperature 0.7 \
+  --top-p 0.95 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --require-cuda
+```
+
+Rollout-target build on top of a finished StrategyQA PEFT adapter:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 python -u scripts/phase_b_prepare_value_data.py \
+  --input-jsonl assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl \
+  --run-name strategyqa_value_rollouts_r32 \
+  --max-samples 256 \
+  --build-corruptions \
+  --build-rollouts \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --adapter-path assets/artifacts/phase_b_runs/<best_strategyqa_run>/final_model \
+  --batch-size 64 \
+  --rollout-count 4 \
+  --max-new-tokens 96 \
+  --temperature 0.7 \
+  --top-p 0.95 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --require-cuda
+```
+
+Replace `<best_strategyqa_run>` with the exact finished run directory before
+execution.
+
+Output layout:
+- `assets/artifacts/phase_c_data/<dataset>/<run_name>__<fingerprint>/step_sequences.jsonl`
+- `assets/artifacts/phase_c_data/<dataset>/<run_name>__<fingerprint>/prefixes.jsonl`
+- `assets/artifacts/phase_c_data/<dataset>/<run_name>__<fingerprint>/errors.jsonl`
+- optional:
+  - `corruptions.jsonl`
+  - `rollout_predictions.jsonl`
+  - `rollout_targets.jsonl`
+- plus:
+  - `manifest.json`
+  - `summary.json`
+  - `summary.md`
+
+Contract checks after every run:
+1. `errors.jsonl` should be small and understandable.
+2. `prefixes.jsonl` should have unique `prefix_id`.
+3. `corruptions.jsonl` should actually change the prefix text.
+4. `rollout_targets.jsonl` should show non-trivial `success_rate` values when
+   rollouts are enabled.
+5. `summary.md` should match file counts on disk.
+
+Validation commands:
+
+```bash
+python -m py_compile \
+  src/ours/phase_b/value_targets.py \
+  src/ours/phase_b/corruptions.py \
+  scripts/phase_b_prepare_value_data.py
+```
+
+```bash
+python -m pytest -q \
+  tests/unit/test_phase_c_prepare_value.py \
+  tests/unit/test_phase_b_data.py \
+  tests/unit/test_step_builder.py
+```
+
+Current non-goals:
+- value-head training,
+- Bellman loss,
+- ABR router training,
+- RL.
+
+Those are intentionally deferred until the C0/C1 artifact layer is stable.
 
 ## Phase A Retrospective (Before You Start Phase B)
 

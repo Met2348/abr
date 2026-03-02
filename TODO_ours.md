@@ -165,6 +165,7 @@ ref/
     phase_b_eval.py
     phase_b_compare_eval.py
     phase_b_checkpoint_sweep.py
+    phase_b_prepare_value_data.py
     phase_b_train_value.py          # next
     phase_b_eval_faithfulness.py    # next
     phase_b_train_bcr_lite.py       # next
@@ -185,9 +186,9 @@ ref/
         data.py
         supervision.py
         value_head.py               # next
-        value_targets.py            # next
+        value_targets.py
         value_losses.py             # next
-        corruptions.py              # next
+        corruptions.py
         faithfulness_eval.py        # next
         action_space.py             # next
         heuristic_router.py         # next
@@ -354,11 +355,19 @@ Bootstrap the value head from empirical prefix targets first.
 
 ### Concrete implementation tasks
 
+- [x] Add `phase_C_plan.md`
+  - Phase C lifecycle, training order, and risk controls are now frozen in one guidance file.
+- [x] Add `scripts/phase_b_prepare_value_data.py`
+  - deterministic C0/C1 entrypoint for:
+    - step sequences,
+    - prefixes,
+    - corruptions,
+    - optional rollout targets.
 - [ ] Add `src/ours/phase_b/value_head.py`
   - bounded scalar head `V(h_t) in [0,1]`
-- [ ] Add `src/ours/phase_b/value_targets.py`
+- [x] Add `src/ours/phase_b/value_targets.py`
   - rollout-based prefix target generation
-- [ ] Add `src/ours/phase_b/corruptions.py`
+- [x] Add `src/ours/phase_b/corruptions.py`
   - minimal semantic perturbations on step prefixes
 - [ ] Add `src/ours/phase_b/value_losses.py`
   - calibration MSE
@@ -569,7 +578,7 @@ Do these in order.
 2. [ ] Freeze final Phase B baseline policy:
    - StrategyQA best PEFT checkpoint
    - GSM8K best-checkpoint policy
-3. [ ] Implement prefix-artifact generation for value training:
+3. [x] Implement prefix-artifact generation for value training:
    - step prefixes
    - rollout targets
    - corruption variants
