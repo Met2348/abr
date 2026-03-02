@@ -14,6 +14,7 @@ A research codebase for building and evaluating reasoning-faithfulness workflows
 - Phase B training skeleton:
   - SFT/PEFT training entrypoint (`scripts/phase_b_train_sft.py`)
   - Phase B suite runner (`scripts/run_phase_b_training_suite.sh`)
+  - Live Phase B report (`phase_B_report.md`)
 
 ## Current Status
 
@@ -123,11 +124,18 @@ For whole-corpus groups (`A11`/`A12`), env runtime overrides such as `BATCH_SIZE
 
 ## Phase B Public Entry Points
 
+Current consolidated Phase B findings:
+- `phase_B_report.md`
+
 Official Phase B kickoff (recommended):
 
 ```bash
 ACTIVE_PHASE_B_GROUP=B1_SMOKE RUN_PREFIX=phase_b_kickoff bash scripts/run_phase_b_training_suite.sh
 ```
+
+Heavy-run note:
+- do not launch multiple full-dataset Phase B suites on one GPU at the same time,
+- if a suite exits early, `final_summary.md` now records `status: failed` and `failed_stage`.
 
 Full-dataset gain runs:
 
@@ -135,6 +143,52 @@ Full-dataset gain runs:
 ACTIVE_PHASE_B_GROUP=B2_STRATEGYQA_FULL RUN_PREFIX=phase_b_strategyqa_full bash scripts/run_phase_b_training_suite.sh
 ACTIVE_PHASE_B_GROUP=B2_GSM8K_FULL RUN_PREFIX=phase_b_gsm8k_full bash scripts/run_phase_b_training_suite.sh
 ```
+
+StrategyQA scaling diagnostics:
+
+```bash
+ACTIVE_PHASE_B_GROUP=B2_STRATEGYQA_DIAG_EPOCH_200 RUN_PREFIX=strategyqa_diag_e200 bash scripts/run_phase_b_training_suite.sh
+ACTIVE_PHASE_B_GROUP=B2_STRATEGYQA_DIAG_EPOCH_300 RUN_PREFIX=strategyqa_diag_e300 bash scripts/run_phase_b_training_suite.sh
+ACTIVE_PHASE_B_GROUP=B2_STRATEGYQA_DIAG_LORA_R8 RUN_PREFIX=strategyqa_diag_r8 bash scripts/run_phase_b_training_suite.sh
+ACTIVE_PHASE_B_GROUP=B2_STRATEGYQA_DIAG_LORA_R32 RUN_PREFIX=strategyqa_diag_r32 bash scripts/run_phase_b_training_suite.sh
+```
+
+GSM8K diagnostic runs:
+
+```bash
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_DIAG_LR_5E5 RUN_PREFIX=gsm8k_diag_lr5e5 bash scripts/run_phase_b_training_suite.sh
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_DIAG_LR_1E4 RUN_PREFIX=gsm8k_diag_lr1e4 bash scripts/run_phase_b_training_suite.sh
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_DIAG_EPOCH_025 RUN_PREFIX=gsm8k_diag_e025 bash scripts/run_phase_b_training_suite.sh
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_DIAG_EPOCH_050 RUN_PREFIX=gsm8k_diag_e050 bash scripts/run_phase_b_training_suite.sh
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_DIAG_DIRECT_STYLE RUN_PREFIX=gsm8k_diag_direct bash scripts/run_phase_b_training_suite.sh
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_DIAG_EQUATION_STYLE RUN_PREFIX=gsm8k_diag_equation bash scripts/run_phase_b_training_suite.sh
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_DIAG_CHECKPOINT_SWEEP RUN_PREFIX=gsm8k_diag_ckpt_sweep bash scripts/run_phase_b_training_suite.sh
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_DIAG_SHORT_COT RUN_PREFIX=gsm8k_diag_short_cot bash scripts/run_phase_b_training_suite.sh
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_DIAG_ANSWER_WEIGHTED RUN_PREFIX=gsm8k_diag_answer_weighted bash scripts/run_phase_b_training_suite.sh
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_REPAIR_ANSWER_WEIGHTED_CKPT RUN_PREFIX=gsm8k_repair_aw_ckpt bash scripts/run_phase_b_training_suite.sh
+```
+
+New GSM8K diagnostics now cover three additional hypotheses:
+- best checkpoint may occur before the final saved adapter,
+- shorter CoT supervision may preserve arithmetic quality better than long CoT,
+- final-answer tokens may need more loss weight than rationale tokens.
+
+The current combined GSM8K repair attempt is:
+- answer-weighted long-CoT supervision,
+- plus dense checkpoint saving and held-out checkpoint sweep,
+- so the best checkpoint is selected instead of the final adapter.
+
+Cross-task interference runs:
+
+```bash
+ACTIVE_CROSS_TASK_GROUP=B3_XTASK_STRAT_R32_TO_GSM8K RUN_PREFIX=xtask_strat_r32_to_gsm8k bash scripts/run_phase_b_cross_task_suite.sh
+ACTIVE_CROSS_TASK_GROUP=B3_XTASK_GSM8K_FULL_TO_STRAT RUN_PREFIX=xtask_gsm8k_full_to_strat bash scripts/run_phase_b_cross_task_suite.sh
+ACTIVE_CROSS_TASK_GROUP=B3_XTASK_GSM8K_DIRECT_TO_STRAT RUN_PREFIX=xtask_gsm8k_direct_to_strat bash scripts/run_phase_b_cross_task_suite.sh
+ACTIVE_CROSS_TASK_GROUP=B3_XTASK_GSM8K_EQUATION_TO_STRAT RUN_PREFIX=xtask_gsm8k_equation_to_strat bash scripts/run_phase_b_cross_task_suite.sh
+```
+
+These groups measure whether a task-specific adapter transfers or interferes when
+evaluated on the other task, which is directly relevant to later BCR/ABR work.
 
 Smoke training run:
 

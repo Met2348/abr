@@ -2,6 +2,360 @@
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
 
+## 2026-03-03 01:55:00 +08 (+0800)
+- Type: Phase B GSM8K Repair Group Added / Answer-Weighted Plus Checkpoint Sweep
+- Summary: Added a combined GSM8K repair group that directly implements the current Phase B diagnosis: answer-weighted long-CoT supervision plus dense checkpoint selection.
+- Details:
+  - Added config:
+    - `configs/phase_b/peft_repair_gsm8k_answer_weighted_ckpt.json`
+  - Added suite group:
+    - `B2_GSM8K_REPAIR_ANSWER_WEIGHTED_CKPT`
+  - Behavior:
+    - trains on the same full GSM8K long-CoT corpus,
+    - uses rationale loss weight `0.5`,
+    - uses final-answer loss weight `3.0`,
+    - saves dense checkpoints (`save_steps=100`, `save_total_limit=12`),
+    - auto-runs held-out checkpoint sweep after training.
+  - Purpose:
+    - test the strongest current repair hypothesis without introducing a new dataset or a new objective family,
+    - judge whether answer-weighting plus best-checkpoint selection is sufficient to recover the GSM8K baseline.
+  - Documentation:
+    - updated `readme.md`
+    - updated `readme_full.md`
+    - updated `phase_B_plan.md`
+    - updated `phase_B_report.md`
+
+## 2026-03-03 01:40:00 +08 (+0800)
+- Type: Phase B Consolidation Update / Checkpoint Sweep And Final Cross-Task Diagnosis
+- Summary: Incorporated the last previously pending Phase B results, which materially changed the GSM8K diagnosis: checkpoint drift is now the dominant discovered factor, and cross-task interference is now clearly asymmetric and severe in the StrategyQA-to-GSM8K direction.
+- Details:
+  - Newly incorporated completed results:
+    - `B2_GSM8K_DIAG_CHECKPOINT_SWEEP`
+      - best checkpoint: `200`
+      - held-out: `0.8415 -> 0.8369`
+      - delta: `-0.0046` (`-7` correct)
+      - final checkpoint in the same sweep: `0.8058` (`-54` correct)
+    - `B3_XTASK_STRAT_R32_TO_GSM8K`
+      - `0.8415 -> 0.2041`
+      - delta: `-0.6374` (`-965` correct)
+      - parse error stayed `0.0000`
+  - Updated GSM8K diagnosis:
+    - lower LR and shorter exposure were already ruled out as sufficient repairs,
+    - answer-weighting reduced the damage but did not solve it,
+    - checkpoint sweep now shows late-run drift is the strongest discovered factor,
+    - the final checkpoint can be dramatically worse than an earlier retained checkpoint.
+  - Updated cross-task diagnosis:
+    - the best StrategyQA adapter transfers catastrophically to GSM8K,
+    - this is not a formatting failure because parse error remained zero,
+    - so Phase B now contains strong evidence of true cross-task capability interference.
+  - Repo state:
+    - there are no previously-tracked critical Phase B diagnostics still pending in the current snapshot.
+  - Documentation:
+    - updated `phase_B_report.md`
+
+## 2026-03-03 01:25:00 +08 (+0800)
+- Type: Phase B Report Refresh / Answer-Weighted And Cross-Task Results Incorporated
+- Summary: Refreshed the live Phase B report after several additional suites finished, adding the completed GSM8K answer-weighted diagnostic, StrategyQA rank-32 reproduction, and the first completed cross-task transfer results.
+- Details:
+  - Newly recorded completed runs:
+    - `B2_GSM8K_DIAG_ANSWER_WEIGHTED`: `0.8415 -> 0.8197` (`-33` correct)
+    - `B2_STRATEGYQA_DIAG_LORA_R32` repro: `0.6864 -> 0.7675` (`+37` correct)
+    - `B3_XTASK_GSM8K_FULL_TO_STRAT`: `0.6864 -> 0.6864` (`+0`)
+    - `B3_XTASK_GSM8K_DIRECT_TO_STRAT`: `0.6864 -> 0.5482` (`-63`)
+    - `B3_XTASK_GSM8K_EQUATION_TO_STRAT`: `0.6864 -> 0.6338` (`-24`)
+  - Updated diagnosis:
+    - answer-weighting reduces the magnitude of GSM8K damage relative to the original full CoT run, so loss balance is a real factor,
+    - but answer-weighting alone does not recover GSM8K quality, so the problem is not solved at the objective level yet,
+    - cross-task transfer is strongly style-dependent:
+      - full GSM8K CoT stays roughly flat on StrategyQA but worsens parse compliance,
+      - direct-style GSM8K transfer is highly destructive on StrategyQA,
+      - equation-style GSM8K transfer is less destructive but still negative.
+  - Running suites explicitly marked as pending in the report:
+    - `gsm8k_diag_ckpt_sweep`
+    - `xtask_strat_r32_to_gsm8k`
+  - Documentation:
+    - updated `phase_B_report.md`
+
+## 2026-03-03 00:10:00 +08 (+0800)
+- Type: Phase B GSM8K Diagnosis Update / Short-CoT Transform Failure
+- Summary: Incorporated the completed `B2_GSM8K_DIAG_SHORT_COT` run into the Phase B diagnosis and concluded that naive last-two-line rationale truncation is not a valid GSM8K short-CoT repair strategy.
+- Details:
+  - Completed run:
+    - `B2_GSM8K_DIAG_SHORT_COT`: `0.8415 -> 0.5634` (`-421` correct)
+  - This is substantially worse than all other completed long-CoT GSM8K variants.
+  - Diagnostic interpretation:
+    - the result should not be read as “short CoT is inherently bad”,
+    - it should be read as:
+      - naive truncation of full GSM8K rationales produces logically incomplete supervision targets.
+  - Evidence:
+    - transformed targets often kept downstream arithmetic lines while deleting the earlier lines that introduced intermediate values,
+    - training loss rose sharply relative to the full GSM8K CoT baseline:
+      - full CoT: about `0.1675`
+      - short-CoT transform: about `1.4988`
+  - Updated implications:
+    - do not reuse the current `gsm8k_short_cot_last2` transform as a repair path,
+    - if short rationale is revisited, use rewritten or distilled short-CoT targets instead of clipped long-CoT traces.
+  - Documentation:
+    - updated `phase_B_report.md`
+
+## 2026-03-03 00:00:00 +08 (+0800)
+- Type: Phase B Cross-Task Interference Suite / Source-Task Adapter Transfer Diagnostics
+- Summary: Added a dedicated Phase B cross-task evaluation suite so finished adapters can be benchmarked on the opposite task, making cross-task interference measurable instead of anecdotal.
+- Details:
+  - Added new script:
+    - `scripts/run_phase_b_cross_task_suite.sh`
+  - New groups:
+    - `B3_XTASK_STRAT_R32_TO_GSM8K`
+    - `B3_XTASK_GSM8K_FULL_TO_STRAT`
+    - `B3_XTASK_GSM8K_DIRECT_TO_STRAT`
+    - `B3_XTASK_GSM8K_EQUATION_TO_STRAT`
+  - Behavior:
+    - auto-locates the finished source Phase B run,
+    - evaluates the frozen base model on the target task,
+    - evaluates the trained adapter/model on the same target task,
+    - writes:
+      - `cross_task_gain_summary.md`
+      - `cross_task_gain_summary.json`
+  - Purpose:
+    - quantify whether task-specific PEFT is task-isolated,
+    - test whether long-CoT GSM8K tuning causes broader cross-task damage than shorter GSM8K styles,
+    - support later BCR/ABR analysis with explicit interference evidence.
+  - Documentation:
+    - updated `readme.md`
+    - updated `readme_full.md`
+    - updated `phase_B_plan.md`
+    - updated `phase_B_report.md`
+  - Validation:
+    - `bash -n scripts/run_phase_b_cross_task_suite.sh` should be used as the quick syntax check for this shell workflow.
+
+## 2026-03-02 23:45:00 +08 (+0800)
+- Type: Phase B GSM8K Diagnosis Update / LR And Exposure Diagnostics Concluded
+- Summary: Incorporated the completed GSM8K long-CoT learning-rate and exposure diagnostics into the Phase B report, and the combined evidence now shows that neither lower learning rate nor shorter exposure is sufficient to recover GSM8K accuracy under the current full CoT PEFT recipe.
+- Details:
+  - Completed runs added to the report:
+    - `B2_GSM8K_DIAG_LR_5E5`: `0.8441 -> 0.8032` (`-62` correct)
+    - `B2_GSM8K_DIAG_LR_1E4`: `0.8388 -> 0.8045` (`-52` correct)
+    - `B2_GSM8K_DIAG_EPOCH_050`: `0.8441 -> 0.8210` (`-35` correct)
+  - Existing references retained:
+    - `B2_GSM8K_FULL`: `0.8415 -> 0.8118` (`-45` correct)
+    - `B2_GSM8K_DIAG_EPOCH_025`: `0.8415 -> 0.8144` (`-41` correct)
+  - New diagnosis:
+    - lowering LR to `1e-4` or `5e-5` does not fix the regression and in these completed runs is worse than the original `2e-4` setting,
+    - shortening exposure to `0.25` or `0.50` epoch reduces the damage slightly but still leaves the full CoT recipe clearly negative,
+    - therefore the main GSM8K bottleneck is now more likely:
+      - target-style / rationale-length damage,
+      - token-loss imbalance,
+      - or checkpoint drift,
+      rather than simple optimizer overshoot.
+  - Repo maintenance:
+    - reconstructed the missing `gsm8k_diag_lr1e4` gain summary from the completed pre/post Phase A metrics and stored it under:
+      - `assets/artifacts/phase_b_logs/gsm8k_diag_lr1e4/peft_gain_summary.md`
+      - `assets/artifacts/phase_b_logs/gsm8k_diag_lr1e4/peft_gain_summary.json`
+    - updated `phase_B_report.md` so the incomplete GSM8K section now only lists the new diagnostics that truly remain unfinished.
+
+## 2026-03-02 23:35:00 +08 (+0800)
+- Type: Phase B GSM8K Diagnostic Expansion / Checkpoint Sweep + Short-CoT + Answer-Weighted Supervision
+- Summary: Added the next GSM8K diagnostic layer to isolate three remaining hypotheses behind the post-PEFT accuracy drop: late-run checkpoint drift, long-CoT target damage, and rationale-dominated loss weighting.
+- Details:
+  - New supervision helpers:
+    - added `src/ours/phase_b/supervision.py` for:
+      - target splitting into reasoning vs final-answer segments,
+      - named supervision transforms,
+      - short-CoT planning for GSM8K diagnostics.
+  - Phase B trainer upgrades:
+    - `scripts/phase_b_train_sft.py` now supports:
+      - `--target-transform`,
+      - `--target-max-reasoning-lines`,
+      - `--answer-weighting-mode`,
+      - `--reasoning-loss-weight`,
+      - `--answer-loss-weight`,
+    - and uses a weighted-loss trainer path so answer-focused supervision can be tested without changing the rest of the training loop.
+  - Phase B eval upgrade:
+    - `scripts/phase_b_eval.py` now supports `--phase-b-checkpoint-dir` so one saved checkpoint can be evaluated directly.
+  - New checkpoint sweep tooling:
+    - added `scripts/phase_b_checkpoint_sweep.py`,
+    - new group `B2_GSM8K_DIAG_CHECKPOINT_SWEEP` trains a dense-checkpoint GSM8K CoT run and automatically evaluates retained checkpoints plus the final adapter.
+  - New GSM8K diagnostic groups:
+    - `B2_GSM8K_DIAG_SHORT_COT`
+    - `B2_GSM8K_DIAG_ANSWER_WEIGHTED`
+  - Documentation:
+    - updated `readme.md`, `readme_full.md`, `phase_B_plan.md`, and `phase_B_report.md`.
+  - Validation:
+    - `python -m py_compile` passed for the new and edited Phase B files,
+    - `bash -n scripts/run_phase_b_training_suite.sh` passed,
+    - targeted Phase B unit tests passed (`14 passed`).
+
+## 2026-03-02 22:55:00 +08 (+0800)
+- Type: Persistent Command Preference / Non-Zero CUDA Device And Large Eval Batch Default
+- Summary: Recorded a new persistent user preference for future experiment commands: avoid `CUDA_VISIBLE_DEVICES=0` by default and prefer eval batch sizes of `64` or larger when memory allows.
+- Details:
+  - Updated `chat_system_prompts.md` to remember:
+    - default to non-zero CUDA devices for user-facing commands because device `0` is usually crowded,
+    - default to evaluation batch sizes `>=64` unless there is a concrete memory or correctness reason not to.
+  - This affects future assistant-generated rerun/eval commands.
+
+## 2026-03-02 22:40:00 +08 (+0800)
+- Type: Phase B StrategyQA Epoch Diagnostics / 2.0 And 3.0 Epoch Conclusion
+- Summary: Incorporated the completed StrategyQA 2.0-epoch and 3.0-epoch PEFT runs into the Phase B diagnosis and confirmed that longer StrategyQA training mainly shifts prediction calibration toward `no` rather than producing a meaningful aggregate gain.
+- Details:
+  - Completed runs:
+    - `B2_STRATEGYQA_DIAG_EPOCH_200`: `0.6908 -> 0.7588` (`+31` correct)
+    - `B2_STRATEGYQA_DIAG_EPOCH_300`: `0.6908 -> 0.7632` (`+33` correct)
+    - reference baseline `B2_STRATEGYQA_FULL`: `0.6908 -> 0.7632` (`+33` correct)
+  - Interpretation:
+    - 2.0 epochs is slightly worse than the 1.0-epoch baseline,
+    - 3.0 epochs ties the 1.0-epoch baseline in aggregate held-out accuracy,
+    - therefore StrategyQA appears close to saturation around the 1.0-epoch regime.
+  - Behavioral diagnosis:
+    - as epochs increased, held-out predictions became increasingly `no`-heavy,
+    - validation prediction counts:
+      - 1 epoch: `yes=111`, `no=104`
+      - 2 epochs: `yes=93`, `no=122`
+      - 3 epochs: `yes=84`, `no=131`
+    - test prediction counts:
+      - 1 epoch: `yes=118`, `no=123`
+      - 2 epochs: `yes=92`, `no=149`
+      - 3 epochs: `yes=89`, `no=152`
+    - this indicates a calibration shift rather than a robust quality gain.
+  - Documentation:
+    - updated `phase_B_report.md` to include `B2_STRATEGYQA_DIAG_EPOCH_200`,
+    - revised the StrategyQA epoch-analysis section and removed `strategyqa_diag_e200` from the incomplete-runs list.
+
+## 2026-03-02 22:25:00 +08 (+0800)
+- Type: Phase B Reporting / Consolidated Result Report And LoRA Capacity Diagnosis
+- Summary: Added a new `phase_B_report.md` that consolidates all finished Phase B evidence so far, and incorporated the completed StrategyQA LoRA rank diagnostics into the current Phase B diagnosis.
+- Details:
+  - Added `phase_B_report.md` as the running Phase B status document.
+  - Included:
+    - B1 smoke and first-candidate training status,
+    - completed full gain runs,
+    - current StrategyQA and GSM8K diagnoses,
+    - incomplete/invalid runs list,
+    - next-action recommendations,
+    - maintenance instructions for future updates.
+  - StrategyQA LoRA rank findings:
+    - `rank 8`: `0.6908 -> 0.7588` (`+31` correct),
+    - `rank 16`: `0.6908 -> 0.7632` (`+33` correct),
+    - `rank 32`: `0.6908 -> 0.7675` (`+35` correct).
+  - Current interpretation:
+    - LoRA capacity matters on StrategyQA, but only modestly,
+    - `rank 32` is the best-quality completed StrategyQA setting,
+    - `rank 16` remains a strong efficiency/quality default,
+    - longer StrategyQA training does not currently show a meaningful gain over the 1-epoch regime.
+  - Documentation updates:
+    - linked `phase_B_report.md` from `readme.md`,
+    - linked `phase_B_report.md` from `readme_full.md`.
+
+## 2026-03-02 22:05:00 +08 (+0800)
+- Type: Phase B Suite Reliability / Failure Summary And Heavy-Run Diagnostics
+- Summary: Hardened the Phase B suite wrapper so incomplete runs now leave an explicit failure summary and stage marker, after several GSM8K diagnostic runs stopped after pre-eval with no final summary.
+- Details:
+  - Findings from the failed GSM8K diagnostic runs:
+    - `gsm8k_diag_e025`, `gsm8k_diag_e050`, and `gsm8k_diag_lr5e5` all completed only the pre-validation and pre-test baseline evals,
+    - none of them reached the `Phase B: Train SFT/PEFT` banner,
+    - none created a Phase B run directory,
+    - therefore they are incomplete infrastructure runs, not valid PEFT result points.
+  - Most likely operational cause:
+    - the heavy suites were launched concurrently within a short window,
+    - at least one other full GSM8K training run was already active while these suites were still in pre-eval,
+    - so the practical risk is GPU/process contention rather than a benchmark-quality issue.
+  - Suite hardening:
+    - `scripts/run_phase_b_training_suite.sh` now records:
+      - `CUDA_VISIBLE_DEVICES`,
+      - explicit `Train launch` stage logs,
+      - `failed_stage` and `exit_code` in `final_summary.md` for early exits.
+  - Operator guidance:
+    - do not launch multiple heavy full-dataset Phase B suites on the same GPU at once,
+    - treat runs with only `pre_*` eval artifacts and no Phase B run directory as aborted runs that must be re-run.
+
+## 2026-03-02 11:20:00 +08 (+0800)
+- Type: Phase B StrategyQA Scaling Suite / Epoch And LoRA Capacity Diagnostics
+- Summary: Added full-dataset StrategyQA diagnostic groups to test whether the current PEFT gain can be improved further by training longer or by increasing/decreasing LoRA capacity.
+- Details:
+  - Problem:
+    - current full StrategyQA PEFT run already improved held-out accuracy,
+    - but it is unclear whether this run is still underfit,
+    - and it is also unclear whether rank-16 LoRA is the limiting factor or already sufficient.
+  - Diagnostic design:
+    - epoch scaling:
+      - `B2_STRATEGYQA_DIAG_EPOCH_200`
+      - `B2_STRATEGYQA_DIAG_EPOCH_300`
+    - LoRA capacity scaling:
+      - `B2_STRATEGYQA_DIAG_LORA_R8`
+      - `B2_STRATEGYQA_DIAG_LORA_R32`
+  - Intended interpretation:
+    - if 2.0 or 3.0 epochs continue improving held-out accuracy, the current 1.0 epoch run is under-trained,
+    - if longer runs flatten or regress, the current StrategyQA setup is near saturation or starts to overfit,
+    - if `r=32` beats `r=16`, LoRA capacity is a meaningful bottleneck,
+    - if `r=8` matches `r=16`, the baseline adapter is probably over-provisioned.
+  - Implemented:
+    - new config files under `configs/phase_b/`,
+    - new named groups in `scripts/run_phase_b_training_suite.sh`,
+    - updated launch and interpretation docs in:
+      - `readme.md`
+      - `readme_full.md`
+      - `phase_B_plan.md`
+- Validation:
+  - pending syntax/config validation in this turn after file updates.
+- Files changed:
+  - `progress_detailed.md`
+  - `scripts/run_phase_b_training_suite.sh`
+  - `configs/phase_b/peft_diag_strategyqa_epoch200.json`
+  - `configs/phase_b/peft_diag_strategyqa_epoch300.json`
+  - `configs/phase_b/peft_diag_strategyqa_lora_r8.json`
+  - `configs/phase_b/peft_diag_strategyqa_lora_r32.json`
+  - `readme.md`
+  - `readme_full.md`
+  - `phase_B_plan.md`
+- Breaking changes:
+  - `scripts/run_phase_b_training_suite.sh` supports additional StrategyQA diagnostic group names.
+
+## 2026-03-02 10:55:00 +08 (+0800)
+- Type: Phase B GSM8K Diagnostic Suite / Cause Isolation For Post-PEFT Accuracy Drop
+- Summary: Added named GSM8K diagnostic groups to isolate whether the observed post-PEFT regression comes from an overly large learning rate, too much training exposure, or the CoT-style supervision target itself.
+- Details:
+  - Problem:
+    - the first full GSM8K PEFT run regressed on held-out accuracy even though outputs stayed parse-clean,
+    - this suggests the failure is likely in reasoning/calibration rather than formatting,
+    - but the current single `B2_GSM8K_FULL` run cannot separate optimization effects from supervision-style effects.
+  - Diagnostic design:
+    - learning-rate ablations while keeping data/style fixed:
+      - `B2_GSM8K_DIAG_LR_5E5`
+      - `B2_GSM8K_DIAG_LR_1E4`
+    - exposure ablations while keeping data/style fixed:
+      - `B2_GSM8K_DIAG_EPOCH_025`
+      - `B2_GSM8K_DIAG_EPOCH_050`
+    - target-style ablations with matched evaluation protocol:
+      - `B2_GSM8K_DIAG_DIRECT_STYLE`
+      - `B2_GSM8K_DIAG_EQUATION_STYLE`
+  - Implemented:
+    - new config files under `configs/phase_b/`,
+    - new named groups in `scripts/run_phase_b_training_suite.sh`,
+    - new detailed usage and interpretation instructions in:
+      - `readme_full.md`
+      - `readme.md`
+      - `phase_B_plan.md`
+  - Intended interpretation:
+    - if lower LR recovers accuracy, the original run overshot,
+    - if shorter exposure recovers accuracy, the original run over-trained,
+    - if direct/equation styles recover while CoT styles regress, the CoT supervision target is the main culprit.
+- Validation:
+  - pending syntax/config validation in this turn after file updates.
+- Files changed:
+  - `progress_detailed.md`
+  - `scripts/run_phase_b_training_suite.sh`
+  - `configs/phase_b/peft_diag_gsm8k_cot_lr5e5.json`
+  - `configs/phase_b/peft_diag_gsm8k_cot_lr1e4.json`
+  - `configs/phase_b/peft_diag_gsm8k_cot_epoch025.json`
+  - `configs/phase_b/peft_diag_gsm8k_cot_epoch050.json`
+  - `configs/phase_b/peft_diag_gsm8k_direct_style.json`
+  - `configs/phase_b/peft_diag_gsm8k_equation_style.json`
+  - `readme.md`
+  - `readme_full.md`
+  - `phase_B_plan.md`
+- Breaking changes:
+  - `scripts/run_phase_b_training_suite.sh` supports additional GSM8K diagnostic group names.
+
 ## 2026-03-02 10:15:00 +08 (+0800)
 - Type: Phase B Full-Dataset Gain Suite / Automatic Before-vs-After PEFT Reporting
 - Summary: Upgraded the Phase B suite from train-only orchestration to full experiment orchestration that can measure benchmark gain on held-out splits before and after PEFT for full StrategyQA and GSM8K runs.

@@ -30,8 +30,9 @@ What this file contains
 Execution logic inside the file
 -------------------------------
 `parse_args()` reads config -> `load_phase_b_rows()` validates inputs ->
-tokenizer/model load -> optional LoRA attachment -> feature building ->
-`Trainer` construction -> training -> evaluation -> artifact writing.
+optional supervision transforms and weighting are configured -> tokenizer/model
+load -> optional LoRA attachment -> feature building -> `Trainer`
+construction -> training -> evaluation -> artifact writing.
 
 Interaction with other files
 ----------------------------
@@ -84,7 +85,12 @@ def _bootstrap_src_path() -> None:
 
 _bootstrap_src_path()
 
-from ours.phase_b import load_phase_b_rows, summarize_rows  # noqa: E402
+from ours.phase_b import (  # noqa: E402
+    build_supervision_plan,
+    list_target_transforms,
+    load_phase_b_rows,
+    summarize_rows,
+)
 
 
 @dataclass(slots=True)
@@ -164,6 +170,47 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument("--max-eval-samples", type=int, default=None)
     parser.add_argument("--max-seq-length", type=int, default=1024)
+
+    # Supervision-policy controls.
+    parser.add_argument(
+        "--target-transform",
+        choices=list_target_transforms(),
+        default="none",
+        help=(
+            "Optional target rewrite applied before tokenization. "
+            "Used for diagnostics such as GSM8K short-CoT training."
+        ),
+    )
+    parser.add_argument(
+        "--target-max-reasoning-lines",
+        type=int,
+        default=2,
+        help=(
+            "Maximum number of reasoning lines kept by transforms that shorten "
+            "the rationale, such as `gsm8k_short_cot_last2`."
+        ),
+    )
+    parser.add_argument(
+        "--answer-weighting-mode",
+        choices=["none", "final_answer_line"],
+        default="none",
+        help=(
+            "Optional token-loss reweighting. `final_answer_line` applies "
+            "different loss weights to reasoning tokens vs final-answer tokens."
+        ),
+    )
+    parser.add_argument(
+        "--reasoning-loss-weight",
+        type=float,
+        default=1.0,
+        help="Loss weight applied to rationale tokens when answer weighting is enabled.",
+    )
+    parser.add_argument(
+        "--answer-loss-weight",
+        type=float,
+        default=1.0,
+        help="Loss weight applied to final-answer tokens when answer weighting is enabled.",
+    )
 
     # Strategy.
     parser.add_argument(
@@ -289,6 +336,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--per-device-train-batch-size must be > 0")
     if args.gradient_accumulation_steps <= 0:
         raise ValueError("--gradient-accumulation-steps must be > 0")
+    if args.target_max_reasoning_lines < 0:
+        raise ValueError("--target-max-reasoning-lines must be >= 0")
+    if args.reasoning_loss_weight <= 0:
+        raise ValueError("--reasoning-loss-weight must be > 0")
+    if args.answer_loss_weight <= 0:
+        raise ValueError("--answer-loss-weight must be > 0")
     return args
 
 
@@ -393,6 +446,11 @@ def _build_features(
     rows,
     tokenizer,
     max_seq_length: int,
+    target_transform: str,
+    target_max_reasoning_lines: int,
+    answer_weighting_mode: str,
+    reasoning_loss_weight: float,
+    answer_loss_weight: float,
 ) -> list[dict[str, Any]]:
     """Convert prompt/target rows into causal-LM training features.
 
@@ -411,7 +469,7 @@ def _build_features(
     -------
     list[dict[str, Any]]
         Pre-tokenized feature dictionaries with `input_ids`, `attention_mask`,
-        `labels`, and `sample_id`.
+        `labels`, `loss_weights`, and `sample_id`.
 
     Example
     -------
@@ -426,18 +484,56 @@ def _build_features(
 
     features: list[dict[str, Any]] = []
     eos_id = tokenizer.eos_token_id
+    use_answer_weighting = answer_weighting_mode == "final_answer_line"
 
     for row in rows:
+        supervision_plan = build_supervision_plan(
+            target_text=row.target_text,
+            target_transform=target_transform,
+            target_max_reasoning_lines=target_max_reasoning_lines,
+        )
         prompt_ids = tokenizer(row.prompt_text, add_special_tokens=False)["input_ids"]
-        target_ids = tokenizer(row.target_text, add_special_tokens=False)["input_ids"]
-        full_ids = prompt_ids + target_ids
+        reasoning_ids = (
+            tokenizer(
+                supervision_plan.reasoning_text,
+                add_special_tokens=False,
+            )["input_ids"]
+            if supervision_plan.reasoning_text
+            else []
+        )
+        answer_ids = (
+            tokenizer(
+                supervision_plan.answer_text,
+                add_special_tokens=False,
+            )["input_ids"]
+            if supervision_plan.answer_text
+            else []
+        )
+        if not reasoning_ids and not answer_ids:
+            answer_ids = tokenizer(
+                supervision_plan.transformed_target_text,
+                add_special_tokens=False,
+            )["input_ids"]
+
+        full_ids = prompt_ids + reasoning_ids + answer_ids
+        reasoning_weight = reasoning_loss_weight if use_answer_weighting else 1.0
+        answer_weight = answer_loss_weight if use_answer_weighting else 1.0
+        loss_weights = (
+            [0.0] * len(prompt_ids)
+            + [float(reasoning_weight)] * len(reasoning_ids)
+            + [float(answer_weight)] * len(answer_ids)
+        )
         if eos_id is not None and (not full_ids or full_ids[-1] != eos_id):
             full_ids = full_ids + [int(eos_id)]
+            loss_weights = loss_weights + [
+                float(answer_weight if answer_ids else reasoning_weight)
+            ]
 
         prompt_len = len(prompt_ids)
         if len(full_ids) > max_seq_length:
             overflow = len(full_ids) - max_seq_length
             full_ids = full_ids[overflow:]
+            loss_weights = loss_weights[overflow:]
             prompt_len = max(0, prompt_len - overflow)
 
         labels = list(full_ids)
@@ -448,6 +544,7 @@ def _build_features(
             # This can happen on extremely short max_seq_length values.
             # Keep at least one supervised token to avoid invalid batches.
             labels[-1] = full_ids[-1]
+            loss_weights[-1] = float(answer_weight)
 
         features.append(
             {
@@ -455,6 +552,7 @@ def _build_features(
                 "input_ids": full_ids,
                 "attention_mask": [1] * len(full_ids),
                 "labels": labels,
+                "loss_weights": loss_weights,
             }
         )
 
@@ -535,6 +633,7 @@ class _CausalLMCollator:
         input_ids: list[list[int]] = []
         attention_mask: list[list[int]] = []
         labels: list[list[int]] = []
+        loss_weights: list[list[float]] = []
 
         for f in features:
             cur_len = len(f["input_ids"])
@@ -542,12 +641,77 @@ class _CausalLMCollator:
             input_ids.append(f["input_ids"] + [self.pad_token_id] * pad_len)
             attention_mask.append(f["attention_mask"] + [0] * pad_len)
             labels.append(f["labels"] + [-100] * pad_len)
+            loss_weights.append(f["loss_weights"] + [0.0] * pad_len)
 
         return {
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
             "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
             "labels": torch.tensor(labels, dtype=torch.long),
+            "loss_weights": torch.tensor(loss_weights, dtype=torch.float32),
         }
+
+
+def _build_weighted_trainer_class(TrainerBase):
+    """Return a `Trainer` subclass that supports answer-weighted supervision.
+
+    Hugging Face `Trainer` computes an unweighted causal-LM loss by default. For
+    GSM8K diagnostics we sometimes want to reward the final-answer line more
+    strongly than the intermediate rationale. This subclass consumes the
+    `loss_weights` tensor produced by `_build_features()` and applies a
+    token-weighted cross-entropy loss.
+
+    Example
+    -------
+    ```python
+    WeightedTrainer = _build_weighted_trainer_class(Trainer)
+    trainer = WeightedTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        data_collator=collator,
+    )
+    ```
+    """
+
+    class _WeightedLossTrainer(TrainerBase):
+        """Trainer subclass with token-weighted causal-LM loss."""
+
+        def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+            """Compute one token-weighted causal-LM loss value.
+
+            Example
+            -------
+            ```python
+            loss = trainer.compute_loss(model, batch)
+            ```
+            """
+            import torch.nn.functional as F
+
+            labels = inputs.pop("labels")
+            loss_weights = inputs.pop("loss_weights")
+            outputs = model(**inputs)
+            logits = outputs["logits"] if isinstance(outputs, dict) else outputs.logits
+
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            shift_weights = loss_weights[..., 1:].contiguous()
+
+            flat_loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                reduction="none",
+                ignore_index=-100,
+            )
+            active_mask = (shift_labels.view(-1) != -100).to(flat_loss.dtype)
+            flat_weights = shift_weights.view(-1) * active_mask
+            denom = flat_weights.sum().clamp_min(1e-8)
+            loss = (flat_loss * flat_weights).sum() / denom
+
+            if return_outputs:
+                return loss, outputs
+            return loss
+
+    return _WeightedLossTrainer
 
 
 def _resolve_training_args(
@@ -734,6 +898,11 @@ def main() -> int:
     print(f"batch_train      : {args.per_device_train_batch_size}")
     print(f"batch_eval       : {args.per_device_eval_batch_size}")
     print(f"max_seq_length   : {args.max_seq_length}")
+    print(f"target_transform : {args.target_transform}")
+    print(f"target_max_lines : {args.target_max_reasoning_lines}")
+    print(f"weighting_mode   : {args.answer_weighting_mode}")
+    print(f"weight_reasoning : {args.reasoning_loss_weight}")
+    print(f"weight_answer    : {args.answer_loss_weight}")
     print(f"seed             : {args.seed}")
     print()
 
@@ -818,11 +987,21 @@ def main() -> int:
         rows=train_rows,
         tokenizer=tokenizer,
         max_seq_length=args.max_seq_length,
+        target_transform=args.target_transform,
+        target_max_reasoning_lines=args.target_max_reasoning_lines,
+        answer_weighting_mode=args.answer_weighting_mode,
+        reasoning_loss_weight=args.reasoning_loss_weight,
+        answer_loss_weight=args.answer_loss_weight,
     )
     eval_features = _build_features(
         rows=eval_rows,
         tokenizer=tokenizer,
         max_seq_length=args.max_seq_length,
+        target_transform=args.target_transform,
+        target_max_reasoning_lines=args.target_max_reasoning_lines,
+        answer_weighting_mode=args.answer_weighting_mode,
+        reasoning_loss_weight=args.reasoning_loss_weight,
+        answer_loss_weight=args.answer_loss_weight,
     )
     train_dataset = _ListFeatureDataset(train_features)
     eval_dataset = _ListFeatureDataset(eval_features) if eval_features else None
@@ -851,6 +1030,11 @@ def main() -> int:
         "seed": args.seed,
         "dtype": args.dtype,
         "max_seq_length": args.max_seq_length,
+        "target_transform": args.target_transform,
+        "target_max_reasoning_lines": args.target_max_reasoning_lines,
+        "answer_weighting_mode": args.answer_weighting_mode,
+        "reasoning_loss_weight": args.reasoning_loss_weight,
+        "answer_loss_weight": args.answer_loss_weight,
         "train_input": str(args.train_jsonl),
         "validation_input": str(args.validation_jsonl) if args.validation_jsonl else None,
         "train_data_summary": train_summary,
@@ -859,7 +1043,8 @@ def main() -> int:
     }
     _write_json(manifest_path, manifest)
 
-    trainer = Trainer(
+    WeightedTrainer = _build_weighted_trainer_class(Trainer)
+    trainer = WeightedTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -901,6 +1086,8 @@ def main() -> int:
         "max_seq_length": args.max_seq_length,
         "per_device_train_batch_size": args.per_device_train_batch_size,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "target_transform": args.target_transform,
+        "answer_weighting_mode": args.answer_weighting_mode,
     }
     _write_json(summary_path, summary)
     summary_md_path.write_text(
@@ -913,6 +1100,8 @@ def main() -> int:
                 f"- num_train_rows: `{train_summary['num_rows']}`",
                 f"- num_eval_rows: `{eval_summary['num_rows']}`",
                 f"- train_elapsed_seconds: `{train_elapsed:.2f}`",
+                f"- target_transform: `{args.target_transform}`",
+                f"- answer_weighting_mode: `{args.answer_weighting_mode}`",
                 f"- train_metrics: `{train_metrics_path}`",
                 f"- eval_metrics: `{eval_metrics_path if eval_metrics else 'N/A'}`",
             ]

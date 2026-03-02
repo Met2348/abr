@@ -82,13 +82,93 @@ def test_build_features_masks_prompt_and_respects_max_seq_length() -> None:
         rows=rows,
         tokenizer=_TokenizerStub(),
         max_seq_length=5,
+        target_transform="none",
+        target_max_reasoning_lines=2,
+        answer_weighting_mode="none",
+        reasoning_loss_weight=1.0,
+        answer_loss_weight=1.0,
     )
     assert len(features) == 1
     f = features[0]
     assert len(f["input_ids"]) == 5
     assert len(f["labels"]) == 5
+    assert len(f["loss_weights"]) == 5
     # At least one supervised label should exist.
     assert any(x != -100 for x in f["labels"])
+
+
+def test_build_features_short_cot_keeps_last_reasoning_lines() -> None:
+    module = _load_phase_b_train_module()
+
+    class _TokenizerStub:
+        eos_token_id = None
+
+        def __call__(self, text, add_special_tokens=False):
+            del add_special_tokens
+            ids = [idx + 10 for idx, _ in enumerate(text.split())]
+            return {"input_ids": ids}
+
+    rows = [
+        PhaseBTrainRow(
+            sample_id="gsm8k:1",
+            dataset="gsm8k",
+            split="train",
+            prompt_text="Question",
+            target_text="a\nb\nc\nFinal answer: 5",
+            answer="5",
+        )
+    ]
+
+    features = module._build_features(
+        rows=rows,
+        tokenizer=_TokenizerStub(),
+        max_seq_length=64,
+        target_transform="gsm8k_short_cot_last2",
+        target_max_reasoning_lines=2,
+        answer_weighting_mode="none",
+        reasoning_loss_weight=1.0,
+        answer_loss_weight=1.0,
+    )
+    assert len(features) == 1
+    # prompt token + 2 kept reasoning lines + 3-token final answer segment
+    assert len(features[0]["input_ids"]) == 6
+
+
+def test_build_features_answer_weighting_boosts_final_answer_tokens() -> None:
+    module = _load_phase_b_train_module()
+
+    class _TokenizerStub:
+        eos_token_id = None
+
+        def __call__(self, text, add_special_tokens=False):
+            del add_special_tokens
+            ids = [idx + 20 for idx, _ in enumerate(text.split())]
+            return {"input_ids": ids}
+
+    rows = [
+        PhaseBTrainRow(
+            sample_id="gsm8k:2",
+            dataset="gsm8k",
+            split="train",
+            prompt_text="Question",
+            target_text="step one\nstep two\nFinal answer: 7",
+            answer="7",
+        )
+    ]
+
+    features = module._build_features(
+        rows=rows,
+        tokenizer=_TokenizerStub(),
+        max_seq_length=64,
+        target_transform="none",
+        target_max_reasoning_lines=2,
+        answer_weighting_mode="final_answer_line",
+        reasoning_loss_weight=0.5,
+        answer_loss_weight=3.0,
+    )
+    weights = features[0]["loss_weights"]
+    assert 0.5 in weights
+    assert 3.0 in weights
 
 
 def test_resolve_training_args_tolerates_missing_optional_kwargs() -> None:

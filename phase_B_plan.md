@@ -170,7 +170,36 @@ Each official run directory must include:
 4. New B2-style full-dataset gain suites are now available:
    - `B2_STRATEGYQA_FULL`
    - `B2_GSM8K_FULL`
-5. These groups are designed to answer the milestone question in a reportable way:
+5. GSM8K diagnostic branches are now available to isolate the failure mechanism:
+   - `B2_GSM8K_DIAG_LR_5E5`
+   - `B2_GSM8K_DIAG_LR_1E4`
+   - `B2_GSM8K_DIAG_EPOCH_025`
+   - `B2_GSM8K_DIAG_EPOCH_050`
+   - `B2_GSM8K_DIAG_DIRECT_STYLE`
+   - `B2_GSM8K_DIAG_EQUATION_STYLE`
+   - `B2_GSM8K_DIAG_CHECKPOINT_SWEEP`
+   - `B2_GSM8K_DIAG_SHORT_COT`
+   - `B2_GSM8K_DIAG_ANSWER_WEIGHTED`
+6. StrategyQA scaling branches are now available to test whether the current gain can be pushed higher:
+   - `B2_STRATEGYQA_DIAG_EPOCH_200`
+   - `B2_STRATEGYQA_DIAG_EPOCH_300`
+   - `B2_STRATEGYQA_DIAG_LORA_R8`
+   - `B2_STRATEGYQA_DIAG_LORA_R32`
+7. These groups are designed to answer the milestone question in a reportable way:
    - baseline held-out accuracy before PEFT,
    - held-out accuracy after PEFT,
    - absolute delta and correct-count delta in one summary.
+8. GSM8K follow-up diagnosis is now explicitly testing three additional hypotheses:
+   - best checkpoint may occur before the final adapter,
+   - shorter CoT supervision may preserve arithmetic quality better than long-CoT supervision,
+   - rationale tokens may currently dominate the loss too strongly relative to the final answer.
+9. A combined GSM8K repair run is now available:
+   - `B2_GSM8K_REPAIR_ANSWER_WEIGHTED_CKPT`
+   - purpose:
+     - combine answer-weighted supervision with dense checkpoint selection,
+     - test whether the best retained checkpoint can fully recover the frozen GSM8K baseline,
+     - avoid treating the final adapter as the reportable model when late-run drift is known to be severe.
+10. A dedicated cross-task interference suite is now part of the remaining Phase B work:
+   - evaluate the best StrategyQA adapter on GSM8K,
+   - evaluate GSM8K adapters on StrategyQA,
+   - compare whether long-CoT GSM8K tuning causes broader cross-task damage than shorter GSM8K styles.

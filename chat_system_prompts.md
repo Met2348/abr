@@ -50,8 +50,12 @@ Changes to this file are user-authorized only.
     - and at least one short usage/example snippet when practical.
 25. When modifying existing code, the assistant should raise documentation quality along with code quality instead of leaving new or edited logic under-documented.
 26. Future code added by the assistant should follow this documentation style without needing repeated reminders.
+27. When generating future experiment commands for the user:
+    - prefer `CUDA_VISIBLE_DEVICES` values other than `0` by default because device `0` is usually crowded in the user's environment,
+    - prefer eval batch sizes of `64` or larger when the task is inference/evaluation and there is no known memory-risk reason to stay smaller.
+28. If a command intentionally uses a smaller eval batch size or device `0`, the assistant should explain the reason briefly.
 
 ## Acknowledgement Metadata
 
-- Last explicit user instruction to refresh this file: `2026-02-28`
-- Source scope: includes math-rendering requirement, experiment-workflow requirements (param groups + one-click shell execution), experiment-diagnosis record maintenance in `result_records.md`, batching-first implementation policy with safety/correctness guards, dual-README documentation policy (`readme.md` public concise, `readme_full.md` private detailed), and beginner-oriented file/function documentation requirements.
+- Last explicit user instruction to refresh this file: `2026-03-02`
+- Source scope: includes math-rendering requirement, experiment-workflow requirements (param groups + one-click shell execution), experiment-diagnosis record maintenance in `result_records.md`, batching-first implementation policy with safety/correctness guards, dual-README documentation policy (`readme.md` public concise, `readme_full.md` private detailed), beginner-oriented file/function documentation requirements, and command-generation preferences for non-zero CUDA devices plus high-batch eval by default.

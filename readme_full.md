@@ -34,6 +34,7 @@ Context files:
 - `phase_A_report.md` (newcomer-facing Phase A closeout report)
 - `phase_A_ppt_reference.md` (PPT-ready supervisor summary + glossary + numeric outcomes)
 - `phase_B_plan.md` (Phase B lifecycle and first-run freeze contract)
+- `phase_B_report.md` (live Phase B experiment report and diagnosis log)
 - `foundation_reliability_audit.md` (low-level risk scan + hardening plan before Phase B scale)
 
 ## Phase A Retrospective (Before You Start Phase B)
@@ -934,7 +935,20 @@ Supported groups:
 1. `B1_SMOKE` (default)
 2. `B1_FIRST`
 3. `B2_STRATEGYQA_FULL`
-4. `B2_GSM8K_FULL`
+4. `B2_STRATEGYQA_DIAG_EPOCH_200`
+5. `B2_STRATEGYQA_DIAG_EPOCH_300`
+6. `B2_STRATEGYQA_DIAG_LORA_R8`
+7. `B2_STRATEGYQA_DIAG_LORA_R32`
+8. `B2_GSM8K_FULL`
+9. `B2_GSM8K_DIAG_LR_5E5`
+10. `B2_GSM8K_DIAG_LR_1E4`
+11. `B2_GSM8K_DIAG_EPOCH_025`
+12. `B2_GSM8K_DIAG_EPOCH_050`
+13. `B2_GSM8K_DIAG_DIRECT_STYLE`
+14. `B2_GSM8K_DIAG_EQUATION_STYLE`
+15. `B2_GSM8K_DIAG_CHECKPOINT_SWEEP`
+16. `B2_GSM8K_DIAG_SHORT_COT`
+17. `B2_GSM8K_DIAG_ANSWER_WEIGHTED`
 
 Switch groups with env var:
 
@@ -942,15 +956,119 @@ Switch groups with env var:
 ACTIVE_PHASE_B_GROUP=B1_FIRST RUN_PREFIX=phase_b_first bash scripts/run_phase_b_training_suite.sh
 ```
 
+Operational note for heavy groups:
+- avoid launching multiple full-dataset Phase B suites on the same GPU at the same time,
+- the suite now writes a partial `final_summary.md` with `status: failed` and `failed_stage` if it exits early,
+- if you only see `pre_*` Phase A eval runs and no Phase B run directory, that experiment did not reach training and should be treated as aborted.
+- user-environment command preference:
+  - avoid `CUDA_VISIBLE_DEVICES=0` by default when suggesting future commands,
+  - prefer eval batch sizes `>=64` when memory allows and no known risk requires a smaller batch.
+
 Full-dataset gain runs:
 
 ```bash
 ACTIVE_PHASE_B_GROUP=B2_STRATEGYQA_FULL \
 RUN_PREFIX=phase_b_strategyqa_full \
+CUDA_VISIBLE_DEVICES=1 \
+PHASE_B_EVAL_BATCH_SIZE=64 \
 bash scripts/run_phase_b_training_suite.sh
 
 ACTIVE_PHASE_B_GROUP=B2_GSM8K_FULL \
 RUN_PREFIX=phase_b_gsm8k_full \
+CUDA_VISIBLE_DEVICES=2 \
+PHASE_B_EVAL_BATCH_SIZE=64 \
+bash scripts/run_phase_b_training_suite.sh
+```
+
+StrategyQA scaling suite:
+
+```bash
+ACTIVE_PHASE_B_GROUP=B2_STRATEGYQA_DIAG_EPOCH_200 \
+RUN_PREFIX=strategyqa_diag_e200 \
+CUDA_VISIBLE_DEVICES=1 \
+PHASE_B_EVAL_BATCH_SIZE=64 \
+bash scripts/run_phase_b_training_suite.sh
+
+ACTIVE_PHASE_B_GROUP=B2_STRATEGYQA_DIAG_EPOCH_300 \
+RUN_PREFIX=strategyqa_diag_e300 \
+CUDA_VISIBLE_DEVICES=2 \
+PHASE_B_EVAL_BATCH_SIZE=64 \
+bash scripts/run_phase_b_training_suite.sh
+
+ACTIVE_PHASE_B_GROUP=B2_STRATEGYQA_DIAG_LORA_R8 \
+RUN_PREFIX=strategyqa_diag_r8 \
+CUDA_VISIBLE_DEVICES=1 \
+PHASE_B_EVAL_BATCH_SIZE=64 \
+bash scripts/run_phase_b_training_suite.sh
+
+ACTIVE_PHASE_B_GROUP=B2_STRATEGYQA_DIAG_LORA_R32 \
+RUN_PREFIX=strategyqa_diag_r32 \
+CUDA_VISIBLE_DEVICES=2 \
+PHASE_B_EVAL_BATCH_SIZE=64 \
+bash scripts/run_phase_b_training_suite.sh
+```
+
+GSM8K diagnostic suite:
+
+```bash
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_DIAG_LR_5E5 \
+RUN_PREFIX=gsm8k_diag_lr5e5 \
+CUDA_VISIBLE_DEVICES=1 \
+PHASE_B_EVAL_BATCH_SIZE=64 \
+bash scripts/run_phase_b_training_suite.sh
+
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_DIAG_LR_1E4 \
+RUN_PREFIX=gsm8k_diag_lr1e4 \
+CUDA_VISIBLE_DEVICES=2 \
+PHASE_B_EVAL_BATCH_SIZE=64 \
+bash scripts/run_phase_b_training_suite.sh
+
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_DIAG_EPOCH_025 \
+RUN_PREFIX=gsm8k_diag_e025 \
+CUDA_VISIBLE_DEVICES=3 \
+PHASE_B_EVAL_BATCH_SIZE=64 \
+bash scripts/run_phase_b_training_suite.sh
+
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_DIAG_EPOCH_050 \
+RUN_PREFIX=gsm8k_diag_e050 \
+CUDA_VISIBLE_DEVICES=1 \
+PHASE_B_EVAL_BATCH_SIZE=64 \
+bash scripts/run_phase_b_training_suite.sh
+
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_DIAG_DIRECT_STYLE \
+RUN_PREFIX=gsm8k_diag_direct \
+CUDA_VISIBLE_DEVICES=2 \
+PHASE_B_EVAL_BATCH_SIZE=64 \
+bash scripts/run_phase_b_training_suite.sh
+
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_DIAG_EQUATION_STYLE \
+RUN_PREFIX=gsm8k_diag_equation \
+CUDA_VISIBLE_DEVICES=3 \
+PHASE_B_EVAL_BATCH_SIZE=64 \
+bash scripts/run_phase_b_training_suite.sh
+
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_DIAG_CHECKPOINT_SWEEP \
+RUN_PREFIX=gsm8k_diag_ckpt_sweep \
+CUDA_VISIBLE_DEVICES=1 \
+PHASE_B_EVAL_BATCH_SIZE=64 \
+bash scripts/run_phase_b_training_suite.sh
+
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_DIAG_SHORT_COT \
+RUN_PREFIX=gsm8k_diag_short_cot \
+CUDA_VISIBLE_DEVICES=2 \
+PHASE_B_EVAL_BATCH_SIZE=64 \
+bash scripts/run_phase_b_training_suite.sh
+
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_DIAG_ANSWER_WEIGHTED \
+RUN_PREFIX=gsm8k_diag_answer_weighted \
+CUDA_VISIBLE_DEVICES=3 \
+PHASE_B_EVAL_BATCH_SIZE=64 \
+bash scripts/run_phase_b_training_suite.sh
+
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_REPAIR_ANSWER_WEIGHTED_CKPT \
+RUN_PREFIX=gsm8k_repair_aw_ckpt \
+CUDA_VISIBLE_DEVICES=2 \
+PHASE_B_EVAL_BATCH_SIZE=64 \
 bash scripts/run_phase_b_training_suite.sh
 ```
 
@@ -1029,4 +1147,189 @@ python -u scripts/phase_b_compare_eval.py \
   --phase-b-run-dir assets/artifacts/phase_b_runs/<phase_b_run_dir> \
   --compare validation before_validation_metrics.json after_validation_metrics.json \
   --compare test before_test_metrics.json after_test_metrics.json
+```
+
+### 10.5.2 GSM8K Diagnostic Decision Tree
+
+Use these runs to isolate *why* GSM8K dropped after PEFT.
+
+1. Optimization overshoot check:
+   - `B2_GSM8K_DIAG_LR_5E5`
+   - `B2_GSM8K_DIAG_LR_1E4`
+   - Interpretation:
+     - if either materially beats `B2_GSM8K_FULL`, the original `2e-4` LR was too large.
+
+2. Exposure / overtraining check:
+   - `B2_GSM8K_DIAG_EPOCH_025`
+   - `B2_GSM8K_DIAG_EPOCH_050`
+   - Interpretation:
+     - if shorter exposure beats the 1.0 epoch run, the adapter is over-learning style patterns.
+
+3. Supervision-target style check:
+   - `B2_GSM8K_DIAG_DIRECT_STYLE`
+   - `B2_GSM8K_DIAG_EQUATION_STYLE`
+   - Interpretation:
+     - if direct style holds up better than CoT style, the main issue is CoT-target imitation,
+     - if equation style reproduces the same cleaner-but-wrong pattern, equation markup is part of the failure mode.
+
+4. Checkpoint drift check:
+   - `B2_GSM8K_DIAG_CHECKPOINT_SWEEP`
+   - Interpretation:
+     - if an earlier checkpoint beats the final adapter, the GSM8K drop is partly late-run drift rather than purely bad supervision.
+
+5. Long-CoT target-length check:
+   - `B2_GSM8K_DIAG_SHORT_COT`
+   - Interpretation:
+     - if short-CoT supervision recovers accuracy, the long target itself is causing style-over-truth damage.
+
+6. Loss-balance check:
+   - `B2_GSM8K_DIAG_ANSWER_WEIGHTED`
+   - Interpretation:
+     - if answer-weighted supervision recovers accuracy, the original loss is too dominated by rationale tokens.
+
+7. Combined repair check:
+   - `B2_GSM8K_REPAIR_ANSWER_WEIGHTED_CKPT`
+   - Interpretation:
+     - combine the two strongest GSM8K repair signals already found:
+       - answer-weighted supervision,
+       - and early/best checkpoint selection.
+     - If this run matches or exceeds the frozen base model at one retained checkpoint, the GSM8K problem is largely a late-drift + objective-balance issue.
+
+Recommended run order:
+1. `B2_GSM8K_DIAG_LR_1E4`
+2. `B2_GSM8K_DIAG_EPOCH_050`
+3. `B2_GSM8K_DIAG_LR_5E5`
+4. `B2_GSM8K_DIAG_EPOCH_025`
+5. `B2_GSM8K_DIAG_DIRECT_STYLE`
+6. `B2_GSM8K_DIAG_EQUATION_STYLE`
+7. `B2_GSM8K_DIAG_SHORT_COT`
+8. `B2_GSM8K_DIAG_ANSWER_WEIGHTED`
+9. `B2_GSM8K_DIAG_CHECKPOINT_SWEEP`
+10. `B2_GSM8K_REPAIR_ANSWER_WEIGHTED_CKPT`
+
+Suggested stable launch form:
+
+```bash
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_DIAG_LR_1E4 \
+RUN_PREFIX=gsm8k_diag_lr1e4 \
+CUDA_VISIBLE_DEVICES=1 \
+PHASE_B_EVAL_BATCH_SIZE=64 \
+PHASE_B_EVAL_EXTRA_ARGS="--max-progress-lines 20 --log-every 25 --no-compare-latest-same-name" \
+bash scripts/run_phase_b_training_suite.sh
+```
+
+Checkpoint sweep note:
+- `B2_GSM8K_DIAG_CHECKPOINT_SWEEP` trains a dedicated full GSM8K CoT run with dense checkpoint saving (`save_steps=100`, `save_total_limit=12`) and then auto-evaluates every retained checkpoint plus the final adapter.
+- Output files:
+  - `assets/artifacts/phase_b_logs/<RUN_PREFIX>/checkpoint_sweep_summary.md`
+  - `assets/artifacts/phase_b_logs/<RUN_PREFIX>/checkpoint_sweep_summary.json`
+
+Combined repair note:
+- `B2_GSM8K_REPAIR_ANSWER_WEIGHTED_CKPT` uses the same dense checkpoint sweep flow, but changes the training loss to:
+  - reasoning tokens weight `0.5`
+  - final-answer line weight `3.0`
+- This is the current best-evidence GSM8K repair attempt after the completed Phase B diagnosis.
+
+### 10.5.4 Cross-Task Interference Suite
+
+Why this suite exists:
+- the core BCR/ABR question is not only whether PEFT helps on its source task,
+- it is also whether a task-specific adapter interferes with other reasoning tasks.
+
+Script:
+
+```bash
+bash scripts/run_phase_b_cross_task_suite.sh
+```
+
+Supported groups:
+1. `B3_XTASK_STRAT_R32_TO_GSM8K`
+2. `B3_XTASK_GSM8K_FULL_TO_STRAT`
+3. `B3_XTASK_GSM8K_DIRECT_TO_STRAT`
+4. `B3_XTASK_GSM8K_EQUATION_TO_STRAT`
+
+Recommended launches:
+
+```bash
+ACTIVE_CROSS_TASK_GROUP=B3_XTASK_STRAT_R32_TO_GSM8K \
+RUN_PREFIX=xtask_strat_r32_to_gsm8k \
+CUDA_VISIBLE_DEVICES=1 \
+PHASE_B_EVAL_BATCH_SIZE=64 \
+PHASE_B_EVAL_EXTRA_ARGS="--max-progress-lines 20 --log-every 25 --no-compare-latest-same-name" \
+bash scripts/run_phase_b_cross_task_suite.sh
+
+ACTIVE_CROSS_TASK_GROUP=B3_XTASK_GSM8K_FULL_TO_STRAT \
+RUN_PREFIX=xtask_gsm8k_full_to_strat \
+CUDA_VISIBLE_DEVICES=2 \
+PHASE_B_EVAL_BATCH_SIZE=64 \
+PHASE_B_EVAL_EXTRA_ARGS="--max-progress-lines 20 --log-every 25 --no-compare-latest-same-name" \
+bash scripts/run_phase_b_cross_task_suite.sh
+
+ACTIVE_CROSS_TASK_GROUP=B3_XTASK_GSM8K_DIRECT_TO_STRAT \
+RUN_PREFIX=xtask_gsm8k_direct_to_strat \
+CUDA_VISIBLE_DEVICES=3 \
+PHASE_B_EVAL_BATCH_SIZE=64 \
+PHASE_B_EVAL_EXTRA_ARGS="--max-progress-lines 20 --log-every 25 --no-compare-latest-same-name" \
+bash scripts/run_phase_b_cross_task_suite.sh
+
+ACTIVE_CROSS_TASK_GROUP=B3_XTASK_GSM8K_EQUATION_TO_STRAT \
+RUN_PREFIX=xtask_gsm8k_equation_to_strat \
+CUDA_VISIBLE_DEVICES=1 \
+PHASE_B_EVAL_BATCH_SIZE=64 \
+PHASE_B_EVAL_EXTRA_ARGS="--max-progress-lines 20 --log-every 25 --no-compare-latest-same-name" \
+bash scripts/run_phase_b_cross_task_suite.sh
+```
+
+Outputs:
+- `assets/artifacts/phase_b_logs/<RUN_PREFIX>/cross_task_gain_summary.md`
+- `assets/artifacts/phase_b_logs/<RUN_PREFIX>/cross_task_gain_summary.json`
+
+Interpretation:
+- if StrategyQA PEFT hurts GSM8K, StrategyQA alignment is not task-isolated,
+- if GSM8K full-CoT PEFT hurts StrategyQA more than GSM8K short-style PEFT does,
+  the cross-task damage is tied to the long-CoT GSM8K supervision pattern.
+
+How to read the result:
+1. open `assets/artifacts/phase_b_logs/<RUN_PREFIX>/peft_gain_summary.md`
+2. compare:
+   - `delta_accuracy`
+   - `delta_correct`
+   - `delta_parse_error_rate`
+3. if needed, inspect the underlying scored outputs under:
+   - `assets/artifacts/phase_a_runs/<run_name>_post_validation_*/scored_predictions.jsonl`
+   - `assets/artifacts/phase_a_runs/<run_name>_post_test_*/scored_predictions.jsonl`
+
+### 10.5.3 StrategyQA Scaling Decision Tree
+
+Use these runs to test whether StrategyQA can still improve beyond the current 1.0 epoch, rank-16 baseline.
+
+1. Epoch scaling:
+   - `B2_STRATEGYQA_DIAG_EPOCH_200`
+   - `B2_STRATEGYQA_DIAG_EPOCH_300`
+   - Interpretation:
+     - if held-out accuracy continues rising, the current run is under-trained,
+     - if it flattens or drops, the current StrategyQA setup is already near its useful training limit.
+
+2. LoRA capacity scaling:
+   - `B2_STRATEGYQA_DIAG_LORA_R8`
+   - `B2_STRATEGYQA_DIAG_LORA_R32`
+   - Interpretation:
+     - if `r=32` beats baseline, capacity is limiting,
+     - if `r=8` matches baseline, the baseline adapter is larger than needed.
+
+Recommended run order:
+1. `B2_STRATEGYQA_DIAG_EPOCH_200`
+2. `B2_STRATEGYQA_DIAG_LORA_R32`
+3. `B2_STRATEGYQA_DIAG_EPOCH_300`
+4. `B2_STRATEGYQA_DIAG_LORA_R8`
+
+Suggested stable launch form:
+
+```bash
+ACTIVE_PHASE_B_GROUP=B2_STRATEGYQA_DIAG_EPOCH_200 \
+RUN_PREFIX=strategyqa_diag_e200 \
+CUDA_VISIBLE_DEVICES=1 \
+PHASE_B_EVAL_BATCH_SIZE=8 \
+PHASE_B_EVAL_EXTRA_ARGS="--max-progress-lines 20 --log-every 25 --no-compare-latest-same-name" \
+bash scripts/run_phase_b_training_suite.sh
 ```

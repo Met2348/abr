@@ -13,6 +13,7 @@ What this file does
 2. Resolve whether evaluation should use:
    - a direct model path, or
    - a finished Phase B run directory.
+   - or one saved checkpoint directory from a Phase B run.
 3. Rebuild a Phase A `generate_and_eval` command line.
 4. Forward execution to that script and return its exit code.
 
@@ -78,6 +79,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "its manifest and final_model directory to resolve evaluation inputs."
         ),
     )
+    parser.add_argument(
+        "--phase-b-checkpoint-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Optional checkpoint directory inside one Phase B run, for example "
+            "`.../checkpoints/checkpoint-400`. This is primarily used by "
+            "checkpoint-sweep diagnostics."
+        ),
+    )
     parser.add_argument("--run-name", default="phase_b_eval")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-new-tokens", type=int, default=64)
@@ -117,21 +128,36 @@ def _resolve_eval_model_paths(args: argparse.Namespace) -> tuple[str, Path | Non
     model_path, adapter_path = _resolve_eval_model_paths(args)
     ```
     """
-    if args.phase_b_run_dir is None and args.model_path is None:
-        raise ValueError("Provide either --model-path or --phase-b-run-dir.")
-    if args.phase_b_run_dir is not None and args.model_path is not None:
-        raise ValueError("Use either --model-path or --phase-b-run-dir, not both.")
+    provided = [
+        args.model_path is not None,
+        args.phase_b_run_dir is not None,
+        args.phase_b_checkpoint_dir is not None,
+    ]
+    if sum(bool(x) for x in provided) != 1:
+        raise ValueError(
+            "Use exactly one of --model-path, --phase-b-run-dir, or "
+            "--phase-b-checkpoint-dir."
+        )
 
-    if args.phase_b_run_dir is None:
+    if args.model_path is not None:
         return str(args.model_path), None
 
     run_dir = args.phase_b_run_dir
+    model_dir = None
+    if args.phase_b_checkpoint_dir is not None:
+        model_dir = args.phase_b_checkpoint_dir
+        if not model_dir.exists():
+            raise FileNotFoundError(f"Phase B checkpoint directory not found: {model_dir}")
+        run_dir = model_dir.parents[1]
+
+    assert run_dir is not None
     manifest_path = run_dir / "manifest.json"
-    final_model_dir = run_dir / "final_model"
     if not manifest_path.exists():
         raise FileNotFoundError(f"Phase B manifest not found: {manifest_path}")
-    if not final_model_dir.exists():
-        raise FileNotFoundError(f"Phase B final_model directory not found: {final_model_dir}")
+    if model_dir is None:
+        model_dir = run_dir / "final_model"
+        if not model_dir.exists():
+            raise FileNotFoundError(f"Phase B final_model directory not found: {model_dir}")
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     effective_mode = str(manifest.get("effective_training_mode", "")).strip().lower()
@@ -139,15 +165,15 @@ def _resolve_eval_model_paths(args: argparse.Namespace) -> tuple[str, Path | Non
     if base_model_path == "":
         raise ValueError(f"Missing `model_path` in Phase B manifest: {manifest_path}")
 
-    adapter_config = final_model_dir / "adapter_config.json"
+    adapter_config = model_dir / "adapter_config.json"
     if effective_mode == "peft":
         if not adapter_config.exists():
             raise FileNotFoundError(
                 f"Expected adapter_config.json for PEFT run: {adapter_config}"
             )
-        return base_model_path, final_model_dir
+        return base_model_path, model_dir
 
-    return str(final_model_dir), None
+    return str(model_dir), None
 
 
 def main() -> int:

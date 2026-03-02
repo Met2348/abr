@@ -55,40 +55,35 @@ New BCR/ABR implementation work should go to new Phase B+ scripts/modules.
 
 ---
 
-## 0.2 Phase A -> Phase B Handoff Gate (Commit-Time)
+## 0.2 Current Real Priorities (2026-03-03)
 
-Use this as the final pre-Phase-B gate before committing Phase A baseline.
+This is the operational priority list now. Earlier generic checklists below should
+be read in this order.
 
-### Baseline Freeze Items
+1. Freeze Phase B PEFT conclusions:
+   - StrategyQA PEFT is stable and positive.
+   - GSM8K full long-CoT PEFT suffers late-run drift and should use checkpoint selection, not final-checkpoint reporting.
+2. Build the first unique-method layer:
+   - prefix-level value targets,
+   - value-head calibration,
+   - corruption sensitivity.
+3. Build BCR-lite on top of the value head:
+   - `L_sft + lambda_B * L_Bellman`,
+   - optional calibration / contrastive terms only after value bootstrap works.
+4. Build ABR-lite before any RL:
+   - heuristic `gen / ver / fin` router,
+   - explicit verification budget,
+   - logged action traces.
+5. Only then build RL:
+   - router-only RL first,
+   - freeze LM and value head initially,
+   - do not jointly train LM + value + router at the start.
 
-- [ ] Freeze and record StrategyQA baselines in docs:
-  - binary-choice decision-quality baseline,
-  - freeform end-to-end baseline.
-- [ ] Freeze and record GSM8K baselines in docs:
-  - direct math baseline,
-  - CoT math baseline (with current evaluator semantics).
-- [ ] Confirm evaluator/template/decode versions are explicitly listed in baseline notes.
-
-### Reproducibility Gate
-
-- [ ] Run at least one reproducibility pair for StrategyQA direct baseline.
-- [ ] Run at least one reproducibility pair for batched StrategyQA baseline.
-- [ ] Run at least one reproducibility pair for GSM8K direct baseline.
-- [ ] Ensure run diffs show deterministic parity (`changed_samples=0`) where expected.
-
-### Artifact Integrity Gate
-
-- [ ] Every frozen baseline run has:
-  - `manifest.json`,
-  - `metrics.json`,
-  - persisted `console.log`.
-- [ ] Metrics include evaluator version information.
-- [ ] Prepared artifacts have no duplicate sample IDs.
-
-### Change-Control Gate
-
-- [ ] Mark `scripts/phase_a_*` as frozen reference scripts for early Phase B.
-- [ ] Route new BCR/ABR training logic to Phase B modules/scripts only.
+Immediate no-go rules:
+1. No router RL on GSM8K first.
+2. No joint LM/value/router RL as the first RL experiment.
+3. No naive clipped short-CoT supervision reuse for GSM8K.
+4. No final-checkpoint reporting on GSM8K when checkpoint sweep data exists.
 
 ---
 
@@ -106,11 +101,11 @@ Lifecycle checklist:
   - PEFT-first path selected,
   - first milestone task and artifact set frozen,
   - evaluation/reporting contract frozen.
-- [ ] `B1` Train Pipeline Skeleton (code implemented; smoke exit gate pending)
-- [ ] `B2` Data Contract Wiring
-- [ ] `B3` Smoke Stability
-- [ ] `B4` Development Tuning
-- [ ] `B5` First Official SFT/PEFT Run
+- [x] `B1` Train Pipeline Skeleton
+- [x] `B2` Data Contract Wiring
+- [x] `B3` Smoke Stability
+- [x] `B4` Development Tuning
+- [x] `B5` First Official SFT/PEFT Run
 - [ ] `B6` Handoff to next stage (value-head/BCR-lite expansion)
 
 Phase B first-run target (frozen in B0):
@@ -163,71 +158,54 @@ ref/
     eval/
     experiments/
   scripts/
-    check_env.py
     check_data.py
     preprocess_steps.py
-    train_sft.py
-    train_value.py
-    train_ours_lite.py
-    train_ours_rl.py
-    eval_all.py
-    run_ablation.py
+    phase_a_*.py
+    phase_b_train_sft.py
+    phase_b_eval.py
+    phase_b_compare_eval.py
+    phase_b_checkpoint_sweep.py
+    phase_b_train_value.py          # next
+    phase_b_eval_faithfulness.py    # next
+    phase_b_train_bcr_lite.py       # next
+    phase_b_run_abr_lite.py         # next
+    phase_b_train_abr_rl.py         # later
   src/
     ours/
       data/
         schema.py
-        registry.py
         loaders.py
         step_builder.py
-        corruptions.py
-      models/
-        lm_backbone.py
-        value_head.py
-        reasoning_model.py
-      router/
-        action_space.py
-        heuristic_policy.py
-        router_model.py
-        tss.py
-        rewards.py
-      losses/
-        sft.py
-        value_temporal.py
-        value_calibration.py
-        contrastive.py
-      training/
-        common.py
-        sft_trainer.py
-        value_trainer.py
-        ours_lite_trainer.py
-        ours_rl_trainer.py
-      eval/
-        accuracy.py
-        calibration.py
-        corruption_auc.py
-        efficiency.py
-        reporting.py
-      utils/
-        seed.py
-        logging.py
-        io.py
-        checkpoint.py
+      phase_a/
+        prompt_builder.py
+        evaluator.py
+        answer_extraction.py
+      phase_b/
+        contracts.py
+        data.py
+        supervision.py
+        value_head.py               # next
+        value_targets.py            # next
+        value_losses.py             # next
+        corruptions.py              # next
+        faithfulness_eval.py        # next
+        action_space.py             # next
+        heuristic_router.py         # next
+        tss.py                      # next
+        router_model.py             # later
+        rewards.py                  # later
   tests/
     unit/
-    integration/
-    regression/
   docs/
     method_v1.md
-    setup.md
-    experiments.md
-    troubleshooting.md
   TODO.md
   TODO_ours.md
 ```
 
 Definition of done:
 - [ ] Import check passes: `python -c "import ours"`.
-- [ ] Script skeletons exist and parse CLI args.
+- [x] Current Phase A/Phase B scripts parse CLI args.
+- [ ] Next-phase value / BCR / ABR scripts exist and parse CLI args.
 
 ---
 
@@ -324,256 +302,319 @@ Definition of done:
 
 ---
 
-## 7. Phase O3: In-House Baselines (No External Code)
+## 7. Phase O3: Baseline Layer (Current Reality)
 
-We must build reference baselines ourselves for fair comparison.
+This layer is already largely implemented.
 
-### Baseline B0: SFT Only
+### What Is Done
 
-- [ ] Implement SFT trainer (`sft_trainer.py`).
-- [ ] Train/eval on GSM8K smoke split.
+- [x] Phase A benchmark/eval stack exists and is frozen as reference.
+- [x] Phase B SFT/PEFT trainer exists:
+  - `scripts/phase_b_train_sft.py`
+- [x] Phase B eval bridge exists:
+  - `scripts/phase_b_eval.py`
+- [x] Before/after gain comparison exists:
+  - `scripts/phase_b_compare_eval.py`
+- [x] GSM8K checkpoint sweep exists:
+  - `scripts/phase_b_checkpoint_sweep.py`
+- [x] StrategyQA and GSM8K PEFT baselines have been run and diagnosed.
 
-### Baseline B1: SFT + Value Temporal Regularization
+### What Still Matters Here
 
-- [ ] Implement temporal consistency loss in `value_temporal.py`.
-- [ ] Add optional stop-gradient target mode.
-- [ ] Integrate as weighted auxiliary loss.
-
-### Baseline B2: Fixed Verify Schedule
-
-- [ ] Implement fixed strategy (`gen,gen,gen,ver` pattern).
-- [ ] Use as non-learned control baseline.
-
-### Acceptance Criteria
-
-- [ ] B0/B1/B2 all runnable via scripts + configs.
-- [ ] Outputs comparable metrics in common report format.
+- [ ] Freeze one official StrategyQA PEFT checkpoint policy:
+  - `rank 32` as best-quality,
+  - `rank 16` as efficiency default.
+- [ ] Freeze one official GSM8K policy:
+  - held-out checkpoint selection instead of final-checkpoint reporting.
+- [ ] Record the combined GSM8K repair result after it finishes:
+  - `B2_GSM8K_REPAIR_ANSWER_WEIGHTED_CKPT`
 
 ---
 
-## 8. Phase O4: OURS-LITE (Heuristic Router First)
+## 8. Phase O4: Value-Head Bootstrap (Next Priority)
 
-This is the first official implementation of our method family.
+This is the real start of the unique BCR/ABR work.
 
-### Tasks
+### Core principle
 
-- [ ] Define action space in `action_space.py`.
-- [ ] Implement heuristic router in `heuristic_policy.py`:
+Do **not** start with Bellman-only self-supervision and do **not** start with RL.
+Bootstrap the value head from empirical prefix targets first.
+
+### Training order
+
+1. Freeze the LM backbone initially.
+2. Build step prefixes from `src/ours/data/step_builder.py`.
+3. For each prefix `h_t`, estimate value target with rollout success:
+   - sample `K` continuations,
+   - compute final-answer correctness rate,
+   - use that empirical rate as `v_hat(h_t)`.
+4. Add corrupted-prefix contrastive supervision:
+   - clean prefix should score higher than minimally corrupted prefix.
+5. Only after the value head is non-random, add Bellman-style regularization.
+
+### Concrete implementation tasks
+
+- [ ] Add `src/ours/phase_b/value_head.py`
+  - bounded scalar head `V(h_t) in [0,1]`
+- [ ] Add `src/ours/phase_b/value_targets.py`
+  - rollout-based prefix target generation
+- [ ] Add `src/ours/phase_b/corruptions.py`
+  - minimal semantic perturbations on step prefixes
+- [ ] Add `src/ours/phase_b/value_losses.py`
+  - calibration MSE
+  - contrastive margin loss
+  - Bellman loss with stop-gradient target
+- [ ] Add `scripts/phase_b_train_value.py`
+  - train value head with frozen backbone
+- [ ] Add `scripts/phase_b_eval_faithfulness.py`
+  - calibration
+  - corruption AUC
+  - value-drop localization
+
+### Dataset priority
+
+1. StrategyQA first
+2. GSM8K second
+
+Reason:
+- StrategyQA PEFT backbone is stable.
+- GSM8K still has long-CoT drift and checkpoint sensitivity.
+
+### Exit gates
+
+- [ ] Value head beats trivial baselines on calibration.
+- [ ] Corruption AUC is clearly above random.
+- [ ] Value drops localize around corrupted steps better than untrained value head.
+
+---
+
+## 9. Phase O5: BCR-Lite (Joint LM + Value, No Router RL)
+
+This is the first real BCR-style training baseline.
+
+### Objective
+
+Use:
+- `L_sft`
+- `+ lambda_B * L_Bellman`
+- optionally later:
+  - calibration loss
+  - corruption contrastive loss
+
+### Implementation tasks
+
+- [ ] Add `scripts/phase_b_train_bcr_lite.py`
+- [ ] Add config family for:
+  - StrategyQA smoke
+  - StrategyQA full
+  - GSM8K smoke only after StrategyQA stabilizes
+- [ ] Add Bellman target mode with stop-gradient
+- [ ] Add optional target-network / EMA support if Bellman training is unstable
+- [ ] Add before/after BCR-lite eval bridge using frozen Phase A protocol plus faithfulness metrics
+
+### Comparison set
+
+- [ ] PEFT baseline
+- [ ] value-head-only baseline
+- [ ] BCR-lite
+
+### Exit gates
+
+- [ ] BCR-lite trains end-to-end on StrategyQA subset without NaN/divergence.
+- [ ] BCR-lite preserves answer accuracy within acceptable range.
+- [ ] BCR-lite improves at least one faithfulness metric:
+  - calibration,
+  - corruption AUC,
+  - or localization.
+
+---
+
+## 10. Phase O6: ABR-Lite (Heuristic Router, No RL)
+
+This stage adds the unique step-level control behavior without RL instability.
+
+### Action semantics
+
+- `gen`: generate next reasoning step
+- `ver`: perform verification against a historical anchor
+- `fin`: stop and answer
+
+### Implementation tasks
+
+- [ ] Add `src/ours/phase_b/action_space.py`
+- [ ] Add `src/ours/phase_b/heuristic_router.py`
   - uncertainty threshold
-  - value-change threshold
-  - max-step and stop rules
-- [ ] Implement TSS in `tss.py`:
-  - choose anchor from prior steps
-  - compute verification consistency against anchor
-- [ ] Integrate action loop into trainer/inference.
+  - value-drop threshold
+  - max-step rule
+  - finish rule
+- [ ] Add `src/ours/phase_b/tss.py`
+  - target-step / anchor selection
+- [ ] Add `scripts/phase_b_run_abr_lite.py`
+- [ ] Log action traces per sample
+- [ ] Add fixed-verify baseline for comparison
 
-### Acceptance Criteria
+### Exit gates
 
-- [ ] Action traces are logged per sample.
-- [ ] Hard samples use `ver` more frequently than easy samples.
-- [ ] Better efficiency-faithfulness tradeoff than B2 on smoke benchmark.
+- [ ] Hard samples trigger `ver` more often than easy samples.
+- [ ] Verification rate stays within explicit budget.
+- [ ] Heuristic ABR shows a better faithfulness/efficiency frontier than fixed verification schedule.
 
 ---
 
-## 9. Phase O5: OURS-RL (Learned Router)
+## 11. Phase O7: OURS-RL (Learned Router)
 
-Only start after O4 is stable.
+Only start after O6 is stable.
 
-### Tasks
+### Non-negotiable training rule
 
-- [ ] Implement router model (`router_model.py`).
-- [ ] Implement reward module (`rewards.py`):
+Start with **router-only RL**.
+Freeze LM and value head initially.
+
+Do not start with:
+- joint LM + value + router RL
+- GSM8K as the first RL task
+
+### Implementation tasks
+
+- [ ] Add `src/ours/phase_b/router_model.py`
+- [ ] Add `src/ours/phase_b/rewards.py`
   - correctness reward
   - verify penalty
   - token/compute penalty
-  - optional smoothness term
-- [ ] Implement RL trainer (`ours_rl_trainer.py`), start simple.
-- [ ] Add constrained optimization mode (verification budget).
-- [ ] Add anti-hacking diagnostics (always-gen and always-ver detectors).
+- [ ] Add `scripts/phase_b_train_abr_rl.py`
+- [ ] Start with REINFORCE / simple actor-critic, not heavy PPO by default
+- [ ] Add anti-hacking diagnostics:
+  - always-gen detector
+  - always-ver detector
+  - premature-fin detector
 
-### Acceptance Criteria
+### First RL target
 
-- [ ] Converges on smoke tasks without policy collapse.
-- [ ] Improves at least one frontier point (accuracy vs cost or faithfulness vs cost).
-- [ ] Results replicate across at least 2 seeds.
+- [ ] StrategyQA first
+- [ ] GSM8K only after router learning is stable on StrategyQA
+
+### Exit gates
+
+- [ ] Router policy trains without collapse on StrategyQA smoke/full subset.
+- [ ] Improves at least one frontier:
+  - accuracy vs compute
+  - faithfulness vs compute
+- [ ] Repeats across at least 2 seeds.
 
 ---
 
-## 10. Phase O6: Evaluation System (Core to Paper Credibility)
+## 12. Evaluation System (Unique-Method Credibility)
 
-### Required Metrics
+### Required metrics
 
 - [ ] Accuracy
-- [ ] Calibration (Brier, optional ECE)
+- [ ] Calibration:
+  - Brier
+  - optional ECE
 - [ ] Corruption detection AUC
 - [ ] Value-drop localization
-- [ ] Efficiency (tokens, steps, verify count, wall time)
+- [ ] Efficiency:
+  - tokens
+  - reasoning steps
+  - verify count
+  - wall time
 
 ### Tasks
 
-- [ ] Implement metric modules in `src/ours/eval/`.
-- [ ] Implement unified reporting (`reporting.py`) producing:
-  - JSON for machine parsing
-  - Markdown summary table
-- [ ] Add `scripts/eval_all.py` for one-command benchmark.
+- [ ] Add `src/ours/phase_b/faithfulness_eval.py`
+- [ ] Standardize JSON + Markdown reporting for:
+  - baseline PEFT
+  - value-head-only
+  - BCR-lite
+  - ABR-lite
+  - ABR-RL
+- [ ] Add one command that evaluates all methods under the same protocol
 
-### Acceptance Criteria
+### Exit gates
 
-- [ ] Identical eval pipeline across all baselines and ours.
-- [ ] Report reproducible under fixed seed.
-
----
-
-## 11. Phase O7: Ablations and Sensitivity
-
-### Required Ablations
-
-- [ ] Router off vs heuristic vs RL
-- [ ] TSS on/off
-- [ ] Verify penalty sweep
-- [ ] Temporal loss weight sweep
-- [ ] Dataset transfer (math -> commonsense)
-
-### Tasks
-
-- [ ] Implement experiment matrix configs.
-- [ ] Implement `run_ablation.py`.
-- [ ] Add summarizer for cross-run comparison.
-
-### Acceptance Criteria
-
-- [ ] Every claim in docs maps to at least one ablation result.
-- [ ] All plots/tables can be regenerated from run artifacts.
+- [ ] Same evaluation interface across all methods
+- [ ] Same seeds / decode settings / split definitions across comparisons
 
 ---
 
-## 12. Testing and CI Policy
+## 13. Testing and CI Policy
 
-### Unit Tests
+### Must-have unit tests
 
-- [ ] Data adapters
-- [ ] Step builder
-- [ ] Loss functions
-- [ ] Router action logic
-- [ ] Metrics correctness on synthetic fixtures
+- [ ] Prefix target generation
+- [ ] Corruption generation
+- [ ] Value loss functions
+- [ ] TSS anchor selection
+- [ ] Router action constraints
 
-### Integration Tests
+### Must-have integration tests
 
-- [ ] End-to-end smoke: data -> train -> eval (SFT baseline)
-- [ ] End-to-end smoke: ours-lite
+- [ ] value-head smoke run
+- [ ] BCR-lite smoke run
+- [ ] ABR-lite smoke run
 
-### Regression Tests
+### Existing useful checks
 
-- [ ] Metric schema compatibility checks
-- [ ] Checkpoint load compatibility
-
-### CI Commands
-
-- [ ] `python -m py_compile src scripts`
-- [ ] `pytest -q tests/unit`
-- [ ] optional nightly integration suite
+- [x] `python -m py_compile` is already used regularly
+- [x] targeted Phase A/Phase B tests already exist and should remain green
 
 ---
 
-## 13. Run Artifact Contract (Must Persist Per Run)
+## 14. Real Next-To-Do Sequence
 
-- [ ] `config.yaml`
-- [ ] `metrics.json`
-- [ ] `train.log`
-- [ ] checkpoint(s)
-- [ ] environment summary (package versions + CUDA)
-- [ ] random seed(s)
+Do these in order.
 
-Recommended layout:
+1. [ ] Finish the combined GSM8K repair run:
+   - `B2_GSM8K_REPAIR_ANSWER_WEIGHTED_CKPT`
+2. [ ] Freeze final Phase B baseline policy:
+   - StrategyQA best PEFT checkpoint
+   - GSM8K best-checkpoint policy
+3. [ ] Implement prefix-artifact generation for value training:
+   - step prefixes
+   - rollout targets
+   - corruption variants
+4. [ ] Implement `phase_b_train_value.py`
+5. [ ] Implement `phase_b_eval_faithfulness.py`
+6. [ ] Run first StrategyQA value-head smoke experiment
+7. [ ] Add Bellman loss and run first BCR-lite smoke experiment
+8. [ ] Implement heuristic ABR-lite router
+9. [ ] Only after that, implement router RL
 
-```text
-runs/
-  <run_id>/
-    config.yaml
-    env.json
-    metrics.json
-    train.log
-    checkpoints/
-    report.md
-```
-
----
-
-## 14. Re-Planned Route After Phase A (Actionable)
-
-### Stage B: BCR-Lite Build (Next Priority)
-
-1. [ ] Create `src/ours/models/`:
-   - `lm_backbone.py`,
-   - `value_head.py`,
-   - `reasoning_model.py`.
-2. [ ] Create `src/ours/losses/`:
-   - `sft.py`,
-   - `value_temporal.py` (Bellman-style),
-   - optional `value_calibration.py`.
-3. [ ] Create `src/ours/training/`:
-   - `common.py`,
-   - `sft_trainer.py`,
-   - `value_trainer.py`.
-4. [ ] Add new scripts:
-   - `scripts/phase_b_train_sft.py`,
-   - `scripts/phase_b_train_bcr_lite.py`,
-   - `scripts/phase_b_eval.py`.
-5. [ ] Run smoke training on small StrategyQA/GSM8K subsets and verify stability.
-
-### Stage C: Faithfulness Evaluation Completion
-
-1. [ ] Implement calibration metrics (Brier/ECE).
-2. [ ] Implement corruption generator + corruption AUC pipeline.
-3. [ ] Add a single eval report format for:
-   - accuracy,
-   - parse/compliance,
-   - calibration,
-   - corruption sensitivity,
-   - compute cost.
-
-### Stage D: ABR-Lite (Heuristic Router)
-
-1. [ ] Implement `gen/ver/fin` action loop with deterministic policy.
-2. [ ] Add verification budget controls and traces.
-3. [ ] Compare against BCR-lite under fixed compute budgets.
-
-### Stage E: ABR-RL (Final)
-
-1. [ ] Add learned router only after Stage D is stable.
-2. [ ] Use constrained reward design to prevent reward hacking.
-3. [ ] Require multi-seed replication before claiming gains.
-
-### Go/No-Go Gates
-
-1. Stage B cannot start large runs until smoke runs are stable and reproducible.
-2. Stage D cannot start until Stage C metrics are automated.
-3. Stage E cannot start until Stage D shows non-trivial frontier gains.
+If a decision is needed mid-way:
+- prefer StrategyQA over GSM8K for the first value/RL experiments
+- prefer frozen-backbone value training over joint training
+- prefer explicit metrics over “looks plausible” judgment
 
 ---
 
-## 15. Explicit Out-of-Scope Until O4 Complete
+## 15. Explicit Out-of-Scope Until Value Head Is Stable
 
-- Complex RL variants and advanced policy algorithms.
-- Multi-node/distributed scaling.
-- Over-optimization of long-tail metrics without baseline stability.
-- Heavy paper polishing before reproducible core results.
+- Joint LM + value + router RL
+- GSM8K-first RL
+- Complex PPO-style router optimization
+- Multi-agent variants
+- Advanced spectral smoothness objectives as primary loss
+- Mixed-data RL before single-task router behavior is understood
 
 ---
 
 ## 16. Milestone Success Criteria
 
-### MVP Success
+### Next milestone
 
-- [ ] In-house baselines and ours-lite all run end-to-end.
-- [ ] Ours-lite shows better faithfulness signal than SFT-only baseline.
-- [ ] Outputs are reproducible and reviewable.
+- [ ] Value-head training works on StrategyQA and produces non-trivial calibration/corruption signals
 
-### Extended Success
+### BCR-lite milestone
 
-- [ ] Learned router (ours-RL) beats fixed schedule on one frontier.
-- [ ] Multi-dataset evidence supports generality claim.
-- [ ] Artifact package is paper-ready (scripts + configs + reports).
+- [ ] BCR-lite preserves answer accuracy while improving at least one faithfulness metric
+
+### ABR-lite milestone
+
+- [ ] Heuristic router beats fixed verification schedule on one efficiency-faithfulness frontier
+
+### RL milestone
+
+- [ ] Learned router beats heuristic router on at least one constrained frontier
 
 ---
 

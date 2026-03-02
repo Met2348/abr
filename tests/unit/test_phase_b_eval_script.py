@@ -85,5 +85,38 @@ def test_resolve_eval_model_paths_rejects_dual_inputs(tmp_path: Path) -> None:
         ]
     )
 
-    with pytest.raises(ValueError, match="either --model-path or --phase-b-run-dir"):
+    with pytest.raises(ValueError, match="Use exactly one of"):
         module._resolve_eval_model_paths(args)
+
+
+def test_resolve_eval_model_paths_for_checkpoint_dir(tmp_path: Path) -> None:
+    module = _load_phase_b_eval_module()
+    run_dir = tmp_path / "phase_b_run"
+    checkpoint_dir = run_dir / "checkpoints" / "checkpoint-200"
+    checkpoint_dir.mkdir(parents=True)
+    (checkpoint_dir / "adapter_config.json").write_text(
+        json.dumps({"base_model_name_or_path": "assets/models/Qwen2.5-7B-Instruct"}),
+        encoding="utf-8",
+    )
+    (run_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "model_path": "assets/models/Qwen2.5-7B-Instruct",
+                "effective_training_mode": "peft",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    args = module.parse_args(
+        [
+            "--input-jsonl",
+            "validation.jsonl",
+            "--phase-b-checkpoint-dir",
+            str(checkpoint_dir),
+        ]
+    )
+
+    model_path, adapter_path = module._resolve_eval_model_paths(args)
+    assert model_path == "assets/models/Qwen2.5-7B-Instruct"
+    assert adapter_path == checkpoint_dir
