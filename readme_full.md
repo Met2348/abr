@@ -839,17 +839,42 @@ CUDA_VISIBLE_DEVICES=0 python -u scripts/phase_b_train_sft.py \
 
 ### 10.3 Evaluate a Phase B checkpoint with frozen Phase A protocol
 
-Use the final model directory from a Phase B run:
+Important:
+- `train_metrics.json` and `eval_metrics.json` from Phase B training are trainer-loss
+  metrics, not Phase A task-accuracy metrics.
+- To measure benchmark gain, re-run the frozen Phase A evaluator on the trained
+  Phase B artifact.
+- For PEFT runs, do not point Phase A directly at `final_model/` as if it were a
+  standalone full model; the bridge now resolves `base model + adapter` correctly.
+
+Recommended StrategyQA evaluation after training:
 
 ```bash
+# StrategyQA binary-choice decision-quality check
 CUDA_VISIBLE_DEVICES=0 python -u scripts/phase_b_eval.py \
+  --phase-b-run-dir assets/artifacts/phase_b_runs/<run_name_timestamp> \
   --input-jsonl assets/artifacts/phase_a_prepared/strategyqa/b0f373610f96/validation.jsonl \
-  --model-path assets/artifacts/phase_b_runs/<run_name_timestamp>/final_model \
-  --run-name phase_b_eval_strategyqa \
+  --run-name phase_b_eval_strategyqa_binchoice \
   --strategyqa-decode-mode binary_choice \
+  --max-new-tokens 16 \
+  --batch-size 4
+
+# StrategyQA end-to-end freeform check
+CUDA_VISIBLE_DEVICES=0 python -u scripts/phase_b_eval.py \
+  --phase-b-run-dir assets/artifacts/phase_b_runs/<run_name_timestamp> \
+  --input-jsonl assets/artifacts/phase_a_prepared/strategyqa/b0f373610f96/validation.jsonl \
+  --run-name phase_b_eval_strategyqa_freeform \
+  --strategyqa-decode-mode freeform \
   --max-new-tokens 32 \
   --batch-size 4
 ```
+
+How the bridge resolves artifacts:
+1. if the Phase B run was `peft`:
+   - base model comes from `manifest.json:model_path`
+   - adapter comes from `<run_dir>/final_model`
+2. if the Phase B run was `sft`:
+   - the bridge evaluates `<run_dir>/final_model` directly
 
 ### 10.4 Safety/Debug Notes
 
@@ -908,11 +933,25 @@ bash scripts/run_phase_b_training_suite.sh
 Supported groups:
 1. `B1_SMOKE` (default)
 2. `B1_FIRST`
+3. `B2_STRATEGYQA_FULL`
+4. `B2_GSM8K_FULL`
 
 Switch groups with env var:
 
 ```bash
 ACTIVE_PHASE_B_GROUP=B1_FIRST RUN_PREFIX=phase_b_first bash scripts/run_phase_b_training_suite.sh
+```
+
+Full-dataset gain runs:
+
+```bash
+ACTIVE_PHASE_B_GROUP=B2_STRATEGYQA_FULL \
+RUN_PREFIX=phase_b_strategyqa_full \
+bash scripts/run_phase_b_training_suite.sh
+
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_FULL \
+RUN_PREFIX=phase_b_gsm8k_full \
+bash scripts/run_phase_b_training_suite.sh
 ```
 
 Optional extra CLI args passthrough:
@@ -921,4 +960,73 @@ Optional extra CLI args passthrough:
 ACTIVE_PHASE_B_GROUP=B1_SMOKE \
 PHASE_B_EXTRA_ARGS="--max-train-samples 128 --max-eval-samples 32" \
 bash scripts/run_phase_b_training_suite.sh
+```
+
+### 10.5.1 What the Full-Dataset `B2_*` Groups Actually Do
+
+These groups are the first Phase B settings that answer the real project question:
+"How much benchmark gain does PEFT give compared with the frozen base model?"
+
+Flow:
+1. baseline eval on held-out splits with the frozen base model,
+2. full PEFT training on the full training split,
+3. post-train eval on the same held-out splits,
+4. gain analysis that computes per-split and aggregate deltas.
+
+Held-out focus:
+1. train split is used for training only,
+2. reportable gain is computed from validation + test,
+3. this avoids the common novice mistake of reporting training-set memorization as real improvement.
+
+Artifacts written by the suite:
+1. suite log:
+   - `assets/artifacts/phase_b_logs/<RUN_PREFIX>/suite.log`
+2. suite summary:
+   - `assets/artifacts/phase_b_logs/<RUN_PREFIX>/final_summary.md`
+3. gain summary:
+   - `assets/artifacts/phase_b_logs/<RUN_PREFIX>/peft_gain_summary.json`
+   - `assets/artifacts/phase_b_logs/<RUN_PREFIX>/peft_gain_summary.md`
+4. underlying evaluation runs:
+   - `assets/artifacts/phase_a_runs/<run_name>_pre_<split>_*/metrics.json`
+   - `assets/artifacts/phase_a_runs/<run_name>_post_<split>_*/metrics.json`
+5. training run:
+   - `assets/artifacts/phase_b_runs/<run_name>_*/`
+
+Dataset-specific defaults:
+1. `B2_STRATEGYQA_FULL`
+   - train input: `assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl`
+   - held-out eval inputs:
+     - `assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/validation.jsonl`
+     - `assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/test.jsonl`
+   - decode mode: `freeform`
+   - max new tokens: `96`
+2. `B2_GSM8K_FULL`
+   - train input: `assets/artifacts/phase_a_prepared/gsm8k/e3abe2fb9883/train.jsonl`
+   - held-out eval inputs:
+     - `assets/artifacts/phase_a_prepared/gsm8k/e3abe2fb9883/validation.jsonl`
+     - `assets/artifacts/phase_a_prepared/gsm8k/e3abe2fb9883/test.jsonl`
+   - decode mode: `freeform`
+   - max new tokens: `192`
+
+Useful overrides:
+
+```bash
+# faster/slower held-out eval batching
+PHASE_B_EVAL_BATCH_SIZE=8
+
+# extra eval flags forwarded into scripts/phase_a_generate_and_eval.py
+PHASE_B_EVAL_EXTRA_ARGS="--max-progress-lines 20 --log-every 25 --no-compare-latest-same-name"
+
+# extra training flags forwarded into scripts/phase_b_train_sft.py
+PHASE_B_EXTRA_ARGS="--num-train-epochs 2.0"
+```
+
+Standalone comparison script:
+
+```bash
+python -u scripts/phase_b_compare_eval.py \
+  --dataset strategyqa \
+  --phase-b-run-dir assets/artifacts/phase_b_runs/<phase_b_run_dir> \
+  --compare validation before_validation_metrics.json after_validation_metrics.json \
+  --compare test before_test_metrics.json after_test_metrics.json
 ```

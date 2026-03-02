@@ -1,6 +1,6 @@
 # Phase B Plan: From Phase A Baselines to First SFT/PEFT Run
 
-Last updated: 2026-02-28 02:35:00 +0800
+Last updated: 2026-03-02 10:15:00 +0800
 
 ## 0. Official Transition Notice
 
@@ -14,6 +14,7 @@ Operational policy:
 Immediate execution entrypoints:
 1. `scripts/run_phase_b_training_suite.sh` for one-click group runs (`B1_SMOKE`, `B1_FIRST`).
 2. `scripts/phase_b_train_sft.py --config-json ...` for direct training control.
+3. `scripts/phase_b_compare_eval.py` for explicit before/after PEFT gain reporting.
 
 ## 1. Phase B Mission
 
@@ -165,4 +166,11 @@ Each official run directory must include:
    - training script skeleton implemented (`scripts/phase_b_train_sft.py`),
    - evaluation bridge implemented (`scripts/phase_b_eval.py`),
    - starter configs added under `configs/phase_b/`.
-3. B1 exit gate is still pending until a tiny smoke run completes end-to-end.
+3. B1 smoke exit gate is satisfied: tiny PEFT smoke run completes end-to-end and writes checkpoints, metrics, and adapter artifacts.
+4. New B2-style full-dataset gain suites are now available:
+   - `B2_STRATEGYQA_FULL`
+   - `B2_GSM8K_FULL`
+5. These groups are designed to answer the milestone question in a reportable way:
+   - baseline held-out accuracy before PEFT,
+   - held-out accuracy after PEFT,
+   - absolute delta and correct-count delta in one summary.

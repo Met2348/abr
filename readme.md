@@ -129,6 +129,13 @@ Official Phase B kickoff (recommended):
 ACTIVE_PHASE_B_GROUP=B1_SMOKE RUN_PREFIX=phase_b_kickoff bash scripts/run_phase_b_training_suite.sh
 ```
 
+Full-dataset gain runs:
+
+```bash
+ACTIVE_PHASE_B_GROUP=B2_STRATEGYQA_FULL RUN_PREFIX=phase_b_strategyqa_full bash scripts/run_phase_b_training_suite.sh
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_FULL RUN_PREFIX=phase_b_gsm8k_full bash scripts/run_phase_b_training_suite.sh
+```
+
 Smoke training run:
 
 ```bash
@@ -147,6 +154,30 @@ Training suite:
 ```bash
 bash scripts/run_phase_b_training_suite.sh
 ```
+
+Full-dataset Phase B groups now run:
+1. held-out baseline eval with the frozen base model,
+2. whole-train-split PEFT training,
+3. held-out post-train eval with the saved adapter/model,
+4. one gain report that states the before/after delta.
+
+Post-train evaluation against frozen Phase A metrics:
+
+```bash
+python -u scripts/phase_b_eval.py \
+  --phase-b-run-dir assets/artifacts/phase_b_runs/<phase_b_run_dir> \
+  --input-jsonl assets/artifacts/phase_a_prepared/strategyqa/<prepared_dir>/validation.jsonl \
+  --run-name phase_b_eval_after_train \
+  --strategyqa-decode-mode binary_choice \
+  --max-new-tokens 16
+```
+
+This evaluates the trained Phase B artifact with the same Phase A benchmark logic,
+so you can compare post-train task accuracy against pre-train baselines.
+
+For the new `B2_*` groups, this comparison is automated and written to:
+- `assets/artifacts/phase_b_logs/<RUN_PREFIX>/peft_gain_summary.json`
+- `assets/artifacts/phase_b_logs/<RUN_PREFIX>/peft_gain_summary.md`
 
 ## Key Documentation
 

@@ -278,6 +278,15 @@ def parse_args() -> argparse.Namespace:
         help="Local HF model directory.",
     )
     parser.add_argument(
+        "--adapter-path",
+        type=Path,
+        default=None,
+        help=(
+            "Optional PEFT adapter directory to load on top of --model-path during "
+            "inference. Use this for Phase B LoRA evaluation."
+        ),
+    )
+    parser.add_argument(
         "--output-root",
         type=Path,
         default=Path("assets/artifacts/phase_a_runs"),
@@ -528,6 +537,7 @@ def main() -> int:
         print("=" * 88)
         print(f"input_jsonl : {args.input_jsonl}")
         print(f"model_path  : {args.model_path}")
+        print(f"adapter_path: {args.adapter_path if args.adapter_path is not None else '<none>'}")
         print(f"run_dir     : {run_dir}")
         print(f"seed        : {args.seed}")
         print(f"gen_config  : {asdict(gen_cfg)}")
@@ -565,7 +575,7 @@ def main() -> int:
             )
 
         # Stage 2: load prepared rows and optionally shrink them for a smoke run.
-        rows = _load_prepared_rows(args.input_jsonl)
+        rows = _load_prepared_rows(args.input_jsonl) # 初次定义rows，调用了上面定义的_load_prepared_rows函数，输入是之前准备好的jsonl文件路径，输出是一个字典列表，每个字典对应jsonl文件中的一行，包含sample_id、dataset、split、prompt_text、answer、question等键值对
         if args.max_samples is not None:
             rows = rows[: args.max_samples]
         print(f"num_inputs  : {len(rows)}")
@@ -574,13 +584,25 @@ def main() -> int:
         _configure_transformers_progress_bar(disable=True)
         load_start = time.perf_counter()
         print("model_load  : start")
-        tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=False)
+        tokenizer_load_path = _resolve_tokenizer_load_path(
+            model_path=args.model_path,
+            adapter_path=args.adapter_path,
+        )
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_load_path,
+            trust_remote_code=False,
+        )
         model = AutoModelForCausalLM.from_pretrained(
             args.model_path,
             dtype=_resolve_dtype(args.dtype, torch_module=torch),
             device_map=args.device_map,
             trust_remote_code=False,
         )
+        if args.adapter_path is not None:
+            model = _attach_peft_adapter_for_inference(
+                model=model,
+                adapter_path=args.adapter_path,
+            )
         load_elapsed = int(time.perf_counter() - load_start)
         print(f"model_load  : done in {_fmt_seconds(load_elapsed)}")
         model.eval()
@@ -668,6 +690,7 @@ def main() -> int:
             "run_name": args.run_name,
             "input_jsonl": str(args.input_jsonl),
             "model_path": args.model_path,
+            "adapter_path": str(args.adapter_path) if args.adapter_path is not None else None,
             "seed": args.seed,
             "dtype": args.dtype,
             "device_map": args.device_map,
@@ -786,7 +809,62 @@ def _resolve_dtype(dtype_name: str, torch_module: Any):
     raise ValueError(f"Unsupported dtype: {dtype_name}")
 
 
-def _load_prepared_rows(path: Path) -> list[dict[str, Any]]:
+def _resolve_tokenizer_load_path(model_path: str, adapter_path: Path | None) -> str:
+    """Choose which directory should supply tokenizer files for inference.
+
+    For PEFT runs we prefer the adapter directory when it contains tokenizer files,
+    because Phase B saves tokenizer assets alongside the adapter.
+
+    Example
+    -------
+    ```python
+    tokenizer_path = _resolve_tokenizer_load_path(
+        model_path="assets/models/Qwen2.5-7B-Instruct",
+        adapter_path=Path("assets/artifacts/phase_b_runs/run/final_model"),
+    )
+    ```
+    """
+    if adapter_path is None:
+        return str(model_path)
+    if (adapter_path / "tokenizer_config.json").exists():
+        return str(adapter_path)
+    return str(model_path)
+
+
+def _attach_peft_adapter_for_inference(model: Any, adapter_path: Path):
+    """Load a PEFT adapter onto an already-loaded base model for inference.
+
+    Parameters
+    ----------
+    model:
+        Base causal LM loaded from `--model-path`.
+    adapter_path:
+        Directory containing PEFT adapter files such as `adapter_config.json`.
+
+    Returns
+    -------
+    Any
+        Adapter-wrapped model ready for evaluation.
+
+    Example
+    -------
+    ```python
+    model = _attach_peft_adapter_for_inference(model, Path("run_dir/final_model"))
+    ```
+    """
+    if not adapter_path.exists():
+        raise FileNotFoundError(f"Adapter path not found: {adapter_path}")
+    try:
+        from peft import PeftModel  # type: ignore
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "Failed to import `peft` while loading --adapter-path for inference. "
+            "Install `peft` in the active environment."
+        ) from exc
+    return PeftModel.from_pretrained(model, str(adapter_path))
+
+
+def _load_prepared_rows(path: Path) -> list[dict[str, Any]]: #这个函数产生后面要切分的rows这个关键变量
     """Load and validate prepared Phase A rows from JSONL.
 
     This function is strict about missing keys and duplicate `sample_id` values
@@ -796,6 +874,7 @@ def _load_prepared_rows(path: Path) -> list[dict[str, Any]]:
     -------
     ```python
     rows = _load_prepared_rows(Path("validation.jsonl"))
+    The absolute 'path' example: '/home/zling/y/bcr/ref/assets/artifacts/phase_a_prepared/strategyqa/ef2ae6864f9c/validation.jsonl'
     ```
     """
     if not path.exists():
@@ -809,9 +888,9 @@ def _load_prepared_rows(path: Path) -> list[dict[str, Any]]:
             "If you used an env var, verify it with: echo \"$INPUT_JSONL\"."
         )
 
-    rows: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = [] # 事实上， rows的格式在这里就已经被预定义， 即一个列表，列表中的每个元素都是一个字典，字典中必须包含sample_id、dataset、split、prompt_text、answer、question等键值对，这些键值对在后续的代码中会被直接访问和使用，所以这里的格式定义非常重要，后续的代码才能正确运行
     seen_sample_ids: set[str] = set()
-    with path.open("r", encoding="utf-8") as f:
+    with path.open("r", encoding="utf-8") as f: # 注意， 这个helper函数本质上是一个打开文件然后读取里面内容并返回为对应行的功能，而它完全受其参数path的支配。所以path必须配置对;f的类型是TextIO，全称为_io.TextIOWrapper 也就是一个文本文件的输入输出流对象， 通过这个对象可以读取文件内容， 这里使用了with语句来确保文件在使用完毕后正确关闭， 避免资源泄露等问题。 之后的代码块就是在这个打开的文件对象f上进行enumerate操作， 当成是一个list[str]来遍历并逐行读取每一行的内容。
         for idx, line in enumerate(f, start=1):
             if line.strip() == "":
                 continue
@@ -822,7 +901,7 @@ def _load_prepared_rows(path: Path) -> list[dict[str, Any]]:
                     f"Invalid JSONL row at line={idx} in {path}: {exc}"
                 ) from exc
             required = ["sample_id", "dataset", "split", "prompt_text", "answer", "question"]
-            missing = [k for k in required if k not in row]
+            missing = [k for k in required if k not in row] #这里本质上是在对输入的文件当中的每一行进行检查，确保它们都包含了sample_id、dataset、split、prompt_text、answer、question这几个关键字段，如果任何一行只要缺少了其中任何一个字段，就会被记录在missing这个列表当中，最后如果missing列表只要不为空，就会抛出一个KeyError异常，这个异常没有被捕获会直接终止， 这会保证训练的数据是完整的， 不会出现问题， 是一种“零容忍”
             if missing:
                 raise KeyError(f"Missing keys {missing} at line={idx} in {path}")
             sample_id = str(row["sample_id"])
@@ -831,7 +910,7 @@ def _load_prepared_rows(path: Path) -> list[dict[str, Any]]:
                     f"Duplicate sample_id={sample_id!r} at line={idx} in {path}. "
                     "Prepared input must have unique sample IDs for trustworthy metrics."
                 )
-            seen_sample_ids.add(sample_id)
+            seen_sample_ids.add(sample_id) #这里是另外一层安全网，防止添加重复的训练片段， 这里把已经看到的sample_id记录在seen_sample_ids这个集合当中，如果再次看到相同的sample_id，就会抛出一个ValueError异常，这也是一种“零容忍”，保证了训练数据的唯一性和完整性
             rows.append(row)
     return rows
 
@@ -856,19 +935,19 @@ def _create_vram_tracker(torch_module: Any) -> dict[str, Any] | None:
     - We sample memory once per processed batch to estimate mean/max usage.
     - We also reset CUDA peak stats so per-device peaks are generation-scoped.
     """
-    cuda = getattr(torch_module, "cuda", None)
-    if cuda is None or not cuda.is_available():
+    cuda = getattr(torch_module, "cuda", None) #尝试获取torch的cuda状态
+    if cuda is None or not cuda.is_available(): #不支持cuda就自然不跟踪其VRAM状态
         return None
 
-    device_count = int(cuda.device_count())
-    devices: list[dict[str, Any]] = []
-    for device_index in range(device_count):
+    device_count = int(cuda.device_count()) #cuda设备的总数， 在后面拿来用于对get_device_name里面拿来遍历， 以获取每个设备的情况
+    devices: list[dict[str, Any]] = [] #读取的cuda设备信息的结果列表，用来装读取到的信息
+    for device_index in range(device_count): #遍历每个cuda设备
         try:
-            device_name = str(cuda.get_device_name(device_index))
+            device_name = str(cuda.get_device_name(device_index)) #有名称的就直接用名称称呼， 没名称的就用序号称呼
         except Exception:
             device_name = f"cuda:{device_index}"
         try:
-            cuda.reset_peak_memory_stats(device_index)
+            cuda.reset_peak_memory_stats(device_index) #这个函数是拿来重置峰值显存用量记录，是个“去皮操作”，把目前已有的显存占用情况记为新的零点，这样即可获知后续本进程真实的额外显存占用情况
         except Exception:
             # Some backends may not support peak reset; continue with sampled stats.
             pass
@@ -1046,7 +1125,7 @@ def _run_generation(
         raise ValueError(f"--max-progress-lines must be >= 1, got {max_progress_lines}")
     if batch_size <= 0:
         raise ValueError(f"--batch-size must be >= 1, got {batch_size}")
-    if truncation_recovery_cfg is None:
+    if truncation_recovery_cfg is None: # set default truncation recovery config if not provided
         truncation_recovery_cfg = TruncationRecoveryConfig(
             enabled=False,
             max_rounds=0,
@@ -1065,6 +1144,7 @@ def _run_generation(
             f"got {truncation_recovery_cfg.extra_tokens_per_round}"
         )
 
+    # set default pad_id to eos_token_id if pad_token_id is not set, because some tokenizers don't have a pad token，调试看到的默认值：151643
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
     total = len(rows)
     start_ts = time.perf_counter()
@@ -1075,19 +1155,19 @@ def _run_generation(
         log_every=log_every,
         max_progress_lines=max_progress_lines,
         )
-    )
+    ) # 用于控制生成进度日志的输出频率和格式
     checkpoint_idx = 0
     oom_backoff_events = 0
     truncation_recovery_rows = 0
     truncation_recovery_rounds = 0
-    vram_tracker = _create_vram_tracker(torch_module=torch_module)
+    vram_tracker = _create_vram_tracker(torch_module=torch_module) # 用于监视显存情况
     _sample_vram_tracker(vram_tracker=vram_tracker, torch_module=torch_module)
 
-    with output_path.open("w", encoding="utf-8") as fout:
+    with output_path.open("w", encoding="utf-8") as fout: #打开一个文件，准备记录实验的生成情况，调试看到它是每次run里面的predictions.jsonl
         done = 0
-        for batch_start in range(0, total, batch_size):
+        for batch_start in range(0, total, batch_size): #根据batchsize切分定位每个batch的起点和终点index， 然后作为切片依据，用于切分rows，其中total是从输入的jsonl里面读取的行数目
             batch_end = min(batch_start + batch_size, total)
-            batch_rows = rows[batch_start:batch_end]
+            batch_rows = rows[batch_start:batch_end] #如果batch设置为1，则这个所谓的batchrows里面就只会含有一行
 
             # Keep row order fully deterministic even if we process via mixed routes.
             batch_results: list[dict[str, Any] | None] = [None] * len(batch_rows)

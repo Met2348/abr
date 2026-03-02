@@ -434,3 +434,32 @@ def test_compare_metrics_marks_evaluator_version_mismatch(tmp_path: Path) -> Non
     )
     assert comparison["evaluator_version_match"] is False
     assert "mismatch" in str(comparison["comparison_caution"]).lower()
+
+
+def test_resolve_tokenizer_load_path_prefers_adapter_when_tokenizer_files_exist(
+    tmp_path: Path,
+) -> None:
+    module = _load_phase_a_generate_module()
+    adapter_dir = tmp_path / "adapter"
+    adapter_dir.mkdir()
+    (adapter_dir / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+
+    out = module._resolve_tokenizer_load_path(
+        model_path="assets/models/Qwen2.5-7B-Instruct",
+        adapter_path=adapter_dir,
+    )
+    assert out == str(adapter_dir)
+
+
+def test_resolve_tokenizer_load_path_falls_back_to_model_path_without_tokenizer_files(
+    tmp_path: Path,
+) -> None:
+    module = _load_phase_a_generate_module()
+    adapter_dir = tmp_path / "adapter"
+    adapter_dir.mkdir()
+
+    out = module._resolve_tokenizer_load_path(
+        model_path="assets/models/Qwen2.5-7B-Instruct",
+        adapter_path=adapter_dir,
+    )
+    assert out == "assets/models/Qwen2.5-7B-Instruct"

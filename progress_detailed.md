@@ -2,6 +2,100 @@
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
 
+## 2026-03-02 10:15:00 +08 (+0800)
+- Type: Phase B Full-Dataset Gain Suite / Automatic Before-vs-After PEFT Reporting
+- Summary: Upgraded the Phase B suite from train-only orchestration to full experiment orchestration that can measure benchmark gain on held-out splits before and after PEFT for full StrategyQA and GSM8K runs.
+- Details:
+  - Problem:
+    - existing `B1_*` groups only trained and wrote trainer-loss artifacts,
+    - users still had to run baseline eval and post-train eval manually,
+    - there was no single report showing whether PEFT improved benchmark accuracy.
+  - Solution scope:
+    - add full-dataset Phase B groups for StrategyQA and GSM8K,
+    - run frozen Phase A benchmark eval on held-out splits before training,
+    - run the same benchmark eval after training,
+    - aggregate the deltas into one markdown/json gain report.
+  - Implemented:
+    - new full-dataset configs:
+      - `configs/phase_b/peft_full_strategyqa_cot.json`
+      - `configs/phase_b/peft_full_gsm8k_cot.json`
+    - new comparison script:
+      - `scripts/phase_b_compare_eval.py`
+      - compares pre/post `metrics.json` pairs,
+      - computes split-wise deltas and held-out aggregate gain.
+    - upgraded suite launcher:
+      - `scripts/run_phase_b_training_suite.sh`
+      - added groups:
+        - `B2_STRATEGYQA_FULL`
+        - `B2_GSM8K_FULL`
+      - added automatic baseline eval, post-train eval, and gain-summary generation.
+    - added unit tests:
+      - `tests/unit/test_phase_b_compare_eval.py`
+    - updated docs:
+      - `readme.md`
+      - `readme_full.md`
+      - `phase_B_plan.md`
+- Validation:
+  - pending runtime validation in this turn after doc updates.
+- Files changed:
+  - `progress_detailed.md`
+  - `scripts/run_phase_b_training_suite.sh`
+  - `scripts/phase_b_compare_eval.py`
+  - `configs/phase_b/peft_full_strategyqa_cot.json`
+  - `configs/phase_b/peft_full_gsm8k_cot.json`
+  - `tests/unit/test_phase_b_compare_eval.py`
+  - `readme.md`
+  - `readme_full.md`
+  - `phase_B_plan.md`
+- Breaking changes:
+  - `scripts/run_phase_b_training_suite.sh` now has additional named groups and may run pre/post benchmark eval automatically for the `B2_*` groups.
+
+## 2026-03-01 21:48:00 +08 (+0800)
+- Type: Phase B Evaluation Bridge Upgrade / PEFT Adapter Re-evaluation Support
+- Summary: Added the missing bridge needed to re-evaluate trained Phase B PEFT outputs on Phase A benchmark datasets, so post-train task accuracy can now be measured instead of only training/eval loss.
+- Details:
+  - Problem:
+    - current Phase B groups only launch one training run per group,
+    - the stored `eval_metrics.json` in Phase B is trainer loss on validation rows, not Phase A task accuracy,
+    - PEFT runs save adapter-only artifacts, but the previous evaluation bridge only forwarded one `--model-path`, so it could not correctly load `base model + adapter`.
+  - Solution scope:
+    - extend `scripts/phase_a_generate_and_eval.py` to support inference with an optional adapter path,
+    - extend `scripts/phase_b_eval.py` to resolve a finished Phase B run directory into either:
+      - full fine-tuned model path, or
+      - base model path + adapter path for PEFT runs,
+    - document the recommended re-evaluation commands in the READMEs.
+  - Implemented:
+    - `scripts/phase_a_generate_and_eval.py`
+      - added `--adapter-path`,
+      - added tokenizer-load-path resolution for PEFT artifacts,
+      - added adapter attachment helper for inference,
+      - persisted adapter path into run manifests.
+    - `scripts/phase_b_eval.py`
+      - added `--phase-b-run-dir`,
+      - added run-manifest/final-model resolution logic,
+      - now auto-resolves:
+        - PEFT run -> base model + adapter,
+        - SFT run -> full saved model directory.
+    - Added targeted tests:
+      - `tests/unit/test_phase_b_eval_script.py`
+      - extended `tests/unit/test_phase_a_generate_script.py`
+    - Updated docs:
+      - `readme.md`
+      - `readme_full.md`
+- Validation:
+  - `python -m py_compile scripts/phase_a_generate_and_eval.py scripts/phase_b_eval.py tests/unit/test_phase_a_generate_script.py tests/unit/test_phase_b_eval_script.py` passed.
+  - `python -m pytest -q tests/unit/test_phase_a_generate_script.py tests/unit/test_phase_b_eval_script.py tests/unit/test_phase_b_train_script.py` passed (`17 passed`).
+- Files changed:
+  - `progress_detailed.md`
+  - `scripts/phase_a_generate_and_eval.py`
+  - `scripts/phase_b_eval.py`
+  - `tests/unit/test_phase_a_generate_script.py`
+  - `tests/unit/test_phase_b_eval_script.py`
+  - `readme.md`
+  - `readme_full.md`
+- Breaking changes:
+  - None.
+
 ## 2026-02-28 20:11:19 +08 (+0800)
 - Type: Phase A Documentation Sweep / Core Runtime Readability
 - Summary: Extended the beginner-oriented documentation pass into the remaining Phase A runtime path, prioritizing `scripts/phase_a_generate_and_eval.py` and its orchestration flow.
