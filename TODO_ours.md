@@ -363,22 +363,24 @@ Bootstrap the value head from empirical prefix targets first.
     - prefixes,
     - corruptions,
     - optional rollout targets.
-- [ ] Add `src/ours/phase_b/value_head.py`
+- [x] Add `src/ours/phase_b/value_head.py`
   - bounded scalar head `V(h_t) in [0,1]`
 - [x] Add `src/ours/phase_b/value_targets.py`
   - rollout-based prefix target generation
 - [x] Add `src/ours/phase_b/corruptions.py`
   - minimal semantic perturbations on step prefixes
-- [ ] Add `src/ours/phase_b/value_losses.py`
+- [x] Add `src/ours/phase_b/value_losses.py`
   - calibration MSE
   - contrastive margin loss
   - Bellman loss with stop-gradient target
-- [ ] Add `scripts/phase_b_train_value.py`
+- [x] Add `scripts/phase_b_train_value.py`
   - train value head with frozen backbone
-- [ ] Add `scripts/phase_b_eval_faithfulness.py`
+- [x] Add `scripts/phase_b_eval_faithfulness.py`
   - calibration
   - corruption AUC
   - value-drop localization
+- [x] Add `scripts/run_phase_c_value_suite.sh`
+  - one-command C1 train/eval prep + C2 train + C2 standalone eval
 
 ### Dataset priority
 
@@ -582,8 +584,8 @@ Do these in order.
    - step prefixes
    - rollout targets
    - corruption variants
-4. [ ] Implement `phase_b_train_value.py`
-5. [ ] Implement `phase_b_eval_faithfulness.py`
+4. [x] Implement `phase_b_train_value.py`
+5. [x] Implement `phase_b_eval_faithfulness.py`
 6. [ ] Run first StrategyQA value-head smoke experiment
 7. [ ] Add Bellman loss and run first BCR-lite smoke experiment
 8. [ ] Implement heuristic ABR-lite router

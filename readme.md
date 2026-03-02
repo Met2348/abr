@@ -198,6 +198,10 @@ Phase C guidance:
 Current implemented scope:
 - `C0`: freeze the Phase C contracts and execution order
 - `C1`: build deterministic prefix, corruption, and optional rollout-target artifacts
+- `C2`: train and evaluate a frozen-backbone value head on C1 artifacts
+
+Full lifecycle suite entrypoint:
+- `scripts/run_phase_c_value_suite.sh`
 
 Main entrypoint:
 
@@ -221,6 +225,48 @@ Key output files:
 - `manifest.json`
 - `summary.json`
 - `summary.md`
+
+C2 training entrypoint:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_b_train_value.py \
+  --train-dir assets/artifacts/phase_c_data/strategyqa/strategyqa_value_rollouts__<train_fingerprint> \
+  --eval-dir assets/artifacts/phase_c_data/strategyqa/strategyqa_value_rollouts_val__<eval_fingerprint> \
+  --run-name strategyqa_value_c2_smoke \
+  --require-cuda \
+  --dtype bfloat16 \
+  --device-map auto \
+  --per-device-train-batch-size 64 \
+  --per-device-eval-batch-size 64 \
+  --learning-rate 1e-3 \
+  --num-train-epochs 5 \
+  --use-contrastive-loss \
+  --lambda-contrastive 1.0 \
+  --contrastive-margin 0.1
+```
+
+C2 standalone evaluation entrypoint:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 python -u scripts/phase_b_eval_faithfulness.py \
+  --value-run-dir assets/artifacts/phase_c_runs/strategyqa_value_c2_smoke_<timestamp> \
+  --eval-dir assets/artifacts/phase_c_data/strategyqa/strategyqa_value_rollouts_val__<eval_fingerprint> \
+  --checkpoint-name best \
+  --run-name strategyqa_value_c2_eval
+```
+
+One-command lifecycle (C1 train + C1 eval + C2 train + C2 eval):
+
+```bash
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_SMOKE \
+RUN_PREFIX=phase_c_strategyqa_smoke \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_c_value_suite.sh
+```
+
+Supported lifecycle groups:
+1. `C2_STRATEGYQA_SMOKE`
+2. `C2_STRATEGYQA_FULL`
 
 Smoke training run:
 

@@ -2,6 +2,98 @@
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
 
+## 2026-03-03 03:30:00 +08 (+0800)
+- Type: Phase C Lifecycle Suite Added / One-Command C1+C2 Execution
+- Summary: Added a Phase C lifecycle wrapper that runs C1 train prep, C1 eval prep, C2 value-head training, and standalone C2 eval in one reproducible suite with failure-stage reporting and final metric summary.
+- Details:
+  - Added new script:
+    - `scripts/run_phase_c_value_suite.sh`
+      - group-based launch:
+        - `C2_STRATEGYQA_SMOKE`
+        - `C2_STRATEGYQA_FULL`
+      - suite logging:
+        - `assets/artifacts/phase_c_logs/<RUN_PREFIX>/suite.log`
+        - `assets/artifacts/phase_c_logs/<RUN_PREFIX>/final_summary.md`
+      - failure handling:
+        - explicit `failed_stage` and non-zero exit capture
+      - automatic stage chaining:
+        - C1 train artifact build
+        - C1 eval artifact build
+        - C2 train run
+        - C2 standalone eval run
+  - C2 hardening completed in same pass:
+    - fixed standalone eval model-device placement (`scripts/phase_b_eval_faithfulness.py`)
+    - fixed fractional epoch handling in C2 training (`scripts/phase_b_train_value.py`)
+  - Added C2 component tests:
+    - `tests/unit/test_phase_c_value_components.py`
+  - Documentation updated:
+    - `readme.md`
+    - `readme_full.md`
+    - `TODO_ours.md`
+  - Validation:
+    - `bash -n scripts/run_phase_c_value_suite.sh`
+    - `bash -n scripts/run_phase_b_training_suite.sh`
+    - `python -m py_compile` on new/touched C2 modules/scripts
+    - `pytest` on Phase C/Phase B touched unit tests
+
+## 2026-03-03 03:05:00 +08 (+0800)
+- Type: Phase C C2 Implemented / Value-Head Training And Faithfulness Evaluation
+- Summary: Implemented the full C2 runtime path on top of C1 artifacts: frozen-backbone feature caching, value-head training with rollout calibration targets, optional corruption contrastive loss, and standalone faithfulness evaluation.
+- Details:
+  - Added new runtime modules:
+    - `src/ours/phase_b/value_data.py`
+      - strict loaders joining `prefixes.jsonl`, `rollout_targets.jsonl`, and `corruptions.jsonl`
+      - deterministic primary-corruption selection per clean prefix
+      - compatibility checks for train/eval artifact contracts
+    - `src/ours/phase_b/value_head.py`
+      - `ValueHeadConfig`
+      - `SigmoidValueHead`
+      - frozen-backbone pooled-feature encoding helpers
+      - value-head checkpoint save/load helpers
+    - `src/ours/phase_b/value_losses.py`
+      - rollout calibration MSE
+      - corruption contrastive margin loss
+      - Bellman helper loss for later BCR-lite stage
+    - `src/ours/phase_b/faithfulness_eval.py`
+      - calibration metrics (Brier/RMSE/MAE/Pearson/ECE)
+      - corruption metrics (pair accuracy, margins, AUC)
+      - Markdown summary renderer
+  - Added new scripts:
+    - `scripts/phase_b_train_value.py`
+      - C2 training entrypoint
+      - caches clean/corrupted prefix features once with frozen LM
+      - trains only the value head
+      - persists best/final checkpoints and eval score artifacts
+    - `scripts/phase_b_eval_faithfulness.py`
+      - standalone re-evaluation path for saved value-head checkpoints
+  - Hardening fixes made during implementation:
+    - fixed fractional epoch handling by driving C2 training loop by optimizer steps
+      (avoids silent epoch rounding)
+    - fixed standalone eval device placement
+      (moves loaded value head to feature device before scoring)
+  - Added tests:
+    - `tests/unit/test_phase_c_value_components.py`
+      - value-data joins
+      - compatibility checks
+      - calibration/corruption metric helpers
+      - value-head checkpoint round-trip
+  - Validation:
+    - py_compile passed for:
+      - new Phase C C2 modules/scripts
+      - new test file
+    - pytest passed:
+      - `tests/unit/test_phase_c_value_components.py`
+      - `tests/unit/test_phase_c_prepare_value.py`
+      - `tests/unit/test_phase_b_data.py`
+      - `tests/unit/test_phase_b_train_script.py`
+      - `tests/unit/test_phase_b_eval_script.py`
+    - shell syntax check passed:
+      - `bash -n scripts/run_phase_b_training_suite.sh`
+  - Documentation:
+    - updated `readme.md`
+    - updated `readme_full.md`
+    - updated `TODO_ours.md`
+
 ## 2026-03-03 02:20:00 +08 (+0800)
 - Type: Phase C C0/C1 Implemented / Prefix, Corruption, And Rollout-Target Preparation
 - Summary: Implemented the first executable Phase C layer, which freezes the ABR/BCR data contracts and prepares deterministic prefix-level artifacts for later value-head training.

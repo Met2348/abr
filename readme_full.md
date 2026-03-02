@@ -163,17 +163,131 @@ python -m py_compile \
 ```bash
 python -m pytest -q \
   tests/unit/test_phase_c_prepare_value.py \
+  tests/unit/test_phase_c_value_components.py \
   tests/unit/test_phase_b_data.py \
   tests/unit/test_step_builder.py
 ```
 
+## Phase C C2 Entry Points (Now Implemented)
+
+Current implemented scope now includes:
+- `C2`: frozen-backbone value-head training and standalone faithfulness eval.
+
+Main implementation files:
+- `scripts/phase_b_train_value.py`
+- `scripts/phase_b_eval_faithfulness.py`
+- `scripts/run_phase_c_value_suite.sh`
+- `src/ours/phase_b/value_data.py`
+- `src/ours/phase_b/value_head.py`
+- `src/ours/phase_b/value_losses.py`
+- `src/ours/phase_b/faithfulness_eval.py`
+
+### C2 data prerequisites
+
+You need two C1 artifact directories built with compatible contracts:
+1. one for training prefixes/targets
+2. one for held-out evaluation prefixes/targets
+
+Typical pair:
+- train: `assets/artifacts/phase_c_data/strategyqa/strategyqa_value_rollouts__<train_fp>`
+- eval: `assets/artifacts/phase_c_data/strategyqa/strategyqa_value_rollouts_val__<eval_fp>`
+
+### C2 training command
+
+```bash
+CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_b_train_value.py \
+  --train-dir assets/artifacts/phase_c_data/strategyqa/strategyqa_value_rollouts__<train_fp> \
+  --eval-dir assets/artifacts/phase_c_data/strategyqa/strategyqa_value_rollouts_val__<eval_fp> \
+  --run-name strategyqa_value_c2_smoke \
+  --require-cuda \
+  --dtype bfloat16 \
+  --device-map auto \
+  --max-length 1024 \
+  --per-device-train-batch-size 64 \
+  --per-device-eval-batch-size 64 \
+  --learning-rate 1e-3 \
+  --num-train-epochs 5 \
+  --use-contrastive-loss \
+  --lambda-contrastive 1.0 \
+  --contrastive-margin 0.1
+```
+
+### C2 standalone evaluation command
+
+```bash
+CUDA_VISIBLE_DEVICES=3 python -u scripts/phase_b_eval_faithfulness.py \
+  --value-run-dir assets/artifacts/phase_c_runs/strategyqa_value_c2_smoke_<timestamp> \
+  --eval-dir assets/artifacts/phase_c_data/strategyqa/strategyqa_value_rollouts_val__<eval_fp> \
+  --checkpoint-name best \
+  --run-name strategyqa_value_c2_eval
+```
+
+### One-command lifecycle suite
+
+Use this wrapper when you want the full C1+C2 lifecycle in one reportable run:
+- C1 train artifact build
+- C1 eval artifact build
+- C2 value-head training
+- C2 standalone faithfulness eval
+- consolidated suite summary
+
+Smoke lifecycle:
+
+```bash
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_SMOKE \
+RUN_PREFIX=phase_c_strategyqa_smoke \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_c_value_suite.sh
+```
+
+Full lifecycle:
+
+```bash
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_FULL \
+RUN_PREFIX=phase_c_strategyqa_full \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_c_value_suite.sh
+```
+
+Supported groups:
+1. `C2_STRATEGYQA_SMOKE`
+2. `C2_STRATEGYQA_FULL`
+
+Useful overrides:
+- `TRAIN_MAX_SAMPLES`, `EVAL_MAX_SAMPLES`
+- `ROLLOUT_BATCH_SIZE`, `ROLLOUT_COUNT`, `ROLLOUT_MAX_NEW_TOKENS`
+- `C2_TRAIN_BATCH_SIZE`, `C2_EVAL_BATCH_SIZE`, `C2_LR`, `C2_EPOCHS`
+- `PHASE_C_PREP_EXTRA_ARGS`, `PHASE_C_TRAIN_EXTRA_ARGS`, `PHASE_C_EVAL_EXTRA_ARGS`
+
+### C2 outputs
+
+Training run dir:
+- `assets/artifacts/phase_c_runs/<run_name>_<timestamp>/`
+- key files:
+  - `best_value_head.pt` (if enabled)
+  - `final_value_head.pt`
+  - `value_head_config.json`
+  - `train_metrics.json`
+  - `eval_metrics.json`
+  - `eval_prefix_scores.jsonl`
+  - `eval_corruption_scores.jsonl`
+  - `summary.json`
+  - `summary.md`
+
+Standalone eval run dir:
+- `assets/artifacts/phase_c_eval/<run_name>_<timestamp>/`
+- key files:
+  - `metrics.json`
+  - `prefix_scores.jsonl`
+  - `corruption_scores.jsonl`
+  - `summary.md`
+
 Current non-goals:
-- value-head training,
-- Bellman loss,
+- Bellman-coupled BCR-lite training,
 - ABR router training,
 - RL.
 
-Those are intentionally deferred until the C0/C1 artifact layer is stable.
+Those remain intentionally deferred until C2 metrics are stable.
 
 ## Phase A Retrospective (Before You Start Phase B)
 
