@@ -282,6 +282,127 @@ Standalone eval run dir:
   - `corruption_scores.jsonl`
   - `summary.md`
 
+### C2 current empirical status (StrategyQA, 2026-03-02)
+
+Current completed C2 variants on the same held-out eval artifact:
+
+| run | objective | brier | pearson | pair_acc | auc |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `strategyqa_value_c2_smoke_20260302T215825Z` | calibration + strong contrastive (`lr=1e-3`, `lambda=1.0`) | 0.3681 | 0.0334 | 0.5082 | 0.5179 |
+| `strategyqa_value_c2_cal_only_lr3e4_20260302T220411Z` | calibration only (`lr=3e-4`) | 0.2446 | 0.0232 | 0.4496 | 0.4130 |
+| `strategyqa_value_c2_cal_plus_ctr_lr3e4_20260302T220429Z` | calibration + weak contrastive (`lr=3e-4`, `lambda=0.2`) | 0.2540 | -0.0002 | 0.2904 | 0.5460 |
+
+Reference baseline from the same eval set:
+- mean-predictor brier: `0.1510`
+
+Current interpretation:
+1. C2 engineering pipeline is working end-to-end (train/eval artifacts and metrics are stable).
+2. C2 quality is not yet sufficient for BCR/ABR routing:
+   - calibration is still worse than baseline,
+   - linear correlation to rollout targets is near zero,
+   - corruption ordering remains unstable.
+3. C2 should continue with better targets and stronger regularization before starting O5.
+
+### Recommended next C2 commands
+
+1) Rebuild C1 train/eval artifacts with higher rollout quality (`K=8`):
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_b_prepare_value_data.py \
+  --input-jsonl assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl \
+  --run-name strategyqa_value_rollouts_k8_train \
+  --build-corruptions \
+  --build-rollouts \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --batch-size 64 \
+  --rollout-count 8 \
+  --max-new-tokens 96 \
+  --temperature 0.7 \
+  --top-p 0.95 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --require-cuda
+
+CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_b_prepare_value_data.py \
+  --input-jsonl assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/validation.jsonl \
+  --run-name strategyqa_value_rollouts_k8_eval \
+  --build-corruptions \
+  --build-rollouts \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --batch-size 64 \
+  --rollout-count 8 \
+  --max-new-tokens 96 \
+  --temperature 0.7 \
+  --top-p 0.95 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --require-cuda
+```
+
+2) Calibration-first C2 run on K=8 targets:
+
+```bash
+TRAIN_DIR="$(python - <<'PY'
+from pathlib import Path
+base = Path('assets/artifacts/phase_c_data/strategyqa')
+for d in sorted(base.glob('strategyqa_value_rollouts_k8_train__*'), reverse=True):
+    if (d / 'manifest.json').exists() and (d / 'rollout_targets.jsonl').exists():
+        print(d)
+        raise SystemExit(0)
+raise SystemExit('ERROR: no completed k8 train artifact found (missing manifest/rollout_targets)')
+PY
+)"
+
+EVAL_DIR="$(python - <<'PY'
+from pathlib import Path
+base = Path('assets/artifacts/phase_c_data/strategyqa')
+for d in sorted(base.glob('strategyqa_value_rollouts_k8_eval__*'), reverse=True):
+    if (d / 'manifest.json').exists() and (d / 'rollout_targets.jsonl').exists():
+        print(d)
+        raise SystemExit(0)
+raise SystemExit('ERROR: no completed k8 eval artifact found (missing manifest/rollout_targets)')
+PY
+)"
+
+CUDA_VISIBLE_DEVICES=3 python -u scripts/phase_b_train_value.py \
+  --train-dir "$TRAIN_DIR" \
+  --eval-dir "$EVAL_DIR" \
+  --run-name strategyqa_value_c2_k8_cal_only_lr1e4 \
+  --require-cuda \
+  --dtype bfloat16 \
+  --device-map auto \
+  --max-length 1024 \
+  --per-device-train-batch-size 64 \
+  --per-device-eval-batch-size 64 \
+  --learning-rate 1e-4 \
+  --weight-decay 0.01 \
+  --dropout-prob 0.1 \
+  --num-train-epochs 12 \
+  --no-use-contrastive-loss
+```
+
+3) Weak-contrastive follow-up (only after step 2 improves brier):
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_b_train_value.py \
+  --train-dir "$TRAIN_DIR" \
+  --eval-dir "$EVAL_DIR" \
+  --run-name strategyqa_value_c2_k8_cal_plus_ctr \
+  --require-cuda \
+  --dtype bfloat16 \
+  --device-map auto \
+  --max-length 1024 \
+  --per-device-train-batch-size 64 \
+  --per-device-eval-batch-size 64 \
+  --learning-rate 1e-4 \
+  --weight-decay 0.01 \
+  --dropout-prob 0.1 \
+  --num-train-epochs 12 \
+  --use-contrastive-loss \
+  --lambda-contrastive 0.05 \
+  --contrastive-margin 0.02
+```
+
 Current non-goals:
 - Bellman-coupled BCR-lite training,
 - ABR router training,

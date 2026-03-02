@@ -397,6 +397,38 @@ Reason:
 - [ ] Corruption AUC is clearly above random.
 - [ ] Value drops localize around corrupted steps better than untrained value head.
 
+### C2 status snapshot (2026-03-02 runs, StrategyQA)
+
+- Current best `brier_score`: `0.2446`
+- Trivial baseline `brier_score`: `0.1510`
+- Current best `pearson`: `0.0334` (near zero in all tested variants)
+- Corruption metrics across tested variants:
+  - `pair_accuracy`: `0.2904` to `0.5082`
+  - `auc_clean_vs_corrupt`: `0.4130` to `0.5460`
+- Interpretation:
+  - implementation is stable and reproducible,
+  - value quality is still below deployment gate for BCR/ABR routing.
+
+### Immediate C2 recovery tasks (must finish before O5)
+
+- [ ] Rebuild C1 targets with higher rollout quality:
+  - same StrategyQA split pair,
+  - `rollout_count=8` (from 4).
+- [ ] Run calibration-first C2 on K=8 targets:
+  - `learning_rate=1e-4`,
+  - `weight_decay=0.01`,
+  - `value_head_dropout=0.1`,
+  - `num_train_epochs=12`,
+  - no contrastive loss.
+- [ ] Run weak-contrastive C2 only if calibration-first improves:
+  - `lambda_contrastive=0.05`,
+  - `contrastive_margin=0.02`.
+- [ ] Gate check for O5 enable:
+  - `brier_score < 0.1510` on held-out eval set,
+  - `pearson >= 0.10`,
+  - `auc_clean_vs_corrupt >= 0.60`,
+  - `pair_accuracy >= 0.55`.
+
 ---
 
 ## 9. Phase O5: BCR-Lite (Joint LM + Value, No Router RL)

@@ -2,6 +2,38 @@
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
 
+## 2026-03-03 06:20:00 +08 (+0800)
+- Type: Phase C C2 Diagnosis Update / Calibration-Only And Weak-Contrastive Runs
+- Summary: Integrated the latest StrategyQA C2 runs and concluded that C2 is now technically stable but still not quality-ready for BCR/ABR routing because calibration and corruption metrics remain below baseline.
+- Details:
+  - Newly incorporated runs:
+    - `strategyqa_value_c2_smoke_20260302T215825Z`
+    - `strategyqa_value_c2_cal_only_lr3e4_20260302T220411Z`
+    - `strategyqa_value_c2_cal_plus_ctr_lr3e4_20260302T220429Z`
+  - Key held-out metrics:
+    - strong-contrastive smoke:
+      - `brier=0.3681`, `pearson=0.0334`, `pair_acc=0.5082`, `auc=0.5179`
+    - calibration-only (`lr=3e-4`):
+      - `brier=0.2446`, `pearson=0.0232`, `pair_acc=0.4496`, `auc=0.4130`
+    - weak-contrastive (`lr=3e-4`, `lambda=0.2`, `margin=0.05`):
+      - `brier=0.2540`, `pearson=-0.0002`, `pair_acc=0.2904`, `auc=0.5460`
+    - baseline mean predictor brier on this eval set:
+      - `0.1510`
+  - Diagnosis:
+    - C2 can train/evaluate reproducibly end-to-end.
+    - Current head does not beat the trivial baseline on calibration.
+    - Corruption discrimination is unstable; pairwise ordering is weak.
+    - Value saturation is severe in later runs (`prediction_mean` near `1.0`).
+  - Interpretation for project planning:
+    - C2 implementation risk is reduced (pipeline reliability achieved).
+    - C2 research risk remains open (signal quality insufficient for router training).
+    - Do not start Bellman-coupled BCR-lite yet.
+  - Next experiment direction frozen for immediate follow-up:
+    - increase rollout target quality (`K=8`),
+    - lower LR to `1e-4`,
+    - regularize head (`weight_decay=0.01`, dropout around `0.1`),
+    - reintroduce only weak contrastive after calibration improves.
+
 ## 2026-03-03 03:30:00 +08 (+0800)
 - Type: Phase C Lifecycle Suite Added / One-Command C1+C2 Execution
 - Summary: Added a Phase C lifecycle wrapper that runs C1 train prep, C1 eval prep, C2 value-head training, and standalone C2 eval in one reproducible suite with failure-stage reporting and final metric summary.
