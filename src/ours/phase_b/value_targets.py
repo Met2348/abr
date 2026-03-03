@@ -257,7 +257,16 @@ class RolloutPredictionRecord:
 
 @dataclass(slots=True)
 class RolloutTargetRecord:
-    """Aggregate empirical success target for one prefix."""
+    """Aggregate empirical success target for one prefix.
+
+    In addition to the raw Monte Carlo success-rate (`success_rate`), this record
+    now carries uncertainty-aware fields that quantify target reliability. These
+    fields are intended for data-quality-first C2 training:
+    - `q_mean_smoothed`: Beta-smoothed success estimate
+    - `q_std_error`: standard error estimate for the smoothed mean
+    - `q_ci_*`: approximate confidence interval bounds and width
+    - `q_weight`: normalized reliability weight in `[0, 1]`
+    """
 
     prefix_id: str
     sample_id: str
@@ -268,6 +277,12 @@ class RolloutTargetRecord:
     n_parse_error: int
     success_rate: float
     parseable_rate: float
+    q_mean_smoothed: float
+    q_std_error: float
+    q_ci_low: float
+    q_ci_high: float
+    q_ci_width: float
+    q_weight: float
     mean_generated_char_count: float
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -289,10 +304,142 @@ class RolloutTargetRecord:
             raise ValueError("`n_parse_error` cannot exceed `k_rollouts`")
         _validate_unit_interval(self.success_rate, "success_rate")
         _validate_unit_interval(self.parseable_rate, "parseable_rate")
+        _validate_unit_interval(self.q_mean_smoothed, "q_mean_smoothed")
+        _validate_non_negative_number(self.q_std_error, "q_std_error")
+        _validate_unit_interval(self.q_ci_low, "q_ci_low")
+        _validate_unit_interval(self.q_ci_high, "q_ci_high")
+        if self.q_ci_low > self.q_ci_high:
+            raise ValueError("`q_ci_low` cannot exceed `q_ci_high`")
+        _validate_non_negative_number(self.q_ci_width, "q_ci_width")
+        _validate_unit_interval(self.q_weight, "q_weight")
         if not isinstance(self.mean_generated_char_count, float):
             raise TypeError("`mean_generated_char_count` must be float")
         if self.mean_generated_char_count < 0.0:
             raise ValueError("`mean_generated_char_count` must be >= 0")
+        if not isinstance(self.metadata, dict):
+            raise TypeError("`metadata` must be dict[str, Any]")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the record into a validated plain dictionary."""
+        self.validate()
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class CorruptionRolloutTargetRecord:
+    """Aggregate empirical target for one corrupted prefix variant."""
+
+    corruption_id: str
+    clean_prefix_id: str
+    sample_id: str
+    dataset: str
+    split: str
+    corruption_type: str
+    corruption_step_index: int
+    k_rollouts: int
+    n_correct: int
+    n_parse_error: int
+    success_rate: float
+    parseable_rate: float
+    q_mean_smoothed: float
+    q_std_error: float
+    q_ci_low: float
+    q_ci_high: float
+    q_ci_width: float
+    q_weight: float
+    mean_generated_char_count: float
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def validate(self) -> None:
+        """Validate one corruption rollout target summary."""
+        _validate_non_empty_str(self.corruption_id, "corruption_id")
+        _validate_non_empty_str(self.clean_prefix_id, "clean_prefix_id")
+        _validate_non_empty_str(self.sample_id, "sample_id")
+        _validate_non_empty_str(self.dataset, "dataset")
+        _validate_non_empty_str(self.split, "split")
+        _validate_non_empty_str(self.corruption_type, "corruption_type")
+        if not isinstance(self.corruption_step_index, int) or self.corruption_step_index < 0:
+            raise ValueError("`corruption_step_index` must be a non-negative int")
+        if not isinstance(self.k_rollouts, int) or self.k_rollouts <= 0:
+            raise ValueError("`k_rollouts` must be a positive int")
+        if not isinstance(self.n_correct, int) or self.n_correct < 0:
+            raise ValueError("`n_correct` must be a non-negative int")
+        if not isinstance(self.n_parse_error, int) or self.n_parse_error < 0:
+            raise ValueError("`n_parse_error` must be a non-negative int")
+        if self.n_correct > self.k_rollouts:
+            raise ValueError("`n_correct` cannot exceed `k_rollouts`")
+        if self.n_parse_error > self.k_rollouts:
+            raise ValueError("`n_parse_error` cannot exceed `k_rollouts`")
+        _validate_unit_interval(self.success_rate, "success_rate")
+        _validate_unit_interval(self.parseable_rate, "parseable_rate")
+        _validate_unit_interval(self.q_mean_smoothed, "q_mean_smoothed")
+        _validate_non_negative_number(self.q_std_error, "q_std_error")
+        _validate_unit_interval(self.q_ci_low, "q_ci_low")
+        _validate_unit_interval(self.q_ci_high, "q_ci_high")
+        if self.q_ci_low > self.q_ci_high:
+            raise ValueError("`q_ci_low` cannot exceed `q_ci_high`")
+        _validate_non_negative_number(self.q_ci_width, "q_ci_width")
+        _validate_unit_interval(self.q_weight, "q_weight")
+        if not isinstance(self.mean_generated_char_count, float):
+            raise TypeError("`mean_generated_char_count` must be float")
+        if self.mean_generated_char_count < 0.0:
+            raise ValueError("`mean_generated_char_count` must be >= 0")
+        if not isinstance(self.metadata, dict):
+            raise TypeError("`metadata` must be dict[str, Any]")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the record into a validated plain dictionary."""
+        self.validate()
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class PairQualityRecord:
+    """Label-side pair quality between one clean prefix and one corruption variant.
+
+    These records are used to filter and weight contrastive supervision using
+    rollout-derived label gaps rather than early noisy model score gaps.
+    """
+
+    pair_id: str
+    clean_prefix_id: str
+    corruption_id: str
+    sample_id: str
+    dataset: str
+    split: str
+    corruption_type: str
+    corruption_step_index: int
+    q_clean: float
+    q_corrupt: float
+    delta_q: float
+    se_clean: float
+    se_corrupt: float
+    se_delta: float
+    z_delta: float
+    pair_weight: float
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def validate(self) -> None:
+        """Validate pair-quality fields."""
+        _validate_non_empty_str(self.pair_id, "pair_id")
+        _validate_non_empty_str(self.clean_prefix_id, "clean_prefix_id")
+        _validate_non_empty_str(self.corruption_id, "corruption_id")
+        _validate_non_empty_str(self.sample_id, "sample_id")
+        _validate_non_empty_str(self.dataset, "dataset")
+        _validate_non_empty_str(self.split, "split")
+        _validate_non_empty_str(self.corruption_type, "corruption_type")
+        if not isinstance(self.corruption_step_index, int) or self.corruption_step_index < 0:
+            raise ValueError("`corruption_step_index` must be a non-negative int")
+        _validate_unit_interval(self.q_clean, "q_clean")
+        _validate_unit_interval(self.q_corrupt, "q_corrupt")
+        _validate_non_negative_number(self.se_clean, "se_clean")
+        _validate_non_negative_number(self.se_corrupt, "se_corrupt")
+        _validate_non_negative_number(self.se_delta, "se_delta")
+        if not isinstance(self.delta_q, (int, float)):
+            raise TypeError("`delta_q` must be numeric")
+        if not isinstance(self.z_delta, (int, float)):
+            raise TypeError("`z_delta` must be numeric")
+        _validate_unit_interval(self.pair_weight, "pair_weight")
         if not isinstance(self.metadata, dict):
             raise TypeError("`metadata` must be dict[str, Any]")
 
@@ -519,22 +666,105 @@ def summarize_rollout_targets(targets: list[RolloutTargetRecord]) -> dict[str, A
             "num_prefixes": 0,
             "mean_success_rate": 0.0,
             "mean_parseable_rate": 0.0,
+            "mean_q_weight": 0.0,
+            "mean_q_ci_width": 0.0,
             "mean_generated_char_count": 0.0,
         }
     total_success = 0.0
     total_parseable = 0.0
+    total_q_weight = 0.0
+    total_q_ci_width = 0.0
     total_chars = 0.0
     for target in targets:
         target.validate()
         total_success += float(target.success_rate)
         total_parseable += float(target.parseable_rate)
+        total_q_weight += float(target.q_weight)
+        total_q_ci_width += float(target.q_ci_width)
         total_chars += float(target.mean_generated_char_count)
     n = float(len(targets))
     return {
         "num_prefixes": len(targets),
         "mean_success_rate": total_success / n,
         "mean_parseable_rate": total_parseable / n,
+        "mean_q_weight": total_q_weight / n,
+        "mean_q_ci_width": total_q_ci_width / n,
         "mean_generated_char_count": total_chars / n,
+    }
+
+
+def summarize_corruption_rollout_targets(
+    targets: list[CorruptionRolloutTargetRecord],
+) -> dict[str, Any]:
+    """Return aggregate stats for corruption rollout-target artifacts."""
+    if not targets:
+        return {
+            "num_corruptions": 0,
+            "mean_success_rate": 0.0,
+            "mean_parseable_rate": 0.0,
+            "mean_q_weight": 0.0,
+            "mean_q_ci_width": 0.0,
+            "mean_generated_char_count": 0.0,
+            "type_counts": {},
+        }
+    total_success = 0.0
+    total_parseable = 0.0
+    total_q_weight = 0.0
+    total_q_ci_width = 0.0
+    total_chars = 0.0
+    type_counts: dict[str, int] = {}
+    for target in targets:
+        target.validate()
+        total_success += float(target.success_rate)
+        total_parseable += float(target.parseable_rate)
+        total_q_weight += float(target.q_weight)
+        total_q_ci_width += float(target.q_ci_width)
+        total_chars += float(target.mean_generated_char_count)
+        type_counts[target.corruption_type] = type_counts.get(target.corruption_type, 0) + 1
+    n = float(len(targets))
+    return {
+        "num_corruptions": len(targets),
+        "mean_success_rate": total_success / n,
+        "mean_parseable_rate": total_parseable / n,
+        "mean_q_weight": total_q_weight / n,
+        "mean_q_ci_width": total_q_ci_width / n,
+        "mean_generated_char_count": total_chars / n,
+        "type_counts": type_counts,
+    }
+
+
+def summarize_pair_quality_records(pairs: list[PairQualityRecord]) -> dict[str, Any]:
+    """Return aggregate stats for label-side pair-quality artifacts."""
+    if not pairs:
+        return {
+            "num_pairs": 0,
+            "mean_delta_q": 0.0,
+            "mean_z_delta": 0.0,
+            "mean_pair_weight": 0.0,
+            "positive_delta_ratio": 0.0,
+            "type_counts": {},
+        }
+    total_delta = 0.0
+    total_z = 0.0
+    total_w = 0.0
+    pos = 0
+    type_counts: dict[str, int] = {}
+    for pair in pairs:
+        pair.validate()
+        total_delta += float(pair.delta_q)
+        total_z += float(pair.z_delta)
+        total_w += float(pair.pair_weight)
+        if float(pair.delta_q) > 0.0:
+            pos += 1
+        type_counts[pair.corruption_type] = type_counts.get(pair.corruption_type, 0) + 1
+    n = float(len(pairs))
+    return {
+        "num_pairs": len(pairs),
+        "mean_delta_q": total_delta / n,
+        "mean_z_delta": total_z / n,
+        "mean_pair_weight": total_w / n,
+        "positive_delta_ratio": float(pos) / n,
+        "type_counts": type_counts,
     }
 
 
@@ -638,3 +868,12 @@ def _validate_unit_interval(value: Any, field_name: str) -> None:
     numeric = float(value)
     if numeric < 0.0 or numeric > 1.0:
         raise ValueError(f"`{field_name}` must be in [0, 1], got {numeric}")
+
+
+def _validate_non_negative_number(value: Any, field_name: str) -> None:
+    """Validate that a numeric value is non-negative."""
+    if not isinstance(value, (int, float)):
+        raise TypeError(f"`{field_name}` must be numeric, got {type(value)!r}")
+    numeric = float(value)
+    if numeric < 0.0:
+        raise ValueError(f"`{field_name}` must be >= 0, got {numeric}")

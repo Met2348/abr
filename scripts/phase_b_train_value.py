@@ -130,8 +130,13 @@ class TrainConfig:
     contrastive_pair_filter: str
     contrastive_confidence_threshold: float
     contrastive_parseable_threshold: float
+    contrastive_label_delta_q_min: float
+    contrastive_label_z_min: float
+    contrastive_label_pair_weight_min: float
+    contrastive_require_pair_pass_gate: bool
     contrastive_score_gap_min: float
     contrastive_score_gap_max: float
+    contrastive_use_pair_weights: bool
     adaptive_loss_balancing: str
     adaptive_loss_init_log_variance: float
     checkpoint_selection_metric: str
@@ -229,14 +234,24 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--calibration-sample-weighting",
-        choices=["none", "confidence", "entropy_inverse", "parseable", "confidence_parseable"],
+        choices=[
+            "none",
+            "confidence",
+            "entropy_inverse",
+            "parseable",
+            "confidence_parseable",
+            "q_weight",
+            "q_weight_parseable",
+        ],
         default="none",
         help=(
             "Optional per-sample weighting for calibration losses. "
             "`confidence` upweights targets far from 0.5; "
             "`entropy_inverse` downweights high-uncertainty targets; "
             "`parseable` uses rollout parseable-rate; "
-            "`confidence_parseable` multiplies confidence and parseable signals."
+            "`confidence_parseable` multiplies confidence and parseable signals; "
+            "`q_weight` uses C1 uncertainty-derived reliability; "
+            "`q_weight_parseable` multiplies reliability and parseable signals."
         ),
     )
     parser.add_argument(
@@ -255,11 +270,19 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--contrastive-margin", type=float, default=0.1)
     parser.add_argument(
         "--contrastive-pair-filter",
-        choices=["none", "confidence", "parseable", "confidence_parseable"],
+        choices=[
+            "none",
+            "confidence",
+            "parseable",
+            "confidence_parseable",
+            "label_quality",
+            "confidence_parseable_label",
+        ],
         default="none",
         help=(
             "Optional noisy-pair filtering for contrastive training. "
-            "Filters are computed from clean-prefix rollout targets."
+            "Filters are computed from clean-prefix rollout targets and/or "
+            "C1 pair-quality labels."
         ),
     )
     parser.add_argument(
@@ -273,6 +296,30 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
         help="Minimum rollout parseable-rate for pair inclusion when parseable filter is enabled.",
+    )
+    parser.add_argument(
+        "--contrastive-label-delta-q-min",
+        type=float,
+        default=0.0,
+        help="Minimum label-side delta_q to include a contrastive pair when label-quality filtering is enabled.",
+    )
+    parser.add_argument(
+        "--contrastive-label-z-min",
+        type=float,
+        default=0.0,
+        help="Minimum label-side z_delta to include a contrastive pair when label-quality filtering is enabled.",
+    )
+    parser.add_argument(
+        "--contrastive-label-pair-weight-min",
+        type=float,
+        default=0.0,
+        help="Minimum label-side pair_weight to include a contrastive pair when label-quality filtering is enabled.",
+    )
+    parser.add_argument(
+        "--contrastive-require-pair-pass-gate",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Require pair_pass_gate=true from C1 pair_quality records when label-quality filtering is enabled.",
     )
     parser.add_argument(
         "--contrastive-score-gap-min",
@@ -291,6 +338,12 @@ def _build_parser() -> argparse.ArgumentParser:
             "Optional upper bound for contrastive pair inclusion based on current "
             "(clean_score - corrupt_score). Useful for hard-negative mining."
         ),
+    )
+    parser.add_argument(
+        "--contrastive-use-pair-weights",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use C1 label-side pair_weight as a per-pair weight in the contrastive margin loss.",
     )
     parser.add_argument(
         "--adaptive-loss-balancing",
@@ -407,6 +460,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--contrastive-confidence-threshold must be in [0, 1]")
     if not (0.0 <= args.contrastive_parseable_threshold <= 1.0):
         raise ValueError("--contrastive-parseable-threshold must be in [0, 1]")
+    if not (-1.0 <= args.contrastive_label_delta_q_min <= 1.0):
+        raise ValueError("--contrastive-label-delta-q-min must be in [-1, 1]")
+    if args.contrastive_label_z_min < 0.0:
+        raise ValueError("--contrastive-label-z-min must be >= 0")
+    if not (0.0 <= args.contrastive_label_pair_weight_min <= 1.0):
+        raise ValueError("--contrastive-label-pair-weight-min must be in [0, 1]")
     if args.contrastive_score_gap_min > args.contrastive_score_gap_max:
         raise ValueError("--contrastive-score-gap-min must be <= --contrastive-score-gap-max")
     if not (-1.0 <= args.contrastive_score_gap_min <= 1.0):
@@ -510,8 +569,13 @@ def main(argv: list[str] | None = None) -> int:
         contrastive_pair_filter=str(args.contrastive_pair_filter),
         contrastive_confidence_threshold=float(args.contrastive_confidence_threshold),
         contrastive_parseable_threshold=float(args.contrastive_parseable_threshold),
+        contrastive_label_delta_q_min=float(args.contrastive_label_delta_q_min),
+        contrastive_label_z_min=float(args.contrastive_label_z_min),
+        contrastive_label_pair_weight_min=float(args.contrastive_label_pair_weight_min),
+        contrastive_require_pair_pass_gate=bool(args.contrastive_require_pair_pass_gate),
         contrastive_score_gap_min=float(args.contrastive_score_gap_min),
         contrastive_score_gap_max=float(args.contrastive_score_gap_max),
+        contrastive_use_pair_weights=bool(args.contrastive_use_pair_weights),
         adaptive_loss_balancing=str(args.adaptive_loss_balancing),
         adaptive_loss_init_log_variance=float(args.adaptive_loss_init_log_variance),
         checkpoint_selection_metric=str(args.checkpoint_selection_metric),
@@ -566,8 +630,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"pair_filter       : {args.contrastive_pair_filter}")
     print(f"pair_conf_thr     : {args.contrastive_confidence_threshold}")
     print(f"pair_parse_thr    : {args.contrastive_parseable_threshold}")
+    print(f"pair_deltaq_thr   : {args.contrastive_label_delta_q_min}")
+    print(f"pair_z_thr        : {args.contrastive_label_z_min}")
+    print(f"pair_w_thr        : {args.contrastive_label_pair_weight_min}")
+    print(f"pair_req_gate     : {args.contrastive_require_pair_pass_gate}")
     print(f"pair_gap_min      : {args.contrastive_score_gap_min}")
     print(f"pair_gap_max      : {args.contrastive_score_gap_max}")
+    print(f"pair_weight_loss  : {args.contrastive_use_pair_weights}")
     print(f"posthoc_calib     : {args.posthoc_calibration}")
     print(f"ckpt_metric       : {args.checkpoint_selection_metric}")
     print(f"batch_train       : {args.per_device_train_batch_size}")
@@ -724,8 +793,13 @@ def main(argv: list[str] | None = None) -> int:
             contrastive_pair_filter=args.contrastive_pair_filter,
             contrastive_confidence_threshold=args.contrastive_confidence_threshold,
             contrastive_parseable_threshold=args.contrastive_parseable_threshold,
+            contrastive_label_delta_q_min=args.contrastive_label_delta_q_min,
+            contrastive_label_z_min=args.contrastive_label_z_min,
+            contrastive_label_pair_weight_min=args.contrastive_label_pair_weight_min,
+            contrastive_require_pair_pass_gate=args.contrastive_require_pair_pass_gate,
             contrastive_score_gap_min=args.contrastive_score_gap_min,
             contrastive_score_gap_max=args.contrastive_score_gap_max,
+            contrastive_use_pair_weights=args.contrastive_use_pair_weights,
             adaptive_loss_balancing=args.adaptive_loss_balancing,
             adaptive_loss_state=adaptive_loss_state,
             logging_steps=args.logging_steps,
@@ -966,8 +1040,13 @@ def _run_one_train_epoch(
     contrastive_pair_filter: str,
     contrastive_confidence_threshold: float,
     contrastive_parseable_threshold: float,
+    contrastive_label_delta_q_min: float,
+    contrastive_label_z_min: float,
+    contrastive_label_pair_weight_min: float,
+    contrastive_require_pair_pass_gate: bool,
     contrastive_score_gap_min: float,
     contrastive_score_gap_max: float,
+    contrastive_use_pair_weights: bool,
     adaptive_loss_balancing: str,
     adaptive_loss_state: dict[str, Any] | None,
     logging_steps: int,
@@ -1018,17 +1097,25 @@ def _run_one_train_epoch(
                 pair_filter=contrastive_pair_filter,
                 confidence_threshold=float(contrastive_confidence_threshold),
                 parseable_threshold=float(contrastive_parseable_threshold),
+                label_delta_q_min=float(contrastive_label_delta_q_min),
+                label_z_min=float(contrastive_label_z_min),
+                label_pair_weight_min=float(contrastive_label_pair_weight_min),
+                require_pair_pass_gate=bool(contrastive_require_pair_pass_gate),
                 torch_module=torch_module,
             )
             if bool(corruption_mask.any().item()):
                 corrupt_features = train_cache["primary_corruption_features"][batch_indices][corruption_mask]
                 clean_scores_for_pairs = head_outputs["scores"][corruption_mask]
                 corrupt_scores = value_head(corrupt_features)["scores"]
-                clean_scores_for_pairs, corrupt_scores = _apply_contrastive_score_gap_filter(
+                pair_weights = None
+                if bool(contrastive_use_pair_weights):
+                    pair_weights = train_cache["primary_pair_weight"][batch_indices][corruption_mask]
+                clean_scores_for_pairs, corrupt_scores, pair_weights = _apply_contrastive_score_gap_filter(
                     clean_scores_for_pairs=clean_scores_for_pairs,
                     corrupt_scores=corrupt_scores,
                     score_gap_min=float(contrastive_score_gap_min),
                     score_gap_max=float(contrastive_score_gap_max),
+                    pair_weights=pair_weights,
                     torch_module=torch_module,
                 )
                 if clean_scores_for_pairs.numel() > 0:
@@ -1037,6 +1124,7 @@ def _run_one_train_epoch(
                         corrupt_scores,
                         margin=contrastive_margin,
                         torch_module=torch_module,
+                        sample_weights=pair_weights,
                     )
                     used_ctr_pairs = True
 
@@ -1170,6 +1258,8 @@ def _evaluate_value_head(
             "predicted_value": float(score),
             "predicted_value_raw": float(score),
             "target_success_rate": float(example.target_success_rate),
+            "target_q_mean_smoothed": float(example.target_q_mean_smoothed),
+            "target_q_weight": float(example.target_q_weight),
             "target_parseable_rate": float(example.target_parseable_rate),
         }
         if posthoc_scores is not None:
@@ -1382,6 +1472,7 @@ def _build_calibration_sample_weights(
     *,
     targets: Any,
     parseable: Any,
+    q_weight: Any,
     mode: str,
     floor: float,
     gamma: float,
@@ -1411,6 +1502,10 @@ def _build_calibration_sample_weights(
             weights = parseable_clamped
         elif mode == "confidence_parseable":
             weights = (confidence * parseable_clamped).clamp(0.0, 1.0)
+        elif mode == "q_weight":
+            weights = q_weight.clamp(0.0, 1.0)
+        elif mode == "q_weight_parseable":
+            weights = (q_weight.clamp(0.0, 1.0) * parseable_clamped).clamp(0.0, 1.0)
         else:
             raise ValueError(f"Unsupported calibration sample weighting mode: {mode!r}")
     if floor > 0.0:
@@ -1428,14 +1523,38 @@ def _apply_contrastive_pair_filter(
     pair_filter: str,
     confidence_threshold: float,
     parseable_threshold: float,
+    label_delta_q_min: float,
+    label_z_min: float,
+    label_pair_weight_min: float,
+    require_pair_pass_gate: bool,
     torch_module: Any,
 ) -> Any:
-    """Filter contrastive pairs using rollout-derived confidence/parseable gates."""
+    """Filter contrastive pairs using rollout and label-side quality gates.
+
+    Supported modes:
+    - `none`
+    - `confidence`
+    - `parseable`
+    - `confidence_parseable`
+    - `label_quality`
+    - `confidence_parseable_label`
+    """
     if pair_filter == "none":
         return base_mask
 
     confidence = train_cache["target_confidence"][batch_indices]
     parseable = train_cache["target_parseable"][batch_indices]
+    label_delta_q = train_cache["primary_pair_delta_q"][batch_indices]
+    label_z = train_cache["primary_pair_z_delta"][batch_indices]
+    label_pair_weight = train_cache["primary_pair_weight"][batch_indices]
+    label_pair_pass = train_cache["primary_pair_pass_gate"][batch_indices]
+    label_mask = (
+        (label_delta_q >= float(label_delta_q_min))
+        & (label_z >= float(label_z_min))
+        & (label_pair_weight >= float(label_pair_weight_min))
+    )
+    if require_pair_pass_gate:
+        label_mask = label_mask & label_pair_pass
 
     if pair_filter == "confidence":
         extra_mask = confidence >= float(confidence_threshold)
@@ -1444,6 +1563,14 @@ def _apply_contrastive_pair_filter(
     elif pair_filter == "confidence_parseable":
         extra_mask = (confidence >= float(confidence_threshold)) & (
             parseable >= float(parseable_threshold)
+        )
+    elif pair_filter == "label_quality":
+        extra_mask = label_mask
+    elif pair_filter == "confidence_parseable_label":
+        extra_mask = (
+            (confidence >= float(confidence_threshold))
+            & (parseable >= float(parseable_threshold))
+            & label_mask
         )
     else:
         raise ValueError(f"Unsupported contrastive pair filter: {pair_filter!r}")
@@ -1470,16 +1597,17 @@ def _apply_contrastive_score_gap_filter(
     corrupt_scores: Any,
     score_gap_min: float,
     score_gap_max: float,
+    pair_weights: Any | None,
     torch_module: Any,
-) -> tuple[Any, Any]:
+) -> tuple[Any, Any, Any | None]:
     """Filter contrastive pairs by current score-gap band.
 
     Gap is defined as `clean_score - corrupt_score`.
     """
     if clean_scores_for_pairs.numel() == 0:
-        return clean_scores_for_pairs, corrupt_scores
+        return clean_scores_for_pairs, corrupt_scores, pair_weights
     if score_gap_min <= -1.0 and score_gap_max >= 1.0:
-        return clean_scores_for_pairs, corrupt_scores
+        return clean_scores_for_pairs, corrupt_scores, pair_weights
 
     gaps = clean_scores_for_pairs - corrupt_scores
     keep_mask = (gaps >= float(score_gap_min)) & (gaps <= float(score_gap_max))
@@ -1487,8 +1615,9 @@ def _apply_contrastive_score_gap_filter(
         keep_mask = keep_mask.to(dtype=torch_module.bool)
     if not bool(keep_mask.any().item()):
         empty = clean_scores_for_pairs[:0]
-        return empty, corrupt_scores[:0]
-    return clean_scores_for_pairs[keep_mask], corrupt_scores[keep_mask]
+        return empty, corrupt_scores[:0], (pair_weights[:0] if pair_weights is not None else None)
+    filtered_weights = pair_weights[keep_mask] if pair_weights is not None else None
+    return clean_scores_for_pairs[keep_mask], corrupt_scores[keep_mask], filtered_weights
 
 
 def _encode_example_cache(
@@ -1517,7 +1646,12 @@ def _encode_example_cache(
     )
     device = clean_features.device
     targets = torch_module.tensor(
-        [example.target_success_rate for example in examples],
+        [example.target_q_mean_smoothed for example in examples],
+        dtype=torch_module.float32,
+        device=device,
+    )
+    target_q_weight = torch_module.tensor(
+        [example.target_q_weight for example in examples],
         dtype=torch_module.float32,
         device=device,
     )
@@ -1530,10 +1664,31 @@ def _encode_example_cache(
     calibration_weights = _build_calibration_sample_weights(
         targets=targets,
         parseable=target_parseable,
+        q_weight=target_q_weight,
         mode=calibration_sample_weighting,
         floor=float(calibration_weight_floor),
         gamma=float(calibration_weight_gamma),
         torch_module=torch_module,
+    )
+    primary_pair_delta_q = torch_module.tensor(
+        [float(example.primary_pair_delta_q or 0.0) for example in examples],
+        dtype=torch_module.float32,
+        device=device,
+    )
+    primary_pair_z_delta = torch_module.tensor(
+        [float(example.primary_pair_z_delta or 0.0) for example in examples],
+        dtype=torch_module.float32,
+        device=device,
+    )
+    primary_pair_weight = torch_module.tensor(
+        [float(example.primary_pair_weight or 0.0) for example in examples],
+        dtype=torch_module.float32,
+        device=device,
+    )
+    primary_pair_pass_gate = torch_module.tensor(
+        [bool(example.primary_pair_pass_gate) for example in examples],
+        dtype=torch_module.bool,
+        device=device,
     )
     has_primary_corruption = torch_module.tensor(
         [example.has_primary_corruption() if use_primary_corruption else False for example in examples],
@@ -1560,9 +1715,14 @@ def _encode_example_cache(
     return {
         "clean_features": clean_features,
         "targets": targets,
+        "target_q_weight": target_q_weight,
         "target_parseable": target_parseable,
         "target_confidence": target_confidence,
         "calibration_weights": calibration_weights,
+        "primary_pair_delta_q": primary_pair_delta_q,
+        "primary_pair_z_delta": primary_pair_z_delta,
+        "primary_pair_weight": primary_pair_weight,
+        "primary_pair_pass_gate": primary_pair_pass_gate,
         "has_primary_corruption": has_primary_corruption,
         "primary_corruption_features": corruption_features,
     }

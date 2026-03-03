@@ -45,6 +45,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import random
 import sys
 import time
@@ -74,12 +75,16 @@ from ours.phase_b.corruptions import (  # noqa: E402
     summarize_corruptions,
 )
 from ours.phase_b.value_targets import (  # noqa: E402
+    CorruptionRolloutTargetRecord,
+    PairQualityRecord,
     PrefixArtifact,
     PrefixBuildConfig,
     RolloutPredictionRecord,
     RolloutTargetRecord,
     build_prefix_artifacts,
     build_step_sequence_from_phase_b_row,
+    summarize_corruption_rollout_targets,
+    summarize_pair_quality_records,
     summarize_prefix_artifacts,
     summarize_rollout_targets,
 )
@@ -108,6 +113,43 @@ class RolloutConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable payload for manifests."""
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class TargetQualityConfig:
+    """Configuration for uncertainty-aware target statistics.
+
+    This config controls Beta smoothing, confidence-interval approximation, and
+    derived reliability weights written into rollout-target artifacts.
+    """
+
+    alpha: float
+    beta: float
+    ci_z: float
+    weight_floor: float
+    weight_gamma: float
+    pair_delta_q_min: float
+    pair_z_min: float
+
+    def validate(self) -> None:
+        """Validate numeric ranges for all target-quality controls."""
+        if self.alpha < 0.0:
+            raise ValueError("`alpha` must be >= 0")
+        if self.beta < 0.0:
+            raise ValueError("`beta` must be >= 0")
+        if self.ci_z <= 0.0:
+            raise ValueError("`ci_z` must be > 0")
+        if not (0.0 <= self.weight_floor <= 1.0):
+            raise ValueError("`weight_floor` must be in [0, 1]")
+        if self.weight_gamma <= 0.0:
+            raise ValueError("`weight_gamma` must be > 0")
+        if self.pair_z_min < 0.0:
+            raise ValueError("`pair_z_min` must be >= 0")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable payload for manifests."""
+        self.validate()
         return asdict(self)
 
 
@@ -271,6 +313,66 @@ def _build_parser() -> argparse.ArgumentParser:
         default=256,
         help="Progress print interval counted in generated rollout samples.",
     )
+    parser.add_argument(
+        "--build-pair-quality",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "When enabled, also roll out corrupted prefixes and emit label-side "
+            "pair-quality records (`pair_quality.jsonl`). Requires rollouts and corruptions."
+        ),
+    )
+    parser.add_argument(
+        "--pair-rollout-count",
+        type=int,
+        default=0,
+        help=(
+            "Rollout count per corruption for pair-quality estimation. "
+            "If <=0, reuse `--rollout-count`."
+        ),
+    )
+    parser.add_argument(
+        "--target-alpha",
+        type=float,
+        default=1.0,
+        help="Beta smoothing alpha for rollout target statistics.",
+    )
+    parser.add_argument(
+        "--target-beta",
+        type=float,
+        default=1.0,
+        help="Beta smoothing beta for rollout target statistics.",
+    )
+    parser.add_argument(
+        "--target-ci-z",
+        type=float,
+        default=1.96,
+        help="Z-value used for approximate confidence interval width.",
+    )
+    parser.add_argument(
+        "--target-weight-floor",
+        type=float,
+        default=0.1,
+        help="Lower bound for derived reliability weights in [0, 1].",
+    )
+    parser.add_argument(
+        "--target-weight-gamma",
+        type=float,
+        default=1.0,
+        help="Exponent applied to derived reliability weights.",
+    )
+    parser.add_argument(
+        "--pair-delta-q-min",
+        type=float,
+        default=0.0,
+        help="Minimum label-side delta_q to mark a pair as high-quality.",
+    )
+    parser.add_argument(
+        "--pair-z-min",
+        type=float,
+        default=0.0,
+        help="Minimum label-side z_delta to mark a pair as high-quality.",
+    )
     return parser
 
 
@@ -280,10 +382,38 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     initial = parser.parse_known_args(argv)[0]
     if initial.config_json is not None:
         defaults = _load_config_defaults(initial.config_json)
+        valid_keys = {action.dest for action in parser._actions}  # noqa: SLF001
+        unknown = sorted(set(defaults.keys()) - valid_keys)
+        if unknown:
+            raise KeyError(f"Unknown keys in config JSON {initial.config_json}: {unknown}")
         parser.set_defaults(**defaults)
     args = parser.parse_args(argv)
     if args.input_jsonl is None:
         parser.error("the following arguments are required: --input-jsonl")
+    if args.batch_size <= 0:
+        raise ValueError("--batch-size must be > 0")
+    if args.rollout_count <= 0:
+        raise ValueError("--rollout-count must be > 0")
+    if args.pair_rollout_count < 0:
+        raise ValueError("--pair-rollout-count must be >= 0")
+    if args.max_new_tokens <= 0:
+        raise ValueError("--max-new-tokens must be > 0")
+    if args.target_alpha < 0.0:
+        raise ValueError("--target-alpha must be >= 0")
+    if args.target_beta < 0.0:
+        raise ValueError("--target-beta must be >= 0")
+    if args.target_ci_z <= 0.0:
+        raise ValueError("--target-ci-z must be > 0")
+    if not (0.0 <= args.target_weight_floor <= 1.0):
+        raise ValueError("--target-weight-floor must be in [0, 1]")
+    if args.target_weight_gamma <= 0.0:
+        raise ValueError("--target-weight-gamma must be > 0")
+    if args.pair_z_min < 0.0:
+        raise ValueError("--pair-z-min must be >= 0")
+    if args.build_pair_quality and not args.build_rollouts:
+        raise ValueError("--build-pair-quality requires --build-rollouts")
+    if args.build_pair_quality and not args.build_corruptions:
+        raise ValueError("--build-pair-quality requires --build-corruptions")
     return args
 
 
@@ -307,9 +437,19 @@ def main(argv: list[str] | None = None) -> int:
     corruption_config = CorruptionBuildConfig(
         max_corruptions_per_prefix=args.max_corruptions_per_prefix,
     )
+    target_quality_config = TargetQualityConfig(
+        alpha=float(args.target_alpha),
+        beta=float(args.target_beta),
+        ci_z=float(args.target_ci_z),
+        weight_floor=float(args.target_weight_floor),
+        weight_gamma=float(args.target_weight_gamma),
+        pair_delta_q_min=float(args.pair_delta_q_min),
+        pair_z_min=float(args.pair_z_min),
+    )
     step_config.validate()
     prefix_config.validate()
     corruption_config.validate()
+    target_quality_config.validate()
 
     rows = load_phase_b_rows(args.input_jsonl, max_samples=args.max_samples)
     row_summary = summarize_rows(rows)
@@ -349,11 +489,18 @@ def main(argv: list[str] | None = None) -> int:
         ),
         "build_rollouts": bool(args.build_rollouts),
         "rollout_config": (rollout_config.to_dict() if rollout_config is not None else None),
+        "build_pair_quality": bool(args.build_pair_quality),
+        "pair_rollout_count": int(args.pair_rollout_count),
+        "target_quality_config": target_quality_config.to_dict(),
     }
     run_fingerprint = _stable_hash_json(run_spec)
     run_dir = args.output_root / dataset_tag / f"{args.run_name}__{run_fingerprint}"
 
-    expected_files = _expected_output_files(build_corruptions=args.build_corruptions, build_rollouts=args.build_rollouts)
+    expected_files = _expected_output_files(
+        build_corruptions=args.build_corruptions,
+        build_rollouts=args.build_rollouts,
+        build_pair_quality=args.build_pair_quality,
+    )
     if run_dir.exists() and not args.overwrite and args.resume and _has_expected_outputs(run_dir, expected_files):
         print("=" * 88)
         print("Phase C: Prepare Value Data")
@@ -371,6 +518,8 @@ def main(argv: list[str] | None = None) -> int:
     corruption_path = run_dir / "corruptions.jsonl"
     rollout_pred_path = run_dir / "rollout_predictions.jsonl"
     rollout_target_path = run_dir / "rollout_targets.jsonl"
+    corruption_rollout_target_path = run_dir / "corruption_rollout_targets.jsonl"
+    pair_quality_path = run_dir / "pair_quality.jsonl"
     manifest_path = run_dir / "manifest.json"
     summary_path = run_dir / "summary.json"
     summary_md_path = run_dir / "summary.md"
@@ -386,6 +535,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"prefix_config    : {prefix_config.to_dict()} (sig={prefix_config.stable_signature()})")
     print(f"build_corruptions: {args.build_corruptions}")
     print(f"build_rollouts   : {args.build_rollouts}")
+    print(f"build_pair_quality: {args.build_pair_quality}")
+    print(f"target_quality   : {target_quality_config.to_dict()}")
     if rollout_config is not None:
         print(
             "rollout_config   : "
@@ -439,11 +590,14 @@ def main(argv: list[str] | None = None) -> int:
 
     rollout_predictions: list[RolloutPredictionRecord] = []
     rollout_targets: list[RolloutTargetRecord] = []
+    corruption_rollout_targets: list[CorruptionRolloutTargetRecord] = []
+    pair_quality_records: list[PairQualityRecord] = []
     rollout_runtime: dict[str, Any] | None = None
     if args.build_rollouts:
         rollout_predictions, rollout_targets, rollout_runtime = _build_rollout_targets(
             prefixes=prefixes,
             config=rollout_config,
+            target_quality_config=target_quality_config,
         )
         _write_jsonl(
             rollout_pred_path,
@@ -453,6 +607,31 @@ def main(argv: list[str] | None = None) -> int:
             rollout_target_path,
             (record.to_dict() for record in rollout_targets),
         )
+        if args.build_pair_quality:
+            if corruption_artifacts:
+                (
+                    corruption_rollout_targets,
+                    pair_quality_records,
+                ) = _build_corruption_rollout_targets_and_pair_quality(
+                    corruption_artifacts=corruption_artifacts,
+                    prefixes_by_id={prefix.prefix_id: prefix for prefix in prefixes},
+                    clean_targets_by_prefix={target.prefix_id: target for target in rollout_targets},
+                    config=rollout_config,
+                    pair_rollout_count=(
+                        int(args.pair_rollout_count)
+                        if int(args.pair_rollout_count) > 0
+                        else int(rollout_config.rollout_count)
+                    ),
+                    target_quality_config=target_quality_config,
+                )
+            _write_jsonl(
+                corruption_rollout_target_path,
+                (record.to_dict() for record in corruption_rollout_targets),
+            )
+            _write_jsonl(
+                pair_quality_path,
+                (record.to_dict() for record in pair_quality_records),
+            )
 
     prefix_summary = summarize_prefix_artifacts(prefixes)
     corruption_summary = (
@@ -460,6 +639,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     rollout_summary = (
         summarize_rollout_targets(rollout_targets) if args.build_rollouts else None
+    )
+    corruption_rollout_summary = (
+        summarize_corruption_rollout_targets(corruption_rollout_targets)
+        if args.build_pair_quality
+        else None
+    )
+    pair_quality_summary = (
+        summarize_pair_quality_records(pair_quality_records)
+        if args.build_pair_quality
+        else None
     )
 
     summary = {
@@ -475,6 +664,8 @@ def main(argv: list[str] | None = None) -> int:
         "prefix_summary": prefix_summary,
         "corruption_summary": corruption_summary,
         "rollout_summary": rollout_summary,
+        "corruption_rollout_summary": corruption_rollout_summary,
+        "pair_quality_summary": pair_quality_summary,
         "rollout_runtime": rollout_runtime,
     }
     summary_path.write_text(
@@ -499,6 +690,7 @@ def main(argv: list[str] | None = None) -> int:
             corruption_config.to_dict() if args.build_corruptions else None
         ),
         "rollout_config": (rollout_config.to_dict() if rollout_config is not None else None),
+        "target_quality_config": target_quality_config.to_dict(),
         "output_files": {
             "step_sequences": str(step_path),
             "prefixes": str(prefix_path),
@@ -506,6 +698,10 @@ def main(argv: list[str] | None = None) -> int:
             "corruptions": str(corruption_path) if args.build_corruptions else None,
             "rollout_predictions": str(rollout_pred_path) if args.build_rollouts else None,
             "rollout_targets": str(rollout_target_path) if args.build_rollouts else None,
+            "corruption_rollout_targets": (
+                str(corruption_rollout_target_path) if args.build_pair_quality else None
+            ),
+            "pair_quality": str(pair_quality_path) if args.build_pair_quality else None,
             "summary": str(summary_path),
         },
     }
@@ -527,6 +723,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.build_rollouts:
         print(f"num_rollout_preds  : {len(rollout_predictions)}")
         print(f"num_rollout_targets: {len(rollout_targets)}")
+        if args.build_pair_quality:
+            print(f"num_corr_targets   : {len(corruption_rollout_targets)}")
+            print(f"num_pair_quality   : {len(pair_quality_records)}")
         if rollout_runtime is not None:
             print(
                 "rollout_runtime   : "
@@ -544,6 +743,7 @@ def _build_rollout_targets(
     *,
     prefixes: list[PrefixArtifact],
     config: RolloutConfig,
+    target_quality_config: TargetQualityConfig,
 ) -> tuple[list[RolloutPredictionRecord], list[RolloutTargetRecord], dict[str, Any]]:
     """Generate rollout predictions and aggregate them into prefix targets."""
     if not prefixes:
@@ -661,7 +861,10 @@ def _build_rollout_targets(
                 flush=True,
             )
 
-    targets = _aggregate_rollout_targets(predictions)
+    targets = _aggregate_rollout_targets(
+        predictions,
+        target_quality_config=target_quality_config,
+    )
     elapsed = max(time.perf_counter() - start_ts, 1e-6)
     runtime_summary = {
         "elapsed_seconds": float(elapsed),
@@ -674,6 +877,8 @@ def _build_rollout_targets(
 
 def _aggregate_rollout_targets(
     predictions: list[RolloutPredictionRecord],
+    *,
+    target_quality_config: TargetQualityConfig,
 ) -> list[RolloutTargetRecord]:
     """Aggregate low-level rollout predictions into one target per prefix."""
     by_prefix: dict[str, list[RolloutPredictionRecord]] = {}
@@ -689,6 +894,15 @@ def _aggregate_rollout_targets(
         n_correct = sum(1 for row in rows if row.is_correct)
         n_parse_error = sum(1 for row in rows if row.parse_error)
         parseable = k_rollouts - n_parse_error
+        stats = _compute_target_quality_stats(
+            n_correct=n_correct,
+            k_rollouts=k_rollouts,
+            alpha=target_quality_config.alpha,
+            beta=target_quality_config.beta,
+            ci_z=target_quality_config.ci_z,
+            weight_floor=target_quality_config.weight_floor,
+            weight_gamma=target_quality_config.weight_gamma,
+        )
         target = RolloutTargetRecord(
             prefix_id=prefix_id,
             sample_id=first.sample_id,
@@ -699,6 +913,12 @@ def _aggregate_rollout_targets(
             n_parse_error=n_parse_error,
             success_rate=(n_correct / k_rollouts if k_rollouts else 0.0),
             parseable_rate=(parseable / k_rollouts if k_rollouts else 0.0),
+            q_mean_smoothed=float(stats["q_mean_smoothed"]),
+            q_std_error=float(stats["q_std_error"]),
+            q_ci_low=float(stats["q_ci_low"]),
+            q_ci_high=float(stats["q_ci_high"]),
+            q_ci_width=float(stats["q_ci_width"]),
+            q_weight=float(stats["q_weight"]),
             mean_generated_char_count=float(
                 sum(row.generated_char_count for row in rows) / max(k_rollouts, 1)
             ),
@@ -709,6 +929,260 @@ def _aggregate_rollout_targets(
         target.validate()
         targets.append(target)
     return targets
+
+
+def _build_corruption_rollout_targets_and_pair_quality(
+    *,
+    corruption_artifacts: list[CorruptionArtifact],
+    prefixes_by_id: dict[str, PrefixArtifact],
+    clean_targets_by_prefix: dict[str, RolloutTargetRecord],
+    config: RolloutConfig,
+    pair_rollout_count: int,
+    target_quality_config: TargetQualityConfig,
+) -> tuple[list[CorruptionRolloutTargetRecord], list[PairQualityRecord]]:
+    """Build corruption-side rollout targets and clean-vs-corrupt pair quality.
+
+    This is the core data-quality upgrade for contrastive supervision:
+    - estimate empirical corruption-side Q values,
+    - compare against clean-prefix Q estimates,
+    - persist label-side delta/z statistics for robust filtering.
+    """
+    if not corruption_artifacts:
+        return [], []
+
+    random.seed(config.seed + 1)
+    runtime = _load_rollout_runtime_dependencies()
+    torch = runtime["torch"]
+    AutoModelForCausalLM = runtime["AutoModelForCausalLM"]
+    AutoTokenizer = runtime["AutoTokenizer"]
+
+    if config.require_cuda and not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for corruption rollout generation, but no GPU is visible.")
+
+    resolved_dtype = _resolve_dtype(config.dtype, torch)
+    tokenizer_path = _resolve_tokenizer_load_path(
+        model_path=config.model_path,
+        adapter_path=(Path(config.adapter_path) if config.adapter_path is not None else None),
+    )
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+    if tokenizer.pad_token_id is None:
+        if tokenizer.eos_token is not None:
+            tokenizer.pad_token = tokenizer.eos_token
+        else:
+            tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+
+    model = AutoModelForCausalLM.from_pretrained(
+        config.model_path,
+        torch_dtype=resolved_dtype,
+        device_map=config.device_map,
+        trust_remote_code=True,
+    )
+    if config.adapter_path is not None:
+        model = _attach_peft_adapter_for_inference(model, Path(config.adapter_path))
+    model.eval()
+
+    jobs: list[tuple[CorruptionArtifact, PrefixArtifact, int]] = []
+    for corruption in corruption_artifacts:
+        clean_prefix = prefixes_by_id.get(corruption.clean_prefix_id)
+        if clean_prefix is None:
+            continue
+        for rollout_index in range(int(pair_rollout_count)):
+            jobs.append((corruption, clean_prefix, rollout_index))
+
+    by_corruption: dict[str, list[dict[str, Any]]] = {}
+    for batch_start in range(0, len(jobs), config.batch_size):
+        batch = jobs[batch_start : batch_start + config.batch_size]
+        prompts = [
+            f"{prefix.prompt_text}{corruption.corrupted_prefix_text}"
+            for corruption, prefix, _ in batch
+        ]
+        continuations, _ = _generate_prompt_batch_with_backoff(
+            prompts=prompts,
+            model=model,
+            tokenizer=tokenizer,
+            max_new_tokens=config.max_new_tokens,
+            do_sample=config.do_sample,
+            temperature=config.temperature,
+            top_p=config.top_p,
+            top_k=config.top_k,
+            oom_backoff=config.oom_backoff,
+            torch_module=torch,
+        )
+        for (corruption, clean_prefix, rollout_index), continuation in zip(batch, continuations, strict=True):
+            full_prediction = f"{corruption.corrupted_prefix_text}{continuation}"
+            scored = score_prediction(
+                PredictionRecord(
+                    sample_id=clean_prefix.sample_id,
+                    dataset=clean_prefix.dataset,
+                    split=clean_prefix.split,
+                    raw_prediction=full_prediction,
+                    gold_answer=clean_prefix.gold_answer,
+                    question=clean_prefix.question,
+                    metadata={
+                        "prefix_id": clean_prefix.prefix_id,
+                        "corruption_id": corruption.corruption_id,
+                        "rollout_index": int(rollout_index),
+                    },
+                )
+            )
+            by_corruption.setdefault(corruption.corruption_id, []).append(
+                {
+                    "is_correct": bool(scored.is_correct),
+                    "parse_error": bool(scored.parse_error),
+                    "generated_char_count": len(continuation),
+                    "rollout_index": int(rollout_index),
+                    "clean_prefix_id": clean_prefix.prefix_id,
+                    "sample_id": clean_prefix.sample_id,
+                    "dataset": clean_prefix.dataset,
+                    "split": clean_prefix.split,
+                    "corruption_type": corruption.corruption_type,
+                    "corruption_step_index": corruption.corruption_step_index,
+                }
+            )
+
+    corr_targets: list[CorruptionRolloutTargetRecord] = []
+    for corruption in sorted(corruption_artifacts, key=lambda c: c.corruption_id):
+        rows = sorted(by_corruption.get(corruption.corruption_id, []), key=lambda row: row["rollout_index"])
+        if not rows:
+            continue
+        k_rollouts = len(rows)
+        n_correct = sum(1 for row in rows if row["is_correct"])
+        n_parse_error = sum(1 for row in rows if row["parse_error"])
+        parseable = k_rollouts - n_parse_error
+        stats = _compute_target_quality_stats(
+            n_correct=n_correct,
+            k_rollouts=k_rollouts,
+            alpha=target_quality_config.alpha,
+            beta=target_quality_config.beta,
+            ci_z=target_quality_config.ci_z,
+            weight_floor=target_quality_config.weight_floor,
+            weight_gamma=target_quality_config.weight_gamma,
+        )
+        target = CorruptionRolloutTargetRecord(
+            corruption_id=corruption.corruption_id,
+            clean_prefix_id=corruption.clean_prefix_id,
+            sample_id=str(rows[0]["sample_id"]),
+            dataset=str(rows[0]["dataset"]),
+            split=str(rows[0]["split"]),
+            corruption_type=str(rows[0]["corruption_type"]),
+            corruption_step_index=int(rows[0]["corruption_step_index"]),
+            k_rollouts=k_rollouts,
+            n_correct=n_correct,
+            n_parse_error=n_parse_error,
+            success_rate=(n_correct / k_rollouts if k_rollouts else 0.0),
+            parseable_rate=(parseable / k_rollouts if k_rollouts else 0.0),
+            q_mean_smoothed=float(stats["q_mean_smoothed"]),
+            q_std_error=float(stats["q_std_error"]),
+            q_ci_low=float(stats["q_ci_low"]),
+            q_ci_high=float(stats["q_ci_high"]),
+            q_ci_width=float(stats["q_ci_width"]),
+            q_weight=float(stats["q_weight"]),
+            mean_generated_char_count=float(
+                sum(int(row["generated_char_count"]) for row in rows) / max(k_rollouts, 1)
+            ),
+            metadata={
+                "rollout_indices": [int(row["rollout_index"]) for row in rows],
+            },
+        )
+        target.validate()
+        corr_targets.append(target)
+
+    corr_target_by_id = {target.corruption_id: target for target in corr_targets}
+    pair_records: list[PairQualityRecord] = []
+    for corruption in sorted(corruption_artifacts, key=lambda c: c.corruption_id):
+        clean_target = clean_targets_by_prefix.get(corruption.clean_prefix_id)
+        corr_target = corr_target_by_id.get(corruption.corruption_id)
+        if clean_target is None or corr_target is None:
+            continue
+        delta_q = float(clean_target.q_mean_smoothed) - float(corr_target.q_mean_smoothed)
+        se_delta = math.sqrt(
+            float(clean_target.q_std_error) ** 2 + float(corr_target.q_std_error) ** 2
+        )
+        z_delta = float(delta_q / max(se_delta, 1e-8))
+        pair_pass = (
+            delta_q >= float(target_quality_config.pair_delta_q_min)
+            and z_delta >= float(target_quality_config.pair_z_min)
+        )
+        delta_norm = min(max(delta_q, 0.0), 1.0)
+        z_norm = min(max(z_delta, 0.0) / 5.0, 1.0)
+        pair_weight = 0.5 * delta_norm + 0.5 * z_norm
+        if not pair_pass:
+            pair_weight *= 0.5
+        pair = PairQualityRecord(
+            pair_id=_stable_hash(
+                "phase_c_pair_quality",
+                clean_target.prefix_id,
+                corr_target.corruption_id,
+            )[:24],
+            clean_prefix_id=clean_target.prefix_id,
+            corruption_id=corr_target.corruption_id,
+            sample_id=clean_target.sample_id,
+            dataset=clean_target.dataset,
+            split=clean_target.split,
+            corruption_type=corr_target.corruption_type,
+            corruption_step_index=corr_target.corruption_step_index,
+            q_clean=float(clean_target.q_mean_smoothed),
+            q_corrupt=float(corr_target.q_mean_smoothed),
+            delta_q=float(delta_q),
+            se_clean=float(clean_target.q_std_error),
+            se_corrupt=float(corr_target.q_std_error),
+            se_delta=float(se_delta),
+            z_delta=float(z_delta),
+            pair_weight=float(min(max(pair_weight, 0.0), 1.0)),
+            metadata={
+                "pair_pass_gate": bool(pair_pass),
+                "delta_q_min": float(target_quality_config.pair_delta_q_min),
+                "z_min": float(target_quality_config.pair_z_min),
+                "clean_success_rate": float(clean_target.success_rate),
+                "corrupt_success_rate": float(corr_target.success_rate),
+            },
+        )
+        pair.validate()
+        pair_records.append(pair)
+    return corr_targets, pair_records
+
+
+def _compute_target_quality_stats(
+    *,
+    n_correct: int,
+    k_rollouts: int,
+    alpha: float,
+    beta: float,
+    ci_z: float,
+    weight_floor: float,
+    weight_gamma: float,
+) -> dict[str, float]:
+    """Compute uncertainty-aware target stats from Monte Carlo outcomes."""
+    if k_rollouts <= 0:
+        return {
+            "q_mean_smoothed": 0.0,
+            "q_std_error": 0.0,
+            "q_ci_low": 0.0,
+            "q_ci_high": 0.0,
+            "q_ci_width": 0.0,
+            "q_weight": 0.0,
+        }
+    q_smoothed = (float(n_correct) + float(alpha)) / (
+        float(k_rollouts) + float(alpha) + float(beta)
+    )
+    denom = float(k_rollouts) + float(alpha) + float(beta) + 1.0
+    q_std_error = math.sqrt(max(q_smoothed * (1.0 - q_smoothed), 0.0) / max(denom, 1e-8))
+    q_ci_low = max(0.0, q_smoothed - float(ci_z) * q_std_error)
+    q_ci_high = min(1.0, q_smoothed + float(ci_z) * q_std_error)
+    q_ci_width = max(q_ci_high - q_ci_low, 0.0)
+    q_weight = 1.0 - min(q_ci_width, 1.0)
+    q_weight = max(q_weight, float(weight_floor))
+    if float(weight_gamma) != 1.0:
+        q_weight = q_weight ** float(weight_gamma)
+    q_weight = min(max(q_weight, 0.0), 1.0)
+    return {
+        "q_mean_smoothed": float(q_smoothed),
+        "q_std_error": float(q_std_error),
+        "q_ci_low": float(q_ci_low),
+        "q_ci_high": float(q_ci_high),
+        "q_ci_width": float(q_ci_width),
+        "q_weight": float(q_weight),
+    }
 
 
 def _generate_prompt_batch_with_backoff(
@@ -938,7 +1412,12 @@ def _write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def _expected_output_files(*, build_corruptions: bool, build_rollouts: bool) -> list[str]:
+def _expected_output_files(
+    *,
+    build_corruptions: bool,
+    build_rollouts: bool,
+    build_pair_quality: bool,
+) -> list[str]:
     """Return the output filenames that define a complete run."""
     names = [
         "step_sequences.jsonl",
@@ -952,6 +1431,8 @@ def _expected_output_files(*, build_corruptions: bool, build_rollouts: bool) -> 
         names.append("corruptions.jsonl")
     if build_rollouts:
         names.extend(["rollout_predictions.jsonl", "rollout_targets.jsonl"])
+    if build_pair_quality:
+        names.extend(["corruption_rollout_targets.jsonl", "pair_quality.jsonl"])
     return names
 
 
@@ -1004,7 +1485,21 @@ def _render_summary_markdown(summary: dict[str, Any], manifest: dict[str, Any]) 
                 "",
                 f"- mean_success_rate: `{summary['rollout_summary']['mean_success_rate']:.4f}`",
                 f"- mean_parseable_rate: `{summary['rollout_summary']['mean_parseable_rate']:.4f}`",
+                f"- mean_q_weight: `{summary['rollout_summary']['mean_q_weight']:.4f}`",
+                f"- mean_q_ci_width: `{summary['rollout_summary']['mean_q_ci_width']:.4f}`",
                 f"- mean_generated_char_count: `{summary['rollout_summary']['mean_generated_char_count']:.2f}`",
+            ]
+        )
+    if summary["pair_quality_summary"] is not None:
+        lines.extend(
+            [
+                "",
+                "## Pair Quality Summary",
+                "",
+                f"- num_pairs: `{summary['pair_quality_summary']['num_pairs']}`",
+                f"- positive_delta_ratio: `{summary['pair_quality_summary']['positive_delta_ratio']:.4f}`",
+                f"- mean_delta_q: `{summary['pair_quality_summary']['mean_delta_q']:.4f}`",
+                f"- mean_pair_weight: `{summary['pair_quality_summary']['mean_pair_weight']:.4f}`",
             ]
         )
     lines.append("")

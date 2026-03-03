@@ -149,6 +149,7 @@ def contrastive_margin_loss(
     *,
     margin: float,
     torch_module: Any,
+    sample_weights: Any | None = None,
 ):
     """Encourage clean prefixes to score above corrupted ones.
 
@@ -161,7 +162,8 @@ def contrastive_margin_loss(
         )
     if margin < 0:
         raise ValueError("`margin` must be non-negative")
-    return torch_module.relu(float(margin) - clean_scores + corrupted_scores).mean()
+    raw = torch_module.relu(float(margin) - clean_scores + corrupted_scores)
+    return _weighted_mean(raw, sample_weights=sample_weights, torch_module=torch_module)
 
 
 def bellman_consistency_loss(

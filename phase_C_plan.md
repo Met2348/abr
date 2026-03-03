@@ -469,6 +469,20 @@ So the immediate objective is not "more tricks at once"; it is
 4. Add post-hoc calibration (temperature/sigmoid) before promoting value head to routing.
 5. Verify practical utility with rerank-style tests (sample multiple continuations, select by value score).
 
+### Operational note: P(IK) branch added to reduce diagnosis ambiguity
+
+To avoid repeatedly tuning high-noise prefix objectives when signal is unclear,
+Phase C now includes a question-level P(IK) branch:
+
+1. C1 (P(IK)): build question-level rollout targets.
+2. C2 (P(IK)): train calibration-first value head on empirical success rates.
+3. Eval (P(IK)): measure Brier/Pearson and known-vs-unknown AUROC.
+
+Why this was added:
+- prefix-level corruption metrics were often near chance, so failures were hard to attribute;
+- P(IK) provides a simpler “can the head learn anything?” gate before returning
+  to prefix ranking/corruption complexity.
+
 ### Top-to-try sequence for current C2 dilemma (2026-03-03)
 
 Run in this order; do not skip directly to stronger contrastive/Bellman terms:
@@ -999,3 +1013,93 @@ The first implementation item should be:
 4. then `scripts/phase_b_train_value.py`.
 
 Do not start Phase C by writing the RL trainer first.
+
+## 18. C1/C2 Data-Quality-First Upgrade (Current Active Plan)
+
+This is the current high-priority plan to improve value-head learnability before
+adding more model complexity.
+
+### 18.1 Why this upgrade is needed
+
+Recent runs showed:
+1. calibration can improve but corruption ordering is unstable,
+2. pairwise corruption metrics often stay near random,
+3. objective-side tricks alone do not fix weak supervision quality.
+
+So the next step is to improve **label quality first**:
+1. more reliable prefix targets $Q(h_t)$,
+2. label-side clean-vs-corrupt pair quality,
+3. train-time gating/weighting driven by those labels.
+
+### 18.2 C1 changes (implemented)
+
+`scripts/phase_b_prepare_value_data.py` now writes uncertainty-aware target
+fields for each clean prefix:
+
+$$
+\hat{Q}(h_t) = \frac{n_{\text{correct}} + \alpha}{k + \alpha + \beta}
+$$
+
+$$
+\text{SE}(h_t) \approx \sqrt{\frac{\hat{Q}(h_t)(1-\hat{Q}(h_t))}{k+\alpha+\beta+1}}
+$$
+
+$$
+\text{CI width}(h_t) = 2 z \cdot \text{SE}(h_t)
+$$
+
+$$
+w_Q(h_t) = \max(w_{\min}, 1 - \text{CI width}(h_t))^{\gamma}
+$$
+
+New C1 artifacts:
+1. `corruption_rollout_targets.jsonl`
+2. `pair_quality.jsonl`
+
+Pair-quality records include label-side statistics:
+1. $\Delta Q = Q_{\text{clean}} - Q_{\text{corrupt}}$
+2. $z_{\Delta} = \frac{\Delta Q}{\sqrt{\text{SE}_{\text{clean}}^2+\text{SE}_{\text{corrupt}}^2}}$
+3. `pair_weight` in `[0,1]`
+4. `pair_pass_gate` from configured thresholds.
+
+### 18.3 C2 changes (implemented)
+
+`scripts/phase_b_train_value.py` now consumes those C1 quality fields:
+1. calibration target uses smoothed `q_mean_smoothed`,
+2. calibration weighting supports:
+   - `q_weight`
+   - `q_weight_parseable`
+3. contrastive pair filtering supports:
+   - `label_quality`
+   - `confidence_parseable_label`
+4. label-side thresholds added:
+   - `--contrastive-label-delta-q-min`
+   - `--contrastive-label-z-min`
+   - `--contrastive-label-pair-weight-min`
+   - `--contrastive-require-pair-pass-gate`
+5. optional weighted contrastive loss:
+   - `--contrastive-use-pair-weights`
+
+### 18.4 Suite-level automation (implemented)
+
+`scripts/run_phase_c_value_suite.sh` now supports group-level default C1 prep
+extra args and includes two new groups:
+1. `C2_STRATEGYQA_QUALITY_FIRST`
+2. `C2_STRATEGYQA_QUALITY_FIRST_FULL`
+
+These groups enable:
+1. C1 pair-quality build (`--build-pair-quality`),
+2. higher rollout count defaults (`k=16`),
+3. q-weighted calibration and label-quality pair filtering in C2.
+
+### 18.5 Next validation gates
+
+Before moving to RL/BCR-lite expansion:
+1. run quality-first smoke and full groups,
+2. compare against `TRICK10` and baseline groups on:
+   - raw/post-hoc Brier,
+   - Pearson,
+   - corruption pair accuracy,
+   - corruption AUC,
+3. confirm whether label-quality gates improve pair metrics without collapsing
+   calibration.

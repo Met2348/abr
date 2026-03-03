@@ -16,6 +16,7 @@ What this file contains
 - dataclasses describing clean value examples and corruption variants
 - manifest/compatibility checks for Phase C artifact directories
 - loaders that join prefixes, rollout targets, and corruptions deterministically
+  (and, when present, pair-quality artifacts from corruption rollouts)
 
 Interaction with other files
 ----------------------------
@@ -69,6 +70,10 @@ class ValueSupervisionExample:
     num_reasoning_steps_seen: int
     num_reasoning_steps_total: int
     target_success_rate: float
+    target_q_mean_smoothed: float
+    target_q_std_error: float
+    target_q_ci_width: float
+    target_q_weight: float
     target_parseable_rate: float
     target_k_rollouts: int
     mean_generated_char_count: float
@@ -76,6 +81,10 @@ class ValueSupervisionExample:
     primary_corruption_text: str | None = None
     primary_corruption_type: str | None = None
     primary_corruption_step_index: int | None = None
+    primary_pair_delta_q: float | None = None
+    primary_pair_z_delta: float | None = None
+    primary_pair_weight: float | None = None
+    primary_pair_pass_gate: bool | None = None
 
     def validate(self) -> None:
         """Validate field types and numeric ranges.
@@ -111,6 +120,14 @@ class ValueSupervisionExample:
             value = getattr(self, name)
             if not isinstance(value, (int, float)) or not (0.0 <= float(value) <= 1.0):
                 raise ValueError(f"`{name}` must be a float in [0, 1]")
+        for name in ("target_q_mean_smoothed", "target_q_weight"):
+            value = getattr(self, name)
+            if not isinstance(value, (int, float)) or not (0.0 <= float(value) <= 1.0):
+                raise ValueError(f"`{name}` must be a float in [0, 1]")
+        for name in ("target_q_std_error", "target_q_ci_width"):
+            value = getattr(self, name)
+            if not isinstance(value, (int, float)) or float(value) < 0.0:
+                raise ValueError(f"`{name}` must be a non-negative float")
         if not isinstance(self.target_k_rollouts, int) or self.target_k_rollouts <= 0:
             raise ValueError("`target_k_rollouts` must be a positive int")
         if not isinstance(self.mean_generated_char_count, (int, float)) or float(self.mean_generated_char_count) < 0.0:
@@ -124,6 +141,23 @@ class ValueSupervisionExample:
         if self.primary_corruption_step_index is not None:
             if not isinstance(self.primary_corruption_step_index, int) or self.primary_corruption_step_index < 0:
                 raise ValueError("`primary_corruption_step_index` must be a non-negative int or None")
+        if self.primary_pair_delta_q is not None and not isinstance(
+            self.primary_pair_delta_q, (int, float)
+        ):
+            raise TypeError("`primary_pair_delta_q` must be float or None")
+        if self.primary_pair_z_delta is not None and not isinstance(
+            self.primary_pair_z_delta, (int, float)
+        ):
+            raise TypeError("`primary_pair_z_delta` must be float or None")
+        if self.primary_pair_weight is not None:
+            if not isinstance(self.primary_pair_weight, (int, float)):
+                raise TypeError("`primary_pair_weight` must be float or None")
+            if not (0.0 <= float(self.primary_pair_weight) <= 1.0):
+                raise ValueError("`primary_pair_weight` must be in [0, 1]")
+        if self.primary_pair_pass_gate is not None and not isinstance(
+            self.primary_pair_pass_gate, bool
+        ):
+            raise TypeError("`primary_pair_pass_gate` must be bool or None")
 
     def to_dict(self) -> dict[str, Any]:
         """Return a validated JSON-serializable dictionary."""
@@ -286,6 +320,7 @@ def load_value_supervision_examples(
     prefix_path = run_dir / "prefixes.jsonl"
     rollout_target_path = run_dir / "rollout_targets.jsonl"
     corruption_path = run_dir / "corruptions.jsonl"
+    pair_quality_path = run_dir / "pair_quality.jsonl"
 
     if not prefix_path.exists():
         raise FileNotFoundError(f"Missing prefixes.jsonl: {prefix_path}")
@@ -299,7 +334,16 @@ def load_value_supervision_examples(
 
     prefixes = {row["prefix_id"]: row for row in _read_jsonl(prefix_path)}
     rollout_targets = {row["prefix_id"]: row for row in _read_jsonl(rollout_target_path)}
-    primary_corruptions = _build_primary_corruption_map(_read_jsonl(corruption_path)) if corruption_path.exists() else {}
+    primary_corruptions = (
+        _build_primary_corruption_map(_read_jsonl(corruption_path))
+        if corruption_path.exists()
+        else {}
+    )
+    pair_quality_by_corruption, pair_quality_by_prefix = (
+        _build_pair_quality_maps(_read_jsonl(pair_quality_path))
+        if pair_quality_path.exists()
+        else ({}, {})
+    )
 
     examples: list[ValueSupervisionExample] = []
     for prefix_id in sorted(rollout_targets):
@@ -308,6 +352,17 @@ def load_value_supervision_examples(
         if prefix is None:
             raise KeyError(f"Missing prefix record for rollout target prefix_id={prefix_id!r}")
         corruption = primary_corruptions.get(prefix_id)
+        pair_quality = None
+        if corruption is not None:
+            pair_quality = pair_quality_by_corruption.get(str(corruption["corruption_id"]))
+        if pair_quality is None:
+            pair_quality = pair_quality_by_prefix.get(str(prefix_id))
+
+        target_success_rate = float(target["success_rate"])
+        target_q_mean_smoothed = float(target.get("q_mean_smoothed", target_success_rate))
+        target_q_std_error = float(target.get("q_std_error", 0.0))
+        target_q_ci_width = float(target.get("q_ci_width", 0.0))
+        target_q_weight = float(target.get("q_weight", 1.0))
         example = ValueSupervisionExample(
             prefix_id=str(prefix_id),
             sample_id=str(prefix["sample_id"]),
@@ -321,17 +376,36 @@ def load_value_supervision_examples(
             prefix_step_index=int(prefix["prefix_step_index"]),
             num_reasoning_steps_seen=int(prefix["num_reasoning_steps_seen"]),
             num_reasoning_steps_total=int(prefix["num_reasoning_steps_total"]),
-            target_success_rate=float(target["success_rate"]),
+            target_success_rate=target_success_rate,
+            target_q_mean_smoothed=target_q_mean_smoothed,
+            target_q_std_error=target_q_std_error,
+            target_q_ci_width=target_q_ci_width,
+            target_q_weight=target_q_weight,
             target_parseable_rate=float(target["parseable_rate"]),
             target_k_rollouts=int(target["k_rollouts"]),
             mean_generated_char_count=float(target["mean_generated_char_count"]),
             metadata={
                 "prefix_metadata": dict(prefix.get("metadata", {})),
                 "target_metadata": dict(target.get("metadata", {})),
+                "has_pair_quality": bool(pair_quality is not None),
             },
             primary_corruption_text=(str(corruption["corrupted_prefix_text"]) if corruption is not None else None),
             primary_corruption_type=(str(corruption["corruption_type"]) if corruption is not None else None),
             primary_corruption_step_index=(int(corruption["corruption_step_index"]) if corruption is not None else None),
+            primary_pair_delta_q=(
+                float(pair_quality["delta_q"]) if pair_quality is not None else None
+            ),
+            primary_pair_z_delta=(
+                float(pair_quality["z_delta"]) if pair_quality is not None else None
+            ),
+            primary_pair_weight=(
+                float(pair_quality["pair_weight"]) if pair_quality is not None else None
+            ),
+            primary_pair_pass_gate=(
+                bool(pair_quality.get("metadata", {}).get("pair_pass_gate"))
+                if pair_quality is not None
+                else None
+            ),
         )
         example.validate()
         examples.append(example)
@@ -409,6 +483,41 @@ def _build_primary_corruption_map(rows: list[dict[str, Any]]) -> dict[str, dict[
     for prefix_id, variants in grouped.items():
         resolved[prefix_id] = sorted(variants, key=lambda item: str(item["corruption_id"]))[0]
     return resolved
+
+
+def _build_pair_quality_maps(
+    rows: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Index pair-quality rows by corruption and by clean prefix.
+
+    The clean-prefix map keeps a deterministic "best" record for fallback use
+    when the primary corruption chosen for C2 training does not have a direct
+    pair-quality record.
+    """
+    by_corruption: dict[str, dict[str, Any]] = {}
+    grouped_by_prefix: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        corruption_id = str(row.get("corruption_id", ""))
+        clean_prefix_id = str(row.get("clean_prefix_id", ""))
+        if corruption_id:
+            by_corruption[corruption_id] = row
+        if clean_prefix_id:
+            grouped_by_prefix.setdefault(clean_prefix_id, []).append(row)
+
+    by_prefix: dict[str, dict[str, Any]] = {}
+    for prefix_id, variants in grouped_by_prefix.items():
+        ranked = sorted(
+            variants,
+            key=lambda item: (
+                0 if bool(item.get("metadata", {}).get("pair_pass_gate")) else 1,
+                -float(item.get("pair_weight", 0.0)),
+                -float(item.get("delta_q", 0.0)),
+                -float(item.get("z_delta", 0.0)),
+                str(item.get("pair_id", "")),
+            ),
+        )
+        by_prefix[prefix_id] = ranked[0]
+    return by_corruption, by_prefix
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

@@ -37,6 +37,7 @@ ACTIVE_PHASE_C_GROUP="${ACTIVE_PHASE_C_GROUP:-C2_STRATEGYQA_SMOKE}"
 RUN_PREFIX="${RUN_PREFIX:-phase_c_value}"
 ENABLE_PERSISTED_LOGS="${ENABLE_PERSISTED_LOGS:-1}"
 CURRENT_STAGE="init"
+C1_PREP_EXTRA_ARGS_DEFAULT=""
 
 timestamp() {
   date "+%Y-%m-%d %H:%M:%S %z"
@@ -420,9 +421,53 @@ resolve_group() {
       C2_TRAIN_EXTRA_ARGS_DEFAULT="${C2_TRAIN_EXTRA_ARGS_DEFAULT:---calibration-loss bce_mse --calibration-bce-weight 1.0 --calibration-mse-weight 0.5 --calibration-target-smoothing 0.03 --calibration-sample-weighting confidence_parseable --calibration-weight-floor 0.1 --lambda-contrastive 0.08 --contrastive-margin 0.02 --contrastive-pair-filter confidence_parseable --contrastive-confidence-threshold 0.2 --contrastive-parseable-threshold 0.75 --contrastive-score-gap-min 0.0 --contrastive-score-gap-max 0.25 --adaptive-loss-balancing uncertainty --adaptive-loss-init-log-variance 0.0 --posthoc-calibration isotonic --checkpoint-selection-metric posthoc_brier --posthoc-isotonic-min-points 32}"
       C2_EVAL_EXTRA_ARGS_DEFAULT="${C2_EVAL_EXTRA_ARGS_DEFAULT:---posthoc-calibration from_run}"
       ;;
+    C2_STRATEGYQA_QUALITY_FIRST)
+      GROUP_TITLE="Phase C2 StrategyQA Quality-First (Q + Pair Quality)"
+      GROUP_INTENTION="Use uncertainty-aware Q targets and label-quality pair gating as first-class training signals."
+      GROUP_OBSERVE="Check whether q-weighted calibration and label-side pair filters improve both calibration and corruption ordering."
+      GROUP_EXPECT="If supervision quality is the core bottleneck, this run should dominate earlier confidence-only filtering baselines."
+      GROUP_DATASET="strategyqa"
+      TRAIN_INPUT_JSONL="assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl"
+      EVAL_INPUT_JSONL="assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/validation.jsonl"
+      TRAIN_MAX_SAMPLES="${TRAIN_MAX_SAMPLES:-256}"
+      EVAL_MAX_SAMPLES="${EVAL_MAX_SAMPLES:-128}"
+      ROLLOUT_COUNT="${ROLLOUT_COUNT:-16}"
+      ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-256}"
+      ROLLOUT_MAX_NEW_TOKENS="${ROLLOUT_MAX_NEW_TOKENS:-128}"
+      C2_TRAIN_BATCH_SIZE="${C2_TRAIN_BATCH_SIZE:-256}"
+      C2_EVAL_BATCH_SIZE="${C2_EVAL_BATCH_SIZE:-256}"
+      C2_LR="${C2_LR:-1e-4}"
+      C2_EPOCHS="${C2_EPOCHS:-10}"
+      C2_USE_CONTRASTIVE="${C2_USE_CONTRASTIVE:-1}"
+      C1_PREP_EXTRA_ARGS_DEFAULT="${C1_PREP_EXTRA_ARGS_DEFAULT:---build-pair-quality --pair-rollout-count 16 --target-alpha 1.0 --target-beta 1.0 --target-ci-z 1.96 --target-weight-floor 0.1 --target-weight-gamma 1.0 --pair-delta-q-min 0.1 --pair-z-min 0.5}"
+      C2_TRAIN_EXTRA_ARGS_DEFAULT="${C2_TRAIN_EXTRA_ARGS_DEFAULT:---calibration-loss bce_mse --calibration-bce-weight 1.0 --calibration-mse-weight 0.5 --calibration-sample-weighting q_weight_parseable --calibration-weight-floor 0.1 --calibration-weight-gamma 1.0 --lambda-contrastive 0.08 --contrastive-margin 0.02 --contrastive-pair-filter confidence_parseable_label --contrastive-confidence-threshold 0.2 --contrastive-parseable-threshold 0.75 --contrastive-label-delta-q-min 0.1 --contrastive-label-z-min 0.5 --contrastive-label-pair-weight-min 0.3 --contrastive-require-pair-pass-gate --contrastive-use-pair-weights --posthoc-calibration temperature --checkpoint-selection-metric posthoc_brier}"
+      C2_EVAL_EXTRA_ARGS_DEFAULT="${C2_EVAL_EXTRA_ARGS_DEFAULT:---posthoc-calibration from_run}"
+      ;;
+    C2_STRATEGYQA_QUALITY_FIRST_FULL)
+      GROUP_TITLE="Phase C2 StrategyQA Quality-First Full"
+      GROUP_INTENTION="Run the quality-first recipe on full StrategyQA train/validation C1 coverage."
+      GROUP_OBSERVE="Check whether improvements hold beyond smoke-scale sample caps."
+      GROUP_EXPECT="If the quality-first path is real, full-scale metrics should remain stable or improve."
+      GROUP_DATASET="strategyqa"
+      TRAIN_INPUT_JSONL="assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl"
+      EVAL_INPUT_JSONL="assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/validation.jsonl"
+      TRAIN_MAX_SAMPLES="${TRAIN_MAX_SAMPLES:-}"
+      EVAL_MAX_SAMPLES="${EVAL_MAX_SAMPLES:-}"
+      ROLLOUT_COUNT="${ROLLOUT_COUNT:-16}"
+      ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-256}"
+      ROLLOUT_MAX_NEW_TOKENS="${ROLLOUT_MAX_NEW_TOKENS:-128}"
+      C2_TRAIN_BATCH_SIZE="${C2_TRAIN_BATCH_SIZE:-256}"
+      C2_EVAL_BATCH_SIZE="${C2_EVAL_BATCH_SIZE:-256}"
+      C2_LR="${C2_LR:-1e-4}"
+      C2_EPOCHS="${C2_EPOCHS:-10}"
+      C2_USE_CONTRASTIVE="${C2_USE_CONTRASTIVE:-1}"
+      C1_PREP_EXTRA_ARGS_DEFAULT="${C1_PREP_EXTRA_ARGS_DEFAULT:---build-pair-quality --pair-rollout-count 16 --target-alpha 1.0 --target-beta 1.0 --target-ci-z 1.96 --target-weight-floor 0.1 --target-weight-gamma 1.0 --pair-delta-q-min 0.1 --pair-z-min 0.5}"
+      C2_TRAIN_EXTRA_ARGS_DEFAULT="${C2_TRAIN_EXTRA_ARGS_DEFAULT:---calibration-loss bce_mse --calibration-bce-weight 1.0 --calibration-mse-weight 0.5 --calibration-sample-weighting q_weight_parseable --calibration-weight-floor 0.1 --calibration-weight-gamma 1.0 --lambda-contrastive 0.08 --contrastive-margin 0.02 --contrastive-pair-filter confidence_parseable_label --contrastive-confidence-threshold 0.2 --contrastive-parseable-threshold 0.75 --contrastive-label-delta-q-min 0.1 --contrastive-label-z-min 0.5 --contrastive-label-pair-weight-min 0.3 --contrastive-require-pair-pass-gate --contrastive-use-pair-weights --posthoc-calibration temperature --checkpoint-selection-metric posthoc_brier}"
+      C2_EVAL_EXTRA_ARGS_DEFAULT="${C2_EVAL_EXTRA_ARGS_DEFAULT:---posthoc-calibration from_run}"
+      ;;
     *)
       echo "ERROR: Unknown ACTIVE_PHASE_C_GROUP=$ACTIVE_PHASE_C_GROUP"
-      echo "Supported groups: C2_STRATEGYQA_SMOKE, C2_STRATEGYQA_FULL, C2_STRATEGYQA_TRICK1_BCE, C2_STRATEGYQA_TRICK2_POSTHOC_TEMP, C2_STRATEGYQA_TRICK3_ADAPTIVE_BALANCE, C2_STRATEGYQA_TRICK4_ISOTONIC, C2_STRATEGYQA_TRICK5_WEIGHTED_CAL, C2_STRATEGYQA_TRICK6_PAIR_FILTER, C2_STRATEGYQA_TRICK7_COMBINED, C2_STRATEGYQA_TRICK8_LABEL_SMOOTH, C2_STRATEGYQA_TRICK9_HARD_NEG_MINING, C2_STRATEGYQA_TRICK10_K16_COMBINED"
+      echo "Supported groups: C2_STRATEGYQA_SMOKE, C2_STRATEGYQA_FULL, C2_STRATEGYQA_TRICK1_BCE, C2_STRATEGYQA_TRICK2_POSTHOC_TEMP, C2_STRATEGYQA_TRICK3_ADAPTIVE_BALANCE, C2_STRATEGYQA_TRICK4_ISOTONIC, C2_STRATEGYQA_TRICK5_WEIGHTED_CAL, C2_STRATEGYQA_TRICK6_PAIR_FILTER, C2_STRATEGYQA_TRICK7_COMBINED, C2_STRATEGYQA_TRICK8_LABEL_SMOOTH, C2_STRATEGYQA_TRICK9_HARD_NEG_MINING, C2_STRATEGYQA_TRICK10_K16_COMBINED, C2_STRATEGYQA_QUALITY_FIRST, C2_STRATEGYQA_QUALITY_FIRST_FULL"
       exit 1
       ;;
   esac
@@ -454,6 +499,7 @@ run_c1_prepare() {
   if [[ -n "$max_samples" ]]; then
     cmd+=(--max-samples "$max_samples")
   fi
+  append_extra_args cmd "${C1_PREP_EXTRA_ARGS_DEFAULT:-}"
   append_extra_args cmd "${PHASE_C_PREP_EXTRA_ARGS:-}"
 
   CURRENT_STAGE="c1_prepare_${split_label}"
@@ -503,6 +549,8 @@ C2_STANDALONE_EVAL_RUN_NAME="${RUN_NAME}_c2_eval"
   log_line "C2 use ctr     : $C2_USE_CONTRASTIVE"
   log_line "C2 default train extra: ${C2_TRAIN_EXTRA_ARGS_DEFAULT:-<none>}"
   log_line "C2 default eval extra : ${C2_EVAL_EXTRA_ARGS_DEFAULT:-<none>}"
+  log_line "C1 default prep extra : ${C1_PREP_EXTRA_ARGS_DEFAULT:-<none>}"
+  log_line "User prep extra args  : ${PHASE_C_PREP_EXTRA_ARGS:-<none>}"
   log_line "User train extra args : ${PHASE_C_TRAIN_EXTRA_ARGS:-<none>}"
   log_line "User eval extra args  : ${PHASE_C_EVAL_EXTRA_ARGS:-<none>}"
   log_line "Intention      : $GROUP_INTENTION"

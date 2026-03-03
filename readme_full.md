@@ -9,6 +9,11 @@ Current milestone status (2026-02-28):
 - Project execution focus is officially switched to Phase B.
 - Phase C planning is now frozen in `phase_C_plan.md`.
 - Phase C C0/C1 artifact-preparation code is implemented.
+- Phase C P(IK) diagnostic branch is implemented end-to-end:
+  - C1 question-level rollout artifacts (`scripts/phase_c_prepare_pik_data.py`),
+  - C2 question-level value-head training (`scripts/phase_c_train_pik.py`),
+  - standalone re-eval (`scripts/phase_c_eval_pik.py`),
+  - lifecycle suite (`scripts/run_phase_c_pik_suite.sh`).
 - Phase A core conclusion:
   - parse-error inflation was mostly protocol/extraction/free-form formatting related,
   - after binary-choice decode, StrategyQA parse error reaches `0.0000`,
@@ -138,6 +143,8 @@ Output layout:
   - `corruptions.jsonl`
   - `rollout_predictions.jsonl`
   - `rollout_targets.jsonl`
+  - `corruption_rollout_targets.jsonl` (when `--build-pair-quality` is enabled)
+  - `pair_quality.jsonl` (when `--build-pair-quality` is enabled)
 - plus:
   - `manifest.json`
   - `summary.json`
@@ -149,7 +156,9 @@ Contract checks after every run:
 3. `corruptions.jsonl` should actually change the prefix text.
 4. `rollout_targets.jsonl` should show non-trivial `success_rate` values when
    rollouts are enabled.
-5. `summary.md` should match file counts on disk.
+5. if pair-quality mode is enabled, `pair_quality.jsonl` should contain
+   `delta_q`, `z_delta`, and `pair_weight` fields.
+6. `summary.md` should match file counts on disk.
 
 Validation commands:
 
@@ -234,14 +243,19 @@ The following options are now implemented and can be enabled/disabled directly:
 - `--adaptive-loss-init-log-variance`
 
 4. Trick-4: confidence-aware calibration weighting
-- `--calibration-sample-weighting {none,confidence,entropy_inverse,parseable,confidence_parseable}`
+- `--calibration-sample-weighting {none,confidence,entropy_inverse,parseable,confidence_parseable,q_weight,q_weight_parseable}`
 - `--calibration-weight-floor`
 - `--calibration-weight-gamma`
 
 5. Trick-5: contrastive pair filtering
-- `--contrastive-pair-filter {none,confidence,parseable,confidence_parseable}`
+- `--contrastive-pair-filter {none,confidence,parseable,confidence_parseable,label_quality,confidence_parseable_label}`
 - `--contrastive-confidence-threshold`
 - `--contrastive-parseable-threshold`
+- `--contrastive-label-delta-q-min`
+- `--contrastive-label-z-min`
+- `--contrastive-label-pair-weight-min`
+- `--contrastive-require-pair-pass-gate`
+- `--contrastive-use-pair-weights`
 
 6. Trick-6: calibration target smoothing
 - `--calibration-target-smoothing` (epsilon in `[0, 0.5)`)
@@ -378,6 +392,18 @@ ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_TRICK10_K16_COMBINED \
 RUN_PREFIX=phase_c_trick10_k16_combined \
 CUDA_VISIBLE_DEVICES=2 \
 bash scripts/run_phase_c_value_suite.sh
+
+# Quality-first smoke (Q + pair-quality labels)
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_QUALITY_FIRST \
+RUN_PREFIX=phase_c_quality_first \
+CUDA_VISIBLE_DEVICES=3 \
+bash scripts/run_phase_c_value_suite.sh
+
+# Quality-first full (train/eval full coverage)
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_QUALITY_FIRST_FULL \
+RUN_PREFIX=phase_c_quality_first_full \
+CUDA_VISIBLE_DEVICES=0 \
+bash scripts/run_phase_c_value_suite.sh
 ```
 
 Supported groups:
@@ -393,11 +419,14 @@ Supported groups:
 10. `C2_STRATEGYQA_TRICK8_LABEL_SMOOTH`
 11. `C2_STRATEGYQA_TRICK9_HARD_NEG_MINING`
 12. `C2_STRATEGYQA_TRICK10_K16_COMBINED`
+13. `C2_STRATEGYQA_QUALITY_FIRST`
+14. `C2_STRATEGYQA_QUALITY_FIRST_FULL`
 
 Useful overrides:
 - `TRAIN_MAX_SAMPLES`, `EVAL_MAX_SAMPLES`
 - `ROLLOUT_BATCH_SIZE`, `ROLLOUT_COUNT`, `ROLLOUT_MAX_NEW_TOKENS`
 - `C2_TRAIN_BATCH_SIZE`, `C2_EVAL_BATCH_SIZE`, `C2_LR`, `C2_EPOCHS`
+- `C1_PREP_EXTRA_ARGS_DEFAULT`
 - `C2_TRAIN_EXTRA_ARGS_DEFAULT`, `C2_EVAL_EXTRA_ARGS_DEFAULT`
 - `PHASE_C_PREP_EXTRA_ARGS`, `PHASE_C_TRAIN_EXTRA_ARGS`, `PHASE_C_EVAL_EXTRA_ARGS`
 
@@ -691,6 +720,72 @@ CUDA_VISIBLE_DEVICES=3 python -u scripts/phase_b_eval_faithfulness.py \
   --checkpoint-name best \
   --run-name c2_full_bs256_hybrid_adaptive_eval \
   --posthoc-calibration from_run
+```
+
+## Phase C P(IK) Bootstrap Path (New)
+
+Why we switched to P(IK) now:
+1. Prefix-level C2 runs were reproducible but near-random on corruption ranking
+   (`pair_accuracy`/`AUC` around chance in most variants).
+2. We needed a simpler, lower-noise diagnostic to answer one hard question:
+   can the head learn any usable confidence signal at all?
+3. P(IK) isolates that question by moving to question-level supervision:
+   - input: one prompt,
+   - target: empirical success rate from `K` sampled answers.
+
+What this branch adds:
+- `scripts/phase_c_prepare_pik_data.py`:
+  - writes question-level C1 artifacts under `assets/artifacts/phase_c_pik_data/...`
+- `scripts/phase_c_train_pik.py`:
+  - trains a frozen-backbone question-level head on `pik_targets.jsonl`
+- `scripts/phase_c_eval_pik.py`:
+  - standalone re-evaluation with optional post-hoc calibration
+- `scripts/run_phase_c_pik_suite.sh`:
+  - one-command lifecycle (`C1 train + C1 eval + C2 train + C2 eval`)
+
+One-command smoke run:
+
+```bash
+ACTIVE_PHASE_C_PIK_GROUP=PIK_STRATEGYQA_SMOKE \
+RUN_PREFIX=phase_c_pik_smoke \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_c_pik_suite.sh
+```
+
+One-command full StrategyQA run:
+
+```bash
+ACTIVE_PHASE_C_PIK_GROUP=PIK_STRATEGYQA_FULL \
+RUN_PREFIX=phase_c_pik_full \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_c_pik_suite.sh
+```
+
+Standalone C2 eval from a finished P(IK) run:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 python -u scripts/phase_c_eval_pik.py \
+  --value-run-dir assets/artifacts/phase_c_pik_runs/<pik_c2_run_dir> \
+  --eval-dir assets/artifacts/phase_c_pik_data/strategyqa/<pik_eval_dir> \
+  --checkpoint-name best \
+  --posthoc-calibration from_run \
+  --run-name strategyqa_pik_eval
+```
+
+Quality/safety checks:
+
+```bash
+python -m py_compile \
+  scripts/phase_c_prepare_pik_data.py \
+  scripts/phase_c_train_pik.py \
+  scripts/phase_c_eval_pik.py \
+  src/ours/phase_b/pik_data.py
+```
+
+```bash
+python -m pytest -q \
+  tests/unit/test_phase_c_pik_components.py \
+  tests/unit/test_phase_c_prepare_pik.py
 ```
 
 Current non-goals:

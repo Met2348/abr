@@ -202,6 +202,7 @@ Current implemented scope:
 
 Full lifecycle suite entrypoint:
 - `scripts/run_phase_c_value_suite.sh`
+- question-level P(IK) lifecycle: `scripts/run_phase_c_pik_suite.sh`
 
 Main entrypoint:
 
@@ -222,6 +223,7 @@ Key output files:
 - `prefixes.jsonl`
 - `corruptions.jsonl` if enabled
 - `rollout_predictions.jsonl` and `rollout_targets.jsonl` if enabled
+- `corruption_rollout_targets.jsonl` and `pair_quality.jsonl` when `--build-pair-quality` is enabled
 - `manifest.json`
 - `summary.json`
 - `summary.md`
@@ -249,8 +251,8 @@ New C2 options (can be toggled independently):
 - calibration objective: `--calibration-loss {mse,bce,bce_mse}`
 - post-hoc calibration: `--posthoc-calibration {none,temperature,isotonic}` and `--checkpoint-selection-metric {raw_brier,posthoc_brier}`
 - adaptive cal/contrastive balancing: `--adaptive-loss-balancing {none,uncertainty}`
-- confidence-aware calibration weighting: `--calibration-sample-weighting`, `--calibration-weight-floor`, `--calibration-weight-gamma`
-- contrastive pair filtering: `--contrastive-pair-filter`, `--contrastive-confidence-threshold`, `--contrastive-parseable-threshold`
+- confidence-aware calibration weighting: `--calibration-sample-weighting` (includes `q_weight`, `q_weight_parseable`), `--calibration-weight-floor`, `--calibration-weight-gamma`
+- contrastive pair filtering: `--contrastive-pair-filter` (includes `label_quality`, `confidence_parseable_label`), `--contrastive-confidence-threshold`, `--contrastive-parseable-threshold`, `--contrastive-label-delta-q-min`, `--contrastive-label-z-min`, `--contrastive-label-pair-weight-min`, `--contrastive-require-pair-pass-gate`, `--contrastive-use-pair-weights`
 - calibration target smoothing: `--calibration-target-smoothing`
 - contrastive score-gap mining: `--contrastive-score-gap-min`, `--contrastive-score-gap-max`
 
@@ -274,6 +276,39 @@ CUDA_VISIBLE_DEVICES=1 \
 bash scripts/run_phase_c_value_suite.sh
 ```
 
+Quality-first lifecycle examples:
+
+```bash
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_QUALITY_FIRST \
+RUN_PREFIX=phase_c_quality_first \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_c_value_suite.sh
+
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_QUALITY_FIRST_FULL \
+RUN_PREFIX=phase_c_quality_first_full \
+CUDA_VISIBLE_DEVICES=3 \
+bash scripts/run_phase_c_value_suite.sh
+```
+
+Question-level P(IK) lifecycle (new):
+
+```bash
+ACTIVE_PHASE_C_PIK_GROUP=PIK_STRATEGYQA_SMOKE \
+RUN_PREFIX=phase_c_pik_smoke \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_c_pik_suite.sh
+```
+
+Why add P(IK):
+- Prefix-level value runs are harder and noisier.
+- P(IK) is a simpler diagnostic: one question -> `K` sampled answers -> empirical success-rate target.
+- It checks whether the value head can learn any confidence signal before returning to prefix-level objectives.
+
+Main P(IK) scripts:
+- `scripts/phase_c_prepare_pik_data.py`
+- `scripts/phase_c_train_pik.py`
+- `scripts/phase_c_eval_pik.py`
+
 Supported lifecycle groups:
 1. `C2_STRATEGYQA_SMOKE`
 2. `C2_STRATEGYQA_FULL`
@@ -287,6 +322,8 @@ Supported lifecycle groups:
 10. `C2_STRATEGYQA_TRICK8_LABEL_SMOOTH`
 11. `C2_STRATEGYQA_TRICK9_HARD_NEG_MINING`
 12. `C2_STRATEGYQA_TRICK10_K16_COMBINED`
+13. `C2_STRATEGYQA_QUALITY_FIRST`
+14. `C2_STRATEGYQA_QUALITY_FIRST_FULL`
 
 Smoke training run:
 

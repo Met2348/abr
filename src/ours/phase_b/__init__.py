@@ -36,6 +36,16 @@ from .posthoc_calibration import (
     fit_isotonic_calibrator,
     fit_temperature_scaler,
 )
+from .pik_data import (
+    PIKQuestionRecord,
+    PIKRolloutPredictionRecord,
+    PIKSupervisionExample,
+    PIKTargetRecord,
+    assert_phase_c_pik_compatibility,
+    load_phase_c_pik_manifest,
+    load_pik_supervision_examples,
+    summarize_pik_targets,
+)
 from .data import load_phase_b_rows, summarize_rows
 from .supervision import (
     SupervisionPlan,
@@ -71,12 +81,16 @@ from .value_losses import (
     mixed_calibration_loss,
 )
 from .value_targets import (
+    CorruptionRolloutTargetRecord,
+    PairQualityRecord,
     PrefixArtifact,
     PrefixBuildConfig,
     RolloutPredictionRecord,
     RolloutTargetRecord,
     build_prefix_artifacts,
     build_step_sequence_from_phase_b_row,
+    summarize_corruption_rollout_targets,
+    summarize_pair_quality_records,
     summarize_prefix_artifacts,
     summarize_rollout_targets,
 )
@@ -93,10 +107,14 @@ __all__ = [
     "PrefixBuildConfig",
     "RolloutPredictionRecord",
     "RolloutTargetRecord",
+    "CorruptionRolloutTargetRecord",
+    "PairQualityRecord",
     "build_prefix_artifacts",
     "build_step_sequence_from_phase_b_row",
     "summarize_prefix_artifacts",
     "summarize_rollout_targets",
+    "summarize_corruption_rollout_targets",
+    "summarize_pair_quality_records",
     "CorruptionArtifact",
     "CorruptionBuildConfig",
     "build_corruptions_for_prefixes",
@@ -133,4 +151,12 @@ __all__ = [
     "apply_temperature_scaler",
     "apply_isotonic_calibrator",
     "apply_posthoc_calibration",
+    "PIKQuestionRecord",
+    "PIKRolloutPredictionRecord",
+    "PIKTargetRecord",
+    "PIKSupervisionExample",
+    "load_phase_c_pik_manifest",
+    "assert_phase_c_pik_compatibility",
+    "load_pik_supervision_examples",
+    "summarize_pik_targets",
 ]

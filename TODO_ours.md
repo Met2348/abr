@@ -87,7 +87,42 @@ Immediate no-go rules:
 
 ---
 
-## 0.3 Phase B Lifecycle Status (Authoritative)
+## 0.3 Phase C C1/C2 Quality-First Status (2026-03-03)
+
+### Newly Completed
+
+1. C1 uncertainty-aware target schema is implemented:
+   - `q_mean_smoothed`, `q_std_error`, `q_ci_width`, `q_weight`.
+2. C1 label-side pair-quality artifacts are implemented:
+   - `corruption_rollout_targets.jsonl`,
+   - `pair_quality.jsonl`.
+3. C2 now consumes C1 quality fields:
+   - q-weighted calibration modes (`q_weight`, `q_weight_parseable`),
+   - label-quality pair filters (`label_quality`, `confidence_parseable_label`),
+   - label-threshold controls (`delta_q`, `z_delta`, `pair_weight`, pass-gate),
+   - optional pair-weighted contrastive loss.
+4. Phase C suite groups added for quality-first runs:
+   - `C2_STRATEGYQA_QUALITY_FIRST`,
+   - `C2_STRATEGYQA_QUALITY_FIRST_FULL`.
+
+### Immediate To-Do
+
+1. Run `C2_STRATEGYQA_QUALITY_FIRST` and compare to `TRICK10` and baseline.
+2. If smoke is positive, run `C2_STRATEGYQA_QUALITY_FIRST_FULL`.
+3. Add one report table with:
+   - Brier/raw-posthoc,
+   - Pearson/raw-posthoc,
+   - pair_acc,
+   - corruption AUC,
+   - train/eval C1 rollout count.
+4. If pair metrics still flat, escalate to architecture changes:
+   - true sibling-pair ranking datasets,
+   - larger per-prefix rollout budget (`k=20~32`),
+   - P(IK) simplification branch as explicit gating criterion.
+
+---
+
+## 0.4 Phase B Lifecycle Status (Authoritative)
 
 Source of truth:
 - `phase_B_plan.md`
@@ -341,6 +376,19 @@ This is the real start of the unique BCR/ABR work.
 Do **not** start with Bellman-only self-supervision and do **not** start with RL.
 Bootstrap the value head from empirical prefix targets first.
 
+### Why we temporarily switched to P(IK)
+
+Prefix-level C2 runs were stable but showed weak discrimination (often near-random
+clean-vs-corrupt ordering). Before adding more complex losses, we inserted a
+question-level diagnostic branch:
+
+1. Input is one full question prompt (not a step prefix).
+2. Label is empirical success rate from `K` sampled answers.
+3. Objective is calibration-first (`BCE`/`MSE` family), no corruption branch by default.
+
+This branch answers a critical gating question:
+- can the head learn any confidence signal at all under lower-noise supervision?
+
 ### Training order
 
 1. Freeze the LM backbone initially.
@@ -381,6 +429,16 @@ Bootstrap the value head from empirical prefix targets first.
   - value-drop localization
 - [x] Add `scripts/run_phase_c_value_suite.sh`
   - one-command C1 train/eval prep + C2 train + C2 standalone eval
+- [x] Add `scripts/phase_c_prepare_pik_data.py`
+  - question-level C1 artifacts (`questions`, `rollout_predictions`, `pik_targets`)
+- [x] Add `src/ours/phase_b/pik_data.py`
+  - strict contracts/loaders for P(IK) artifacts and compatibility checks
+- [x] Add `scripts/phase_c_train_pik.py`
+  - question-level C2 training (calibration-first)
+- [x] Add `scripts/phase_c_eval_pik.py`
+  - standalone P(IK) checkpoint evaluation
+- [x] Add `scripts/run_phase_c_pik_suite.sh`
+  - one-command P(IK) lifecycle suite
 
 ### Dataset priority
 
@@ -408,6 +466,19 @@ Reason:
 - Interpretation:
   - engineering is stable and reproducible,
   - C2 is still below deployment gate for BCR/ABR routing because calibration does not yet beat trivial baseline.
+
+### C2a P(IK) status snapshot (2026-03-03)
+
+- Status:
+  - implementation complete and test-validated,
+  - ready for smoke and full-suite runs.
+- What this gives us:
+  - a lower-noise calibration benchmark that isolates head learnability from
+    prefix corruption/ranking complexity.
+- Promotion criteria back to prefix-heavy branch:
+  - [ ] P(IK) `known_auc` clearly above random on held-out eval,
+  - [ ] P(IK) Brier meaningfully beats constant baseline,
+  - [ ] gains are reproducible across reruns.
 
 ### Immediate C2 recovery tasks (ranked top-to-try list)
 
