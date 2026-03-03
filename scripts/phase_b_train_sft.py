@@ -312,7 +312,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """
     parser = _build_parser()
 
-    # Two-phase parse so config file can set defaults.
+    # 两段解析：先读 config 默认值，再让 CLI 覆盖，避免配置文件“锁死”命令行。
     partial, _ = parser.parse_known_args(argv)
     if partial.config_json is not None:
         defaults = _load_config_defaults(partial.config_json)
@@ -482,6 +482,8 @@ def _build_features(
     ```
     """
 
+    # 这里把一条样本拆成 prompt / reasoning / answer 三段，
+    # 以便后续做 answer-weighted loss（只加权监督段，不加权 prompt 段）。
     features: list[dict[str, Any]] = []
     eos_id = tokenizer.eos_token_id
     use_answer_weighting = answer_weighting_mode == "final_answer_line"
@@ -531,6 +533,7 @@ def _build_features(
 
         prompt_len = len(prompt_ids)
         if len(full_ids) > max_seq_length:
+            # 左截断：尽量保留末尾监督信息（尤其是 final answer 行）。
             overflow = len(full_ids) - max_seq_length
             full_ids = full_ids[overflow:]
             loss_weights = loss_weights[overflow:]
@@ -696,6 +699,7 @@ def _build_weighted_trainer_class(TrainerBase):
             shift_labels = labels[..., 1:].contiguous()
             shift_weights = loss_weights[..., 1:].contiguous()
 
+            # 先拿 token-level loss，再按 loss_weights 做归一化加权平均。
             flat_loss = F.cross_entropy(
                 shift_logits.view(-1, shift_logits.size(-1)),
                 shift_labels.view(-1),
@@ -823,6 +827,7 @@ def _attach_lora_if_requested(model, args: argparse.Namespace):
         from peft import LoraConfig, TaskType, get_peft_model
     except Exception as exc:  # noqa: BLE001
         if args.peft_fallback_to_sft:
+            # 新手友好策略：PEFT 依赖缺失时可自动退回 SFT，先保证能跑通链路。
             msg = (
                 "warning     : PEFT import failed; falling back to full SFT. "
                 f"reason={exc}"
@@ -906,6 +911,7 @@ def main() -> int:
     print(f"seed             : {args.seed}")
     print()
 
+    # Stage 1: 数据加载与摘要（在模型加载前尽早暴露数据问题）。
     train_rows = load_phase_b_rows(args.train_jsonl, max_samples=args.max_train_samples)
     eval_rows = (
         load_phase_b_rows(args.validation_jsonl, max_samples=args.max_eval_samples)
@@ -947,6 +953,7 @@ def main() -> int:
     # prep for load time timer
     load_start = time.perf_counter()
     print("model_load       : start")
+    # Stage 2: tokenizer/model 加载。
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=False)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -965,10 +972,10 @@ def main() -> int:
         model_load_kwargs["torch_dtype"] = dtype
 
 
-    model = AutoModelForCausalLM.from_pretrained(args.model_path, **model_load_kwargs) # critical step: load the model
+    model = AutoModelForCausalLM.from_pretrained(args.model_path, **model_load_kwargs)
 
 
-    # enable gradient checkpointing
+    # 开启梯度检查点以换显存；在长序列下通常比纯提速更重要。
     if args.gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
     
@@ -983,6 +990,7 @@ def main() -> int:
     if effective_mode == "peft" and hasattr(model, "print_trainable_parameters"):
         model.print_trainable_parameters()
 
+    # Stage 3: 构建 tokenized features，并进入 Trainer 训练。
     train_features = _build_features(
         rows=train_rows,
         tokenizer=tokenizer,

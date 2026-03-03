@@ -127,6 +127,7 @@ def mixed_calibration_loss(
         raise ValueError("`bce_weight` and `mse_weight` must be >= 0")
     if float(bce_weight) == 0.0 and float(mse_weight) == 0.0:
         raise ValueError("At least one of `bce_weight` or `mse_weight` must be > 0")
+    # 组合损失用于折中：BCE 强调概率边界，MSE 保持数值稳定。
     bce = binary_cross_entropy_calibration_loss(
         predicted_logits,
         target_scores,
@@ -162,6 +163,7 @@ def contrastive_margin_loss(
         )
     if margin < 0:
         raise ValueError("`margin` must be non-negative")
+    # 只有当 clean 没有比 corrupt 高出 margin 时才产生惩罚。
     raw = torch_module.relu(float(margin) - clean_scores + corrupted_scores)
     return _weighted_mean(raw, sample_weights=sample_weights, torch_module=torch_module)
 

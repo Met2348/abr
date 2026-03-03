@@ -136,6 +136,7 @@ def split_reasoning_and_answer(target_text: str) -> tuple[str, str, bool]:
     ```
     """
 
+    # 先尝试“最后一行 answer signal”再回退全文扫描，兼顾稳健与兼容旧数据。
     normalized = target_text.strip()
     if normalized == "":
         return "", "", False
@@ -194,6 +195,7 @@ def build_supervision_plan(
             f"Supported: {list_target_transforms()}"
         )
 
+    # 先做标准拆分，再按 transform 改写 reasoning 部分。
     reasoning_text, answer_text, answer_signal_found = split_reasoning_and_answer(
         target_text
     )
@@ -217,6 +219,7 @@ def build_supervision_plan(
         pieces.append(answer_text.strip())
 
     transformed_target_text = "\n".join(pieces).strip()
+    # 防御式回退：避免 transform 产生空监督文本导致训练样本无效。
     if transformed_target_text == "":
         transformed_target_text = target_text.strip()
         reasoning_text, answer_text, answer_signal_found = split_reasoning_and_answer(

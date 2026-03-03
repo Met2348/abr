@@ -200,6 +200,9 @@ def _resolve_checkpoint_targets(run_dir: Path, checkpoint_labels: str) -> list[t
         available[label] = path
 
     targets: list[tuple[str, Path | None]] = []
+    # 支持两种模式：
+    # 1) 显式点名 checkpoint（便于诊断）；
+    # 2) 留空即扫全部保留 checkpoint。
     if checkpoint_labels.strip():
         labels = [item.strip() for item in checkpoint_labels.split(",") if item.strip()]
         for label in labels:
@@ -212,6 +215,7 @@ def _resolve_checkpoint_targets(run_dir: Path, checkpoint_labels: str) -> list[t
         for label, path in sorted(available.items(), key=lambda item: int(item[0])):
             targets.append((label, path))
 
+    # 无论是否扫 checkpoint，都把 final 产物纳入对比。
     targets.append(("final", None))
     return targets
 
@@ -249,6 +253,7 @@ def _run_eval(
 
     repo_root = Path(__file__).resolve().parents[1]
     target_script = repo_root / "scripts" / "phase_b_eval.py"
+    # 统一通过 phase_b_eval.py 桥接，保证评测口径统一到 Phase A evaluator。
     cmd = [
         sys.executable,
         "-u",

@@ -136,6 +136,7 @@ def _collect_inputs(args: argparse.Namespace) -> list[AnalysisInput]:
         label = scored_path.parent.name
         items.append(AnalysisInput(label=label, scored_path=scored_path))
 
+    # 这里允许同时传 run 目录和 scored 文件，统一归一到 AnalysisInput。
     if not items:
         raise ValueError("No inputs provided. Use --run-dirs and/or --scored-jsonl.")
     return items
@@ -195,6 +196,7 @@ def main() -> int:
         # Compute one row of per-run instability indicators and cache an index for
         # later pairwise overlap analysis.
         scored_rows = _load_scored_rows(item.scored_path)
+        # run-level 指标：单次运行内部是否出现多 final-answer 标签、标签切换等问题。
         inst = summarize_strategyqa_instability(scored_rows)
         run_rows.append(
             {
@@ -213,6 +215,7 @@ def main() -> int:
             for j in range(i + 1, len(items)):
                 a = items[i]
                 b = items[j]
+                # pairwise 指标：同一 sample 在两次 run 间是否发生预测翻转。
                 flip = compute_pairwise_prediction_flip(
                     rows_a_by_id=index_by_label[a.label],
                     rows_b_by_id=index_by_label[b.label],

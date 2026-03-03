@@ -38,6 +38,7 @@ ENABLE_PERSISTED_LOGS="${ENABLE_PERSISTED_LOGS:-1}"
 ENABLE_AUTO_GAIN_EVAL="${ENABLE_AUTO_GAIN_EVAL:-1}"
 PHASE_B_EVAL_BATCH_SIZE="${PHASE_B_EVAL_BATCH_SIZE:-}"
 CURRENT_STAGE="init"
+# 中文：通常只需要改 ACTIVE_PHASE_B_GROUP 和 RUN_PREFIX；其它建议先保持默认。
 
 timestamp() {
   # Print timestamps in a format that matches other suite logs.
@@ -174,7 +175,10 @@ resolve_group() {
   GROUP_DATASET=""
   EVAL_SPECS=""
   DEFAULT_EVAL_BATCH_SIZE=4
+  # 中文：EVAL_SPECS 每行格式：
+  # label|input_jsonl|decode_mode|max_new_tokens
 
+  # 中文：新增 B 组时，优先复制一个最接近的分组并只改 CONFIG_JSON/EVAL_SPECS。
   case "$ACTIVE_PHASE_B_GROUP" in
     B1_SMOKE)
       GROUP_TITLE="B1 Smoke Training"
@@ -454,6 +458,7 @@ run_eval_spec() {
   local max_new_tokens="$5"
   local run_name="${RUN_NAME}_${stage}_${label}"
   local eval_batch_size="${PHASE_B_EVAL_BATCH_SIZE:-$DEFAULT_EVAL_BATCH_SIZE}"
+  # 中文：pre 阶段评估 frozen base，post 阶段评估训练后 adapter；便于直接算增益。
 
   local cmd=(
     "$PYTHON_BIN" -u scripts/phase_b_eval.py
@@ -540,6 +545,7 @@ append_extra_args run_cmd "${PHASE_B_EXTRA_ARGS:-}"
 COMPARE_ARGS=()
 
 if [[ "$AUTO_GAIN_EVAL" -eq 1 ]]; then
+  # 中文：训练前先跑同一套评估，形成可对比的 before metrics。
   while IFS='|' read -r label input_jsonl decode_mode max_new_tokens; do
     [[ -z "$label" ]] && continue
     run_eval_spec "pre" "$label" "$input_jsonl" "$decode_mode" "$max_new_tokens"
@@ -558,6 +564,7 @@ TRAIN_RUN_DIR="$(latest_phase_b_run_dir_for_name "$RUN_NAME")"
 
 if [[ "$AUTO_GAIN_EVAL" -eq 1 ]]; then
   updated_compare_args=()
+  # 中文：训练后复跑同一套评估；若这里改了输入或 token，上下对比会失真。
   while IFS='|' read -r label input_jsonl decode_mode max_new_tokens; do
     [[ -z "$label" ]] && continue
     run_eval_spec "post" "$label" "$input_jsonl" "$decode_mode" "$max_new_tokens"

@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -112,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--posthoc-temperature-max must be > --posthoc-temperature-min")
     if args.posthoc_isotonic_min_points <= 0:
         raise ValueError("--posthoc-isotonic-min-points must be > 0")
+    # 先校验训练 run 和 eval 数据目录的契约一致性，再做任何推理。
     manifest_path = args.value_run_dir / "manifest.json"
     if not manifest_path.exists():
         raise FileNotFoundError(f"Value-run manifest not found: {manifest_path}")
@@ -126,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
     train_metrics = json.loads(train_metrics_path.read_text(encoding="utf-8"))
     train_target_mean = float(train_metrics["train_target_mean"])
 
+    # `best` 不存在时回退到 final，避免因中断 run 无法复评。
     checkpoint_name = "best_value_head.pt" if args.checkpoint_name == "best" else "final_value_head.pt"
     checkpoint_path = args.value_run_dir / checkpoint_name
     if args.checkpoint_name == "best" and not checkpoint_path.exists():
@@ -173,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
         backbone = _attach_peft_adapter_for_inference(backbone, Path(adapter_path))
     freeze_backbone(backbone)
 
+    # 重新编码 eval features，避免复用训练时缓存带来的隐性状态污染。
     clean_features = _encode_text_list(
         texts=[f"{example.prompt_text}{example.prefix_target_text}" for example in eval_examples],
         backbone=backbone,
@@ -291,6 +296,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     _write_jsonl(corruption_scores_path, corruption_rows)
 
+    # 输出结构与训练脚本保持对齐，便于做 run 间对比。
     metrics = {
         "calibration": calibration_raw,
         "calibration_posthoc": calibration_posthoc,
@@ -374,6 +380,7 @@ def _resolve_posthoc_payload(
     if args.posthoc_calibration == "none":
         return None
     if args.posthoc_calibration == "temperature":
+        # 在当前 eval 集上现拟合；用于诊断“可校准性”，不是训练信号。
         cfg = TemperatureCalibrationConfig(
             lr=float(args.posthoc_temperature_lr),
             max_iters=int(args.posthoc_temperature_max_iters),
@@ -388,6 +395,7 @@ def _resolve_posthoc_payload(
             config=cfg,
         )
     if args.posthoc_calibration == "isotonic":
+        # 等价于对当前分数做单调分段映射，适合非线性校准偏差。
         cfg = IsotonicCalibrationConfig(
             min_points=int(args.posthoc_isotonic_min_points),
         )
@@ -398,6 +406,7 @@ def _resolve_posthoc_payload(
             config=cfg,
         )
     if args.posthoc_calibration == "from_run":
+        # 复用训练时持久化的 calibrator，验证部署路径可复现性。
         name = "best_posthoc_calibration.json" if checkpoint_name == "best" else "final_posthoc_calibration.json"
         path = value_run_dir / name
         if not path.exists() and checkpoint_name == "best":
@@ -472,7 +481,17 @@ def _encode_text_list(
     if not texts:
         return None
     chunks = []
-    for start in range(0, len(texts), batch_size):
+    total = len(texts)
+    total_batches = (total + batch_size - 1) // batch_size
+    progress_every = max(1, math.ceil(total_batches / 8))
+    started = time.time()
+    print(
+        "cache_eval_texts  : "
+        f"start {total} texts in {total_batches} batches "
+        f"(bs={batch_size}, progress_every~{progress_every})",
+        flush=True,
+    )
+    for batch_idx, start in enumerate(range(0, total, batch_size), start=1):
         chunks.append(
             encode_text_features(
                 backbone=backbone,
@@ -482,6 +501,17 @@ def _encode_text_list(
                 torch_module=torch_module,
             )
         )
+        if batch_idx % progress_every == 0 or batch_idx == total_batches:
+            elapsed = max(time.time() - started, 1e-6)
+            done = min(batch_idx * batch_size, total)
+            rate = done / elapsed
+            print(
+                "cache_eval_texts  : "
+                f"{batch_idx}/{total_batches} batches ({done}/{total}, {done / total:.1%}) | "
+                f"elapsed={elapsed:.1f}s | rate={rate:.3f} text/s",
+                flush=True,
+            )
+    print("cache_eval_texts  : done", flush=True)
     return torch_module.cat(chunks, dim=0).to(dtype=torch_module.float32)
 
 

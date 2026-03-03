@@ -128,6 +128,7 @@ def _resolve_eval_model_paths(args: argparse.Namespace) -> tuple[str, Path | Non
     model_path, adapter_path = _resolve_eval_model_paths(args)
     ```
     """
+    # 三选一约束：评测来源只能有一个，避免“到底在评谁”不清楚。
     provided = [
         args.model_path is not None,
         args.phase_b_run_dir is not None,
@@ -142,6 +143,7 @@ def _resolve_eval_model_paths(args: argparse.Namespace) -> tuple[str, Path | Non
     if args.model_path is not None:
         return str(args.model_path), None
 
+    # run_dir 路径既可由 `--phase-b-run-dir` 直接提供，也可从 checkpoint 回推。
     run_dir = args.phase_b_run_dir
     model_dir = None
     if args.phase_b_checkpoint_dir is not None:
@@ -167,12 +169,14 @@ def _resolve_eval_model_paths(args: argparse.Namespace) -> tuple[str, Path | Non
 
     adapter_config = model_dir / "adapter_config.json"
     if effective_mode == "peft":
+        # PEFT: phase_a_generate_and_eval 需要 base model + adapter-path 组合。
         if not adapter_config.exists():
             raise FileNotFoundError(
                 f"Expected adapter_config.json for PEFT run: {adapter_config}"
             )
         return base_model_path, model_dir
 
+    # Full SFT: 直接把训练产物目录当作 model-path 即可。
     return str(model_dir), None
 
 
@@ -200,6 +204,7 @@ def main() -> int:
     if not target_script.exists():
         raise FileNotFoundError(f"Expected script not found: {target_script}")
 
+    # 固定走 Phase A evaluator，确保口径和历史基线一致。
     cmd = [
         sys.executable,
         "-u",

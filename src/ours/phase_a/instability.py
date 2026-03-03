@@ -96,6 +96,7 @@ def summarize_strategyqa_instability(scored_rows: list[dict[str, Any]]) -> dict[
     sum_tag_count_tagged = 0
     sum_switch_count_tagged = 0
 
+    # run 内统计：观测单条输出里是否出现多次 final-answer 及标签切换。
     for row in scored_rows:
         if bool(row.get("is_correct", False)):
             n_correct += 1
@@ -178,6 +179,7 @@ def compute_pairwise_prediction_flip(
     n_yes_to_no = 0
     n_no_to_yes = 0
 
+    # run 间统计：同一 sample 在两次实验中的预测是否翻转。
     for sid in overlap_ids:
         row_a = rows_a_by_id[sid]
         row_b = rows_b_by_id[sid]

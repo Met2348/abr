@@ -43,6 +43,8 @@ class SplitConfig:
 def assign_split(sample_id: str, config: SplitConfig) -> str:
     """Assign one sample id to train/validation/test deterministically."""
     config.validate()
+    # 核心思想：同一 sample_id + seed 永远映射到同一 split。
+    # 这样多次准备数据后，训练/验证/测试边界保持稳定。
     token = f"{config.seed}:{sample_id}"
     digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
     # Convert first 16 hex chars into a stable float in [0,1).

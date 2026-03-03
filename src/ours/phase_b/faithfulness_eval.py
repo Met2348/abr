@@ -42,6 +42,8 @@ def compute_calibration_summary(
     if num_bins <= 0:
         raise ValueError("`num_bins` must be positive")
 
+    # 这里的 Brier/MAE/RMSE 评估“概率数值是否靠谱”，
+    # Pearson 评估“排序相关性”，ECE 评估“分箱后的校准偏差”。
     n = len(predicted_scores)
     sq_errors = [(p - t) ** 2 for p, t in zip(predicted_scores, target_scores, strict=True)]
     abs_errors = [abs(p - t) for p, t in zip(predicted_scores, target_scores, strict=True)]
@@ -218,6 +220,7 @@ def _expected_calibration_error(
     *,
     num_bins: int,
 ) -> float:
+    # ECE 的 bin = 预测概率区间桶；num_bins 越大，分辨率越高但方差也更大。
     bins: list[list[tuple[float, float]]] = [[] for _ in range(num_bins)]
     for prediction, target in zip(predicted_scores, target_scores, strict=True):
         clipped = min(max(float(prediction), 0.0), 1.0)

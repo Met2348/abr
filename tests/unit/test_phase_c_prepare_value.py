@@ -133,6 +133,51 @@ def test_build_corruptions_for_prefixes_changes_the_prefix_text() -> None:
     )
 
 
+def test_build_corruptions_cqr_balanced_reduces_step_drop_dominance() -> None:
+    """CQR mode should keep semantic/non-drop variants when they exist."""
+    row = PhaseBTrainRow(
+        sample_id="strategyqa:cqr1",
+        dataset="strategyqa",
+        split="train",
+        prompt_text="Question: Is Julius Caesar before Augustus?\nAnswer:",
+        target_text=(
+            "If Julius Caesar is not before Augustus, then Julius Caesar is greater than Augustus.\n"
+            "Final answer: no"
+        ),
+        answer="no",
+        question="Is Julius Caesar before Augustus?",
+    )
+    sequence, meta = build_step_sequence_from_phase_b_row(
+        row,
+        step_config=StepBuildConfig(),
+        prefix_config=PrefixBuildConfig(),
+    )
+    prefixes = build_prefix_artifacts(
+        row=row,
+        step_sequence=sequence,
+        build_meta=meta,
+        prefix_config=PrefixBuildConfig(),
+    )
+    reasoning_prefix = prefixes[-1]
+    corruptions = build_corruptions_for_prefixes(
+        [reasoning_prefix],
+        config=CorruptionBuildConfig(
+            max_corruptions_per_prefix=4,
+            selection_policy="cqr_balanced",
+            min_non_step_drop_per_prefix=1,
+            max_step_drop_per_prefix=1,
+        ),
+    )
+    assert corruptions
+    step_drop_count = sum(1 for item in corruptions if item.corruption_type == "step_drop")
+    assert step_drop_count <= 1
+    assert any(item.corruption_type != "step_drop" for item in corruptions)
+    assert any(
+        item.corruption_type in {"negation_flip", "comparator_flip", "condition_reversal", "entity_substitution"}
+        for item in corruptions
+    )
+
+
 def test_prepare_value_script_builds_artifacts_without_rollouts(tmp_path: Path) -> None:
     module = _load_prepare_value_module()
     input_path = tmp_path / "train.jsonl"

@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -116,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.posthoc_isotonic_min_points <= 0:
         raise ValueError("--posthoc-isotonic-min-points must be > 0")
 
+    # 先做 run/eval artifact 兼容性检查，再做任何推理。
     manifest_path = args.value_run_dir / "manifest.json"
     if not manifest_path.exists():
         raise FileNotFoundError(f"Value-run manifest not found: {manifest_path}")
@@ -130,6 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     train_metrics = json.loads(train_metrics_path.read_text(encoding="utf-8"))
     train_target_mean = float(train_metrics["train_target_mean"])
 
+    # `best` 不存在时回退到 final，保证中断训练也可复评。
     checkpoint_name = "best_value_head.pt" if args.checkpoint_name == "best" else "final_value_head.pt"
     checkpoint_path = args.value_run_dir / checkpoint_name
     if args.checkpoint_name == "best" and not checkpoint_path.exists():
@@ -180,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
         backbone = _attach_peft_adapter_for_inference(backbone, Path(adapter_path))
     freeze_backbone(backbone)
 
+    # 重新编码 eval features，避免依赖训练时缓存状态。
     features = _encode_text_list(
         texts=[example.model_input_text() for example in eval_examples],
         backbone=backbone,
@@ -347,6 +352,7 @@ def _resolve_posthoc_payload(
     if args.posthoc_calibration == "none":
         return None
     if args.posthoc_calibration == "temperature":
+        # 在当前 eval 集上拟合温度，仅用于诊断与部署校准。
         cfg = TemperatureCalibrationConfig(
             lr=float(args.posthoc_temperature_lr),
             max_iters=int(args.posthoc_temperature_max_iters),
@@ -362,6 +368,7 @@ def _resolve_posthoc_payload(
             config=cfg,
         )
     if args.posthoc_calibration == "isotonic":
+        # 分段单调映射，适合非线性校准偏差。
         cfg = IsotonicCalibrationConfig(min_points=int(args.posthoc_isotonic_min_points))
         cfg.validate()
         return fit_isotonic_calibrator(
@@ -371,6 +378,7 @@ def _resolve_posthoc_payload(
             config=cfg,
         )
     if args.posthoc_calibration == "from_run":
+        # 复用训练 run 中保存的 calibrator，验证可复现部署路径。
         name = "best_posthoc_calibration.json" if checkpoint_name == "best" else "final_posthoc_calibration.json"
         path = value_run_dir / name
         if not path.exists() and checkpoint_name == "best":
@@ -397,7 +405,19 @@ def _encode_text_list(
 ):
     """Encode texts to pooled features using small deterministic batches."""
     chunks = []
-    for start in range(0, len(texts), batch_size):
+    total = len(texts)
+    if total == 0:
+        return torch_module.zeros((0, 1), dtype=torch_module.float32)
+    total_batches = (total + batch_size - 1) // batch_size
+    progress_every = max(1, math.ceil(total_batches / 8))
+    started = time.time()
+    print(
+        "cache_eval_questions: "
+        f"start {total} texts in {total_batches} batches "
+        f"(bs={batch_size}, progress_every~{progress_every})",
+        flush=True,
+    )
+    for batch_idx, start in enumerate(range(0, total, batch_size), start=1):
         chunk = texts[start : start + batch_size]
         chunks.append(
             encode_text_features(
@@ -408,8 +428,17 @@ def _encode_text_list(
                 torch_module=torch_module,
             )
         )
-    if not chunks:
-        return torch_module.zeros((0, 1), dtype=torch_module.float32)
+        if batch_idx % progress_every == 0 or batch_idx == total_batches:
+            elapsed = max(time.time() - started, 1e-6)
+            done = min(batch_idx * batch_size, total)
+            rate = done / elapsed
+            print(
+                "cache_eval_questions: "
+                f"{batch_idx}/{total_batches} batches ({done}/{total}, {done / total:.1%}) | "
+                f"elapsed={elapsed:.1f}s | rate={rate:.3f} text/s",
+                flush=True,
+            )
+    print("cache_eval_questions: done", flush=True)
     return torch_module.cat(chunks, dim=0).to(dtype=torch_module.float32)
 
 

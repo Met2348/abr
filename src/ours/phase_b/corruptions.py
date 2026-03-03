@@ -36,19 +36,42 @@ class CorruptionBuildConfig:
     """Configuration controlling how corrupted prefixes are generated."""
 
     max_corruptions_per_prefix: int = 1
+    selection_policy: str = "legacy"
+    min_non_step_drop_per_prefix: int = 1
+    max_step_drop_per_prefix: int = 1
     enable_binary_flip: bool = True
     enable_operator_flip: bool = True
     enable_numeric_perturb: bool = True
+    enable_negation_flip: bool = True
+    enable_comparator_flip: bool = True
+    enable_condition_reversal: bool = True
+    enable_entity_substitution: bool = True
     enable_step_drop_fallback: bool = True
 
     def validate(self) -> None:
         """Validate configuration values before artifact construction."""
         if not isinstance(self.max_corruptions_per_prefix, int) or self.max_corruptions_per_prefix < 1:
             raise ValueError("`max_corruptions_per_prefix` must be an int >= 1")
+        if self.selection_policy not in {"legacy", "cqr_balanced"}:
+            raise ValueError("`selection_policy` must be one of: legacy, cqr_balanced")
+        if (
+            not isinstance(self.min_non_step_drop_per_prefix, int)
+            or self.min_non_step_drop_per_prefix < 0
+        ):
+            raise ValueError("`min_non_step_drop_per_prefix` must be an int >= 0")
+        if (
+            not isinstance(self.max_step_drop_per_prefix, int)
+            or self.max_step_drop_per_prefix < 0
+        ):
+            raise ValueError("`max_step_drop_per_prefix` must be an int >= 0")
         for name in (
             "enable_binary_flip",
             "enable_operator_flip",
             "enable_numeric_perturb",
+            "enable_negation_flip",
+            "enable_comparator_flip",
+            "enable_condition_reversal",
+            "enable_entity_substitution",
             "enable_step_drop_fallback",
         ):
             if not isinstance(getattr(self, name), bool):
@@ -102,6 +125,16 @@ class CorruptionArtifact:
         """Convert the record into a validated plain dictionary."""
         self.validate()
         return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class _MutationCandidate:
+    """Internal mutation candidate before final corruption artifact assembly."""
+
+    corruption_type: str
+    corrupted_step_text: str
+    original_step_text: str
+    priority: int
 
 
 def build_corruptions_for_prefixes(
@@ -173,35 +206,168 @@ def _build_corruptions_for_prefix(
         return []
 
     original_last = lines[-1].strip()
-    candidates: list[tuple[str, str, str]] = []
+    candidates: list[_MutationCandidate] = []
 
     # 当前只改“最后一个推理步”，保持其余上下文不变，
     # 这样 clean/corrupt 的对比更聚焦于局部推理扰动。
-    if config.enable_binary_flip:
-        flipped = _flip_binary_token(original_last)
-        if flipped is not None:
-            candidates.append(("binary_flip", flipped, original_last))
+    if config.selection_policy == "legacy":
+        if config.enable_binary_flip:
+            flipped = _flip_binary_token(original_last)
+            if flipped is not None:
+                candidates.append(
+                    _MutationCandidate(
+                        corruption_type="binary_flip",
+                        corrupted_step_text=flipped,
+                        original_step_text=original_last,
+                        priority=20,
+                    )
+                )
 
-    if config.enable_operator_flip:
-        flipped = _flip_operator(original_last)
-        if flipped is not None:
-            candidates.append(("operator_flip", flipped, original_last))
+        if config.enable_operator_flip:
+            flipped = _flip_operator(original_last)
+            if flipped is not None:
+                candidates.append(
+                    _MutationCandidate(
+                        corruption_type="operator_flip",
+                        corrupted_step_text=flipped,
+                        original_step_text=original_last,
+                        priority=21,
+                    )
+                )
 
-    if config.enable_numeric_perturb:
-        perturbed = _perturb_first_number(original_last)
-        if perturbed is not None:
-            candidates.append(("numeric_perturb", perturbed, original_last))
+        if config.enable_numeric_perturb:
+            perturbed = _perturb_first_number(original_last)
+            if perturbed is not None:
+                candidates.append(
+                    _MutationCandidate(
+                        corruption_type="numeric_perturb",
+                        corrupted_step_text=perturbed,
+                        original_step_text=original_last,
+                        priority=22,
+                    )
+                )
 
-    if config.enable_step_drop_fallback and len(lines) > 1:
-        candidates.append(("step_drop", "", original_last))
+        if config.enable_step_drop_fallback and len(lines) > 1:
+            candidates.append(
+                _MutationCandidate(
+                    corruption_type="step_drop",
+                    corrupted_step_text="",
+                    original_step_text=original_last,
+                    priority=99,
+                )
+            )
+    else:
+        # CQR-1: semantic operators are enabled in balanced mode. They produce
+        # higher-information corruptions than trivial step-drop fallbacks.
+        if config.enable_negation_flip:
+            negated = _flip_negation_polarity(original_last)
+            if negated is not None:
+                candidates.append(
+                    _MutationCandidate(
+                        corruption_type="negation_flip",
+                        corrupted_step_text=negated,
+                        original_step_text=original_last,
+                        priority=10,
+                    )
+                )
+        if config.enable_comparator_flip:
+            flipped_cmp = _flip_comparator(original_last)
+            if flipped_cmp is not None:
+                candidates.append(
+                    _MutationCandidate(
+                        corruption_type="comparator_flip",
+                        corrupted_step_text=flipped_cmp,
+                        original_step_text=original_last,
+                        priority=11,
+                    )
+                )
+        if config.enable_condition_reversal:
+            reversed_cond = _reverse_condition_clause(original_last)
+            if reversed_cond is not None:
+                candidates.append(
+                    _MutationCandidate(
+                        corruption_type="condition_reversal",
+                        corrupted_step_text=reversed_cond,
+                        original_step_text=original_last,
+                        priority=12,
+                    )
+                )
+        if config.enable_entity_substitution:
+            substituted = _substitute_entity_token(
+                original_last,
+                context_texts=[prefix.question, prefix.prefix_target_text],
+            )
+            if substituted is not None:
+                candidates.append(
+                    _MutationCandidate(
+                        corruption_type="entity_substitution",
+                        corrupted_step_text=substituted,
+                        original_step_text=original_last,
+                        priority=13,
+                    )
+                )
+
+        if config.enable_binary_flip:
+            flipped = _flip_binary_token(original_last)
+            if flipped is not None:
+                candidates.append(
+                    _MutationCandidate(
+                        corruption_type="binary_flip",
+                        corrupted_step_text=flipped,
+                        original_step_text=original_last,
+                        priority=20,
+                    )
+                )
+        if config.enable_operator_flip:
+            flipped = _flip_operator(original_last)
+            if flipped is not None:
+                candidates.append(
+                    _MutationCandidate(
+                        corruption_type="operator_flip",
+                        corrupted_step_text=flipped,
+                        original_step_text=original_last,
+                        priority=21,
+                    )
+                )
+        if config.enable_numeric_perturb:
+            perturbed = _perturb_first_number(original_last)
+            if perturbed is not None:
+                candidates.append(
+                    _MutationCandidate(
+                        corruption_type="numeric_perturb",
+                        corrupted_step_text=perturbed,
+                        original_step_text=original_last,
+                        priority=22,
+                    )
+                )
+        if config.enable_step_drop_fallback and len(lines) > 1:
+            candidates.append(
+                _MutationCandidate(
+                    corruption_type="step_drop",
+                    corrupted_step_text="",
+                    original_step_text=original_last,
+                    priority=99,
+                )
+            )
+        # CQR-2: enforce per-prefix balancing so one fallback type does not
+        # dominate supervision quality.
+        candidates = _select_candidates_cqr_balanced(
+            candidates,
+            max_corruptions_per_prefix=config.max_corruptions_per_prefix,
+            min_non_step_drop_per_prefix=config.min_non_step_drop_per_prefix,
+            max_step_drop_per_prefix=config.max_step_drop_per_prefix,
+        )
 
     artifacts: list[CorruptionArtifact] = []
     seen_payloads: set[tuple[str, str]] = set()
-    for corruption_type, corrupted_last, before_text in candidates:
+    for candidate in candidates:
         # 每个 clean prefix 最多保留 max_corruptions_per_prefix 个变体。
         if len(artifacts) >= config.max_corruptions_per_prefix:
             break
 
+        corruption_type = candidate.corruption_type
+        corrupted_last = candidate.corrupted_step_text
+        before_text = candidate.original_step_text
         if corruption_type == "step_drop":
             corrupted_lines = lines[:-1]
             corrupted_text = "\n".join(corrupted_lines).strip()
@@ -245,6 +411,104 @@ def _build_corruptions_for_prefix(
         artifact.validate()
         artifacts.append(artifact)
     return artifacts
+
+
+def _select_candidates_cqr_balanced(
+    candidates: list[_MutationCandidate],
+    *,
+    max_corruptions_per_prefix: int,
+    min_non_step_drop_per_prefix: int,
+    max_step_drop_per_prefix: int,
+) -> list[_MutationCandidate]:
+    """Select corruption candidates with type-aware balancing.
+
+    CQR intention
+    -------------
+    The previous deterministic path could be dominated by fallback mutations
+    (especially `step_drop`). This selector keeps at least some non-step-drop
+    signal when available, while still allowing a bounded fallback.
+    """
+    if not candidates or max_corruptions_per_prefix <= 0:
+        return []
+
+    non_step = [item for item in candidates if item.corruption_type != "step_drop"]
+    step_drop = [item for item in candidates if item.corruption_type == "step_drop"]
+
+    selected: list[_MutationCandidate] = []
+    if non_step:
+        min_non = min(max(min_non_step_drop_per_prefix, 1), len(non_step), max_corruptions_per_prefix)
+        selected.extend(
+            _round_robin_select_by_type(
+                non_step,
+                limit=min_non,
+            )
+        )
+        remaining_non = [
+            item
+            for item in non_step
+            if item not in selected
+        ]
+        slots_after_min = max_corruptions_per_prefix - len(selected)
+        reserve_step = min(max_step_drop_per_prefix, len(step_drop), max(slots_after_min, 0))
+        extra_non_limit = max(slots_after_min - reserve_step, 0)
+        if extra_non_limit > 0:
+            selected.extend(
+                _round_robin_select_by_type(
+                    remaining_non,
+                    limit=extra_non_limit,
+                )
+            )
+    # Add bounded fallback variants only after non-step variants were considered.
+    if len(selected) < max_corruptions_per_prefix and step_drop:
+        step_allow = min(
+            max_step_drop_per_prefix,
+            len(step_drop),
+            max_corruptions_per_prefix - len(selected),
+        )
+        step_sorted = sorted(step_drop, key=lambda item: (item.priority, item.corruption_type, item.corrupted_step_text))
+        selected.extend(step_sorted[:step_allow])
+    # Final deterministic trim.
+    selected = sorted(
+        selected,
+        key=lambda item: (item.priority, item.corruption_type, item.corrupted_step_text),
+    )
+    return selected[:max_corruptions_per_prefix]
+
+
+def _round_robin_select_by_type(
+    candidates: list[_MutationCandidate],
+    *,
+    limit: int,
+) -> list[_MutationCandidate]:
+    """Select candidates by round-robin over corruption types.
+
+    This helper ensures one type does not consume all slots when multiple
+    meaningful mutation families are available.
+    """
+    if limit <= 0 or not candidates:
+        return []
+    grouped: dict[str, list[_MutationCandidate]] = {}
+    for item in sorted(candidates, key=lambda x: (x.priority, x.corruption_type, x.corrupted_step_text)):
+        grouped.setdefault(item.corruption_type, []).append(item)
+    selected: list[_MutationCandidate] = []
+    while grouped and len(selected) < limit:
+        active_types = sorted(
+            grouped.keys(),
+            key=lambda ctype: (
+                grouped[ctype][0].priority,
+                ctype,
+            ),
+        )
+        for ctype in active_types:
+            bucket = grouped.get(ctype, [])
+            if not bucket:
+                continue
+            selected.append(bucket.pop(0))
+            if not bucket:
+                grouped.pop(ctype, None)
+            if len(selected) >= limit:
+                break
+    return selected
 
 
 def _flip_binary_token(text: str) -> str | None:
@@ -296,6 +560,99 @@ def _perturb_first_number(text: str) -> str | None:
     if replacement == raw:
         return None
     return text[: match.start()] + replacement + text[match.end() :]
+
+
+def _flip_negation_polarity(text: str) -> str | None:
+    """Flip simple polarity by removing/adding one local negation marker."""
+    remove_pattern = re.compile(
+        r"\b(is|are|was|were|can|could|should|would|do|does|did|has|have|had)\s+not\b",
+        flags=re.IGNORECASE,
+    )
+    match = remove_pattern.search(text)
+    if match:
+        aux = match.group(1)
+        return text[: match.start()] + aux + text[match.end() :]
+
+    add_pattern = re.compile(
+        r"\b(is|are|was|were|can|could|should|would|do|does|did|has|have|had)\b",
+        flags=re.IGNORECASE,
+    )
+    match = add_pattern.search(text)
+    if not match:
+        return None
+    return text[: match.end()] + " not" + text[match.end() :]
+
+
+def _flip_comparator(text: str) -> str | None:
+    """Flip one comparator phrase to produce a semantic contradiction candidate."""
+    replacements = [
+        ("greater than", "less than"),
+        ("less than", "greater than"),
+        ("more than", "less than"),
+        ("at least", "at most"),
+        ("at most", "at least"),
+        ("before", "after"),
+        ("after", "before"),
+        ("higher", "lower"),
+        ("lower", "higher"),
+        ("increase", "decrease"),
+        ("decrease", "increase"),
+        ("larger", "smaller"),
+        ("smaller", "larger"),
+    ]
+    for src, dst in replacements:
+        pattern = re.compile(rf"\b{re.escape(src)}\b", flags=re.IGNORECASE)
+        match = pattern.search(text)
+        if match:
+            return text[: match.start()] + _match_case(match.group(0), dst) + text[match.end() :]
+    return None
+
+
+def _reverse_condition_clause(text: str) -> str | None:
+    """Reverse a local condition by toggling `if not` around the condition head."""
+    pattern = re.compile(r"\bif\s+", flags=re.IGNORECASE)
+    match = pattern.search(text)
+    if not match:
+        return None
+    remainder = text[match.end() :]
+    if remainder.lower().startswith("not "):
+        return text[: match.end()] + remainder[4:]
+    return text[: match.end()] + "not " + remainder
+
+
+def _substitute_entity_token(text: str, *, context_texts: list[str]) -> str | None:
+    """Replace one entity mention using candidates extracted from local context."""
+    source_entities = _extract_entity_candidates(text)
+    if not source_entities:
+        return None
+    pool: list[str] = []
+    seen: set[str] = set()
+    for raw in context_texts:
+        for ent in _extract_entity_candidates(raw):
+            key = ent.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            pool.append(ent)
+    if not pool:
+        return None
+    for source in source_entities:
+        for replacement in pool:
+            if replacement.lower() == source.lower():
+                continue
+            pattern = re.compile(rf"\b{re.escape(source)}\b")
+            match = pattern.search(text)
+            if match:
+                return text[: match.start()] + replacement + text[match.end() :]
+    return None
+
+
+def _extract_entity_candidates(text: str) -> list[str]:
+    """Extract simple proper-noun candidates for semantic substitution."""
+    if not isinstance(text, str) or text.strip() == "":
+        return []
+    pattern = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b")
+    return [m.group(0).strip() for m in pattern.finditer(text)]
 
 
 def _match_case(source: str, replacement: str) -> str:

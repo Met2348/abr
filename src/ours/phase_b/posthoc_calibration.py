@@ -90,7 +90,7 @@ def fit_temperature_scaler(
     logits_detached = logits.detach()
     targets_detached = targets.detach()
 
-    # Parameterize temperature through sigmoid(raw) so it stays in [min, max].
+    # 用 sigmoid 参数化温度，强制温度始终落在 [min_t, max_t]。
     min_t = float(config.min_temperature)
     max_t = float(config.max_temperature)
     range_t = max_t - min_t
@@ -171,7 +171,7 @@ def fit_isotonic_calibrator(
     score_list = [float(v) for v in scores.detach().reshape(-1).cpu().tolist()]
     target_list = [float(v) for v in targets.detach().reshape(-1).cpu().tolist()]
 
-    # Sort by raw score, then enforce monotone fitted values via PAV.
+    # 先按分数排序，再用 PAV 强制单调，避免出现“分数更高反而校准后更低”的反直觉映射。
     pairs = sorted(zip(score_list, target_list, strict=True), key=lambda pair: pair[0])
     blocks: list[dict[str, float]] = []
     for score, target in pairs:

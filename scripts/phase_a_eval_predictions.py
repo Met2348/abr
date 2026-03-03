@@ -121,9 +121,12 @@ def main() -> int:
     if not args.predictions.exists():
         raise FileNotFoundError(f"Prediction file not found: {args.predictions}")
 
+    # 这里严格按 PredictionRecord 合约回读 JSONL，目的是保证离线复评估
+    # 与在线 generate+eval 路径使用完全一致的打分输入结构。
     records = list(_load_prediction_records(args.predictions))
     scored, summary = evaluate_predictions(records)
 
+    # 输出目录按时间戳隔离，避免覆盖历史复评估结果。
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = args.output_dir / f"{args.run_name}_{stamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -170,6 +173,8 @@ def _load_prediction_records(path: Path) -> Iterable[PredictionRecord]:
         for idx, line in enumerate(f, start=1):
             if line.strip() == "":
                 continue
+            # 每一行都先做 JSON 解析，再做 PredictionRecord 级别字段校验。
+            # 任意坏行都直接报错，防止“静默跳过坏数据”造成指标失真。
             try:
                 payload = json.loads(line)
             except json.JSONDecodeError as exc:

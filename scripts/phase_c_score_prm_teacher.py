@@ -35,7 +35,7 @@ Example
 CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_c_score_prm_teacher.py \
   --phase-c-dir assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_full_c2_strategyqa_quality_first_full_c1_train__90dcbacfbae1 \
   --teacher-model-path assets/models/Qwen2.5-Math-PRM-7B \
-  --batch-size 256 \
+  --batch-size 192 \
   --max-length 2048 \
   --require-cuda
 ```
@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -146,7 +147,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default="<extra_0>",
         help="Separator token used by Qwen PRM to mark reasoning steps.",
     )
-    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--batch-size", type=int, default=192)
     parser.add_argument("--max-length", type=int, default=2048)
     parser.add_argument(
         "--dtype",
@@ -205,6 +206,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse CLI args with optional config-JSON defaults."""
     parser = _build_parser()
+    # 两段解析：先吸收 config 默认值，再由 CLI 覆盖。
     initial = parser.parse_known_args(argv)[0]
     if initial.config_json is not None:
         defaults = _load_config_defaults(initial.config_json)
@@ -229,6 +231,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     started = time.time()
 
+    # Stage 1: 解析输入与输出路径，保证 sidecar 输出不会误覆盖。
     phase_c_dir, prefixes_path, corruptions_path, manifest_path = _resolve_input_paths(
         args=args,
         allow_missing_manifest=bool(args.allow_missing_manifest),
@@ -291,6 +294,7 @@ def main(argv: list[str] | None = None) -> int:
     if config.require_cuda and not torch.cuda.is_available():
         raise EnvironmentError("--require-cuda was set but CUDA is unavailable")
 
+    # Stage 2: 加载 teacher，并校验 step separator token 映射。
     tokenizer = AutoTokenizer.from_pretrained(config.teacher_model_path, trust_remote_code=True)
     sep_ids = tokenizer.encode(config.step_separator_token, add_special_tokens=False)
     if len(sep_ids) != 1:
@@ -310,6 +314,7 @@ def main(argv: list[str] | None = None) -> int:
 
     device = _infer_model_device(model)
 
+    # Stage 3: 先构建 rows，再统一批量打分，方便错误行旁路记录。
     prefix_rows, prefix_errors = _build_prefix_scoring_rows(
         prefixes_raw=prefixes_raw,
         tokenizer=tokenizer,
@@ -668,6 +673,7 @@ def _build_prefix_teacher_text(
             steps = [fallback]
             used_step_fallback = True
     if not steps:
+        # 最终兜底：至少给 teacher 一个可打分的 step 文本。
         steps = [question]
         used_step_fallback = True
     used_question_fallback = str(row.get("question", "")).strip() == ""
@@ -809,8 +815,19 @@ def _score_rows_with_teacher(
     if not rows:
         return []
     total = len(rows)
+    progress_every = _resolve_progress_interval(
+        total_items=total,
+        requested_every=int(log_every),
+        max_updates=8,
+    )
+    next_progress = progress_every
     scored: list[dict[str, Any]] = []
     started = time.time()
+    total_batches = (total + batch_size - 1) // batch_size
+    print(
+        f"{progress_label:14s}: start {total} rows in {total_batches} batches "
+        f"(bs={batch_size}, progress_every~{progress_every})"
+    )
     for offset in range(0, total, batch_size):
         batch = rows[offset : offset + batch_size]
         batch_scores = _score_batch_with_optional_backoff(
@@ -825,7 +842,7 @@ def _score_rows_with_teacher(
         )
         scored.extend(batch_scores)
         done = len(scored)
-        if done % log_every == 0 or done == total:
+        if done >= next_progress or done == total:
             elapsed = max(time.time() - started, 1e-6)
             rate = done / elapsed
             print(
@@ -833,7 +850,24 @@ def _score_rows_with_teacher(
                 f"({(done / total) * 100.0:.1f}%) | elapsed={elapsed:.1f}s "
                 f"| rate={rate:.3f} row/s"
             )
+            while next_progress <= done:
+                next_progress += progress_every
     return scored
+
+
+def _resolve_progress_interval(
+    *,
+    total_items: int,
+    requested_every: int,
+    max_updates: int = 8,
+) -> int:
+    """Return a bounded update interval to avoid long silent teacher-scoring phases."""
+    total_items = max(int(total_items), 0)
+    max_updates = max(int(max_updates), 1)
+    if total_items <= 0:
+        return 1
+    _ = int(requested_every)  # kept for API stability/documentation symmetry.
+    return max(1, math.ceil(total_items / max_updates))
 
 
 def _score_batch_with_optional_backoff(
@@ -925,6 +959,7 @@ def _score_batch(
             "Expected teacher logits with class dimension >= 2, got shape "
             f"{tuple(logits.shape)}"
         )
+    # 二分类 teacher 的“正类概率”作为 step 级分数来源。
     probs = softmax_fn(logits, dim=-1)[..., 1]
     scores_by_row = _extract_step_scores_from_probs(
         probs=probs,
@@ -965,6 +1000,7 @@ def _extract_logits(outputs) -> Any:
 
 def _extract_step_scores_from_probs(*, probs, input_ids, sep_token_id: int) -> list[list[float]]:
     """Extract per-row step scores at separator-token positions."""
+    # 只在 `<extra_0>` 对应位置取分，得到 step-level 序列分数。
     rows: list[list[float]] = []
     for row_probs, row_ids in zip(probs, input_ids, strict=True):
         mask = row_ids.eq(sep_token_id)

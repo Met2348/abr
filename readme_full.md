@@ -233,8 +233,8 @@ CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_b_train_value.py \
   --dtype bfloat16 \
   --device-map auto \
   --max-length 1024 \
-  --per-device-train-batch-size 256 \
-  --per-device-eval-batch-size 256 \
+  --per-device-train-batch-size 192 \
+  --per-device-eval-batch-size 192 \
   --learning-rate 1e-3 \
   --num-train-epochs 5 \
   --use-contrastive-loss \
@@ -296,8 +296,8 @@ CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_b_train_value.py \
   --dtype bfloat16 \
   --device-map auto \
   --max-length 1024 \
-  --per-device-train-batch-size 256 \
-  --per-device-eval-batch-size 256 \
+  --per-device-train-batch-size 192 \
+  --per-device-eval-batch-size 192 \
   --learning-rate 1e-4 \
   --num-train-epochs 8 \
   --calibration-loss bce \
@@ -340,9 +340,21 @@ New C1 CLI switches:
 - `--rollout-stage2-count`
 - `--rollout-uncertain-band`
 - `--rollout-uncertain-ci-width`
+- `--corruption-selection-policy {legacy,cqr_balanced}`
+- `--min-non-step-drop-per-prefix`
+- `--max-step-drop-per-prefix`
+- `--enable-negation-flip/--no-enable-negation-flip`
+- `--enable-comparator-flip/--no-enable-comparator-flip`
+- `--enable-condition-reversal/--no-enable-condition-reversal`
+- `--enable-entity-substitution/--no-enable-entity-substitution`
 
 The suite groups `C2_STRATEGYQA_QUALITY_FIRST` and
 `C2_STRATEGYQA_QUALITY_FIRST_FULL` now enable this two-stage policy by default.
+
+New C2 stratified-sampling switches (CQR-4):
+- `--contrastive-stratified-sampling`
+- `--contrastive-stratify-step-bucket-size`
+- `--contrastive-stratify-include-no-corruption`
 
 ### C2 standalone evaluation command
 
@@ -363,6 +375,8 @@ Use this wrapper when you want the full C1+C2 lifecycle in one reportable run:
 - C2 value-head training
 - C2 standalone faithfulness eval
 - consolidated suite summary
+
+Default batch sizing for Phase C/P(IK) is now `192` (`ROLLOUT_BATCH_SIZE`, `C2_TRAIN_BATCH_SIZE`, `C2_EVAL_BATCH_SIZE`) so one 80GB GPU can safely host 3 concurrent jobs.
 
 Smoke lifecycle:
 
@@ -456,6 +470,30 @@ ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_QUALITY_FIRST_FULL \
 RUN_PREFIX=phase_c_quality_first_full \
 CUDA_VISIBLE_DEVICES=0 \
 bash scripts/run_phase_c_value_suite.sh
+
+# CQR smoke (CQR-1..4 end-to-end)
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_CQR_SMOKE \
+RUN_PREFIX=phase_c_cqr_smoke \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_c_value_suite.sh
+
+# CQR full (CQR-1..4 end-to-end)
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_CQR_FULL \
+RUN_PREFIX=phase_c_cqr_full \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_c_value_suite.sh
+
+# Re-eval old Trick-10 recipe on CQR artifacts
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_CQR_RERUN_TRICK10 \
+RUN_PREFIX=phase_c_cqr_rerun_trick10 \
+CUDA_VISIBLE_DEVICES=3 \
+bash scripts/run_phase_c_value_suite.sh
+
+# Re-eval old Quality-First recipe on CQR artifacts
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_CQR_RERUN_QUALITY_FIRST \
+RUN_PREFIX=phase_c_cqr_rerun_quality_first \
+CUDA_VISIBLE_DEVICES=0 \
+bash scripts/run_phase_c_value_suite.sh
 ```
 
 Supported groups:
@@ -473,6 +511,10 @@ Supported groups:
 12. `C2_STRATEGYQA_TRICK10_K16_COMBINED`
 13. `C2_STRATEGYQA_QUALITY_FIRST`
 14. `C2_STRATEGYQA_QUALITY_FIRST_FULL`
+15. `C2_STRATEGYQA_CQR_SMOKE`
+16. `C2_STRATEGYQA_CQR_FULL`
+17. `C2_STRATEGYQA_CQR_RERUN_TRICK10`
+18. `C2_STRATEGYQA_CQR_RERUN_QUALITY_FIRST`
 
 Useful overrides:
 - `TRAIN_MAX_SAMPLES`, `EVAL_MAX_SAMPLES`
@@ -884,7 +926,7 @@ Smoke command:
 CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_c_score_prm_teacher.py \
   --phase-c-dir assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_c2_strategyqa_quality_first_c1_eval__f608255f810d \
   --teacher-model-path assets/models/Qwen2.5-Math-PRM-7B \
-  --batch-size 256 \
+  --batch-size 192 \
   --max-length 2048 \
   --dtype bfloat16 \
   --device-map auto \
@@ -897,7 +939,7 @@ Full-train command (overwrite old sidecars):
 CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_c_score_prm_teacher.py \
   --phase-c-dir assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_full_c2_strategyqa_quality_first_full_c1_train__90dcbacfbae1 \
   --teacher-model-path assets/models/Qwen2.5-Math-PRM-7B \
-  --batch-size 256 \
+  --batch-size 192 \
   --max-length 2048 \
   --dtype bfloat16 \
   --device-map auto \

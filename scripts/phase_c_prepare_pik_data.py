@@ -38,7 +38,7 @@ CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_c_prepare_pik_data.py \
   --max-samples 256 \
   --build-rollouts \
   --rollout-count 32 \
-  --batch-size 256 \
+  --batch-size 192 \
   --require-cuda
 ```
 """
@@ -48,6 +48,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import random
 import sys
 import time
@@ -160,7 +161,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=256,
+        default=192,
         help="Rollout generation batch size.",
     )
     parser.add_argument(
@@ -210,6 +211,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse CLI args with optional config-JSON default injection."""
     parser = _build_parser()
+    # 两段解析：先读取 config-json 默认值，再允许命令行覆盖。
     initial = parser.parse_known_args(argv)[0]
     if initial.config_json is not None:
         defaults = _load_config_defaults(initial.config_json)
@@ -262,6 +264,7 @@ def main(argv: list[str] | None = None) -> int:
             log_every=int(args.log_every),
         )
 
+    # run_spec 参与 fingerprint；任何会影响语义的参数都要进入这里。
     run_spec = {
         "input_jsonl": str(args.input_jsonl),
         "input_sha256": input_sha256,
@@ -274,6 +277,7 @@ def main(argv: list[str] | None = None) -> int:
 
     expected_files = _expected_output_files(build_rollouts=bool(args.build_rollouts))
     if run_dir.exists() and not args.overwrite and args.resume and _has_expected_outputs(run_dir, expected_files):
+        # 命中 resume 时直接复用，避免重复 rollout 成本。
         print("=" * 88)
         print("Phase C: Prepare P(IK) Data")
         print("=" * 88)
@@ -469,6 +473,7 @@ def _build_rollout_targets(
         model = _attach_peft_adapter_for_inference(model, Path(config.adapter_path))
     model.eval()
 
+    # 每个 question 展开成 K 个 rollout job；最终再按 sample_id 聚合回去。
     jobs: list[tuple[PIKQuestionRecord, int]] = []
     for question in questions:
         question.validate()
@@ -479,6 +484,20 @@ def _build_rollout_targets(
     start_ts = time.perf_counter()
     oom_backoff_events = 0
     done = 0
+    total_jobs = len(jobs)
+    progress_every = _resolve_progress_interval(
+        total_items=total_jobs,
+        requested_every=int(config.log_every),
+        max_updates=8,
+    )
+    next_progress = progress_every
+    total_batches = (total_jobs + config.batch_size - 1) // config.batch_size
+    print(
+        "rollouts        : "
+        f"start {total_jobs} jobs in {total_batches} batches "
+        f"(bs={config.batch_size}, progress_every~{progress_every})",
+        flush=True,
+    )
 
     for batch_start in range(0, len(jobs), config.batch_size):
         batch = jobs[batch_start : batch_start + config.batch_size]
@@ -535,15 +554,17 @@ def _build_rollout_targets(
             predictions.append(prediction)
             done += 1
 
-        if config.log_every > 0 and (done % config.log_every == 0 or done == len(jobs)):
+        if done >= next_progress or done == total_jobs:
             elapsed = max(time.perf_counter() - start_ts, 1e-6)
             rate = done / elapsed
             print(
                 "rollouts        : "
-                f"{done}/{len(jobs)} ({done / max(len(jobs), 1):.1%}) | "
+                f"{done}/{total_jobs} ({done / max(total_jobs, 1):.1%}) | "
                 f"elapsed={elapsed:.1f}s | rate={rate:.3f} sample/s",
                 flush=True,
             )
+            while next_progress <= done:
+                next_progress += progress_every
 
     targets = _aggregate_pik_targets(predictions)
     elapsed = max(time.perf_counter() - start_ts, 1e-6)
@@ -556,10 +577,26 @@ def _build_rollout_targets(
     return predictions, targets, runtime_summary
 
 
+def _resolve_progress_interval(
+    *,
+    total_items: int,
+    requested_every: int,
+    max_updates: int = 8,
+) -> int:
+    """Return a bounded update interval to avoid long silent rollout phases."""
+    total_items = max(int(total_items), 0)
+    max_updates = max(int(max_updates), 1)
+    if total_items <= 0:
+        return 1
+    _ = int(requested_every)  # kept for API stability/documentation symmetry.
+    return max(1, math.ceil(total_items / max_updates))
+
+
 def _aggregate_pik_targets(
     predictions: list[PIKRolloutPredictionRecord],
 ) -> list[PIKTargetRecord]:
     """Aggregate rollout predictions into one P(IK) target per question."""
+    # 从单次 prediction 还原到 question 级目标：success_rate / parseable_rate。
     by_sample: dict[str, list[PIKRolloutPredictionRecord]] = {}
     for prediction in predictions:
         prediction.validate()

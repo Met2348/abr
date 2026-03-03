@@ -37,6 +37,7 @@ RUN_PREFIX="${RUN_PREFIX:-phase_b_xtask}"
 PHASE_B_EVAL_BATCH_SIZE="${PHASE_B_EVAL_BATCH_SIZE:-64}"
 ENABLE_PERSISTED_LOGS="${ENABLE_PERSISTED_LOGS:-1}"
 CURRENT_STAGE="init"
+# 中文：这个脚本是“跨任务验证入口”，核心只改 ACTIVE_CROSS_TASK_GROUP 与 RUN_PREFIX。
 
 timestamp() {
   date "+%Y-%m-%d %H:%M:%S %z"
@@ -128,7 +129,10 @@ PY
 resolve_group() {
   TARGET_DATASET=""
   EVAL_SPECS=""
+  # 中文：EVAL_SPECS 每行格式：
+  # label|input_jsonl|decode_mode|max_new_tokens
 
+  # 中文：新增跨任务组时，务必确认 SOURCE_RUN_NAME_PREFIX 指向已完成训练的 run 前缀。
   case "$ACTIVE_CROSS_TASK_GROUP" in
     B3_XTASK_STRAT_R32_TO_GSM8K)
       GROUP_TITLE="B3 Cross-Task: StrategyQA Rank-32 Adapter -> GSM8K"
@@ -197,6 +201,7 @@ run_eval_spec() {
   local decode_mode="$4"
   local max_new_tokens="$5"
   local run_name="${RUN_NAME}_${stage}_${label}"
+  # 中文：pre=base 模型；post=source adapter。两者共用完全相同的评测输入。
 
   local cmd=(
     "$PYTHON_BIN" -u scripts/phase_b_eval.py
@@ -247,6 +252,7 @@ GAIN_SUMMARY_MD="$LOG_ROOT/cross_task_gain_summary.md"
 RUN_NAME="${RUN_PREFIX}_${ACTIVE_CROSS_TASK_GROUP,,}"
 SOURCE_PHASE_B_RUN_DIR="${SOURCE_PHASE_B_RUN_DIR:-$(latest_phase_b_run_dir_for_name "$SOURCE_RUN_NAME_PREFIX")}"
 BASE_MODEL_PATH="$(json_manifest_value "$SOURCE_PHASE_B_RUN_DIR/manifest.json" "model_path")"
+# 中文：允许手动指定 SOURCE_PHASE_B_RUN_DIR；不指定时自动取“同前缀最新目录”。
 
 {
   log_line "Repo root      : $REPO_ROOT"

@@ -63,6 +63,7 @@ def load_phase_b_rows(
                 continue
             payload = json.loads(line)
             row = PhaseBTrainRow.from_dict(payload)
+            # 这里强制去重：重复 sample_id 会造成训练/评测统计偏移。
             if row.sample_id in seen_ids:
                 raise ValueError(
                     f"Duplicate sample_id detected in {path} at line {line_no}: "

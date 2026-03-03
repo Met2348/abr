@@ -333,8 +333,8 @@ CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_b_train_value.py \
   --require-cuda \
   --dtype bfloat16 \
   --device-map auto \
-  --per-device-train-batch-size 256 \
-  --per-device-eval-batch-size 256 \
+  --per-device-train-batch-size 192 \
+  --per-device-eval-batch-size 192 \
   --learning-rate 1e-3 \
   --num-train-epochs 5 \
   --use-contrastive-loss \
@@ -350,6 +350,8 @@ New C2 options (can be toggled independently):
 - contrastive pair filtering: `--contrastive-pair-filter` (includes `label_quality`, `confidence_parseable_label`), `--contrastive-confidence-threshold`, `--contrastive-parseable-threshold`, `--contrastive-label-delta-q-min`, `--contrastive-label-z-min`, `--contrastive-label-pair-weight-min`, `--contrastive-require-pair-pass-gate`, `--contrastive-use-pair-weights`
 - calibration target smoothing: `--calibration-target-smoothing`
 - contrastive score-gap mining: `--contrastive-score-gap-min`, `--contrastive-score-gap-max`
+- CQR C1 corruption policy: `--corruption-selection-policy`, `--min-non-step-drop-per-prefix`, `--max-step-drop-per-prefix`, semantic toggles (`--enable-negation-flip`, `--enable-comparator-flip`, `--enable-condition-reversal`, `--enable-entity-substitution`)
+- CQR C2 stratified sampling: `--contrastive-stratified-sampling`, `--contrastive-stratify-step-bucket-size`, `--contrastive-stratify-include-no-corruption`
 
 C2 standalone evaluation entrypoint:
 
@@ -363,6 +365,8 @@ CUDA_VISIBLE_DEVICES=3 python -u scripts/phase_b_eval_faithfulness.py \
 ```
 
 One-command lifecycle (C1 train + C1 eval + C2 train + C2 eval):
+
+- Default Phase C/P(IK) batch sizing is now `192` (`ROLLOUT_BATCH_SIZE`, `C2_TRAIN_BATCH_SIZE`, `C2_EVAL_BATCH_SIZE`) to safely fit 3 concurrent jobs per 80GB GPU.
 
 ```bash
 ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_SMOKE \
@@ -382,6 +386,11 @@ bash scripts/run_phase_c_value_suite.sh
 ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_QUALITY_FIRST_FULL \
 RUN_PREFIX=phase_c_quality_first_full \
 CUDA_VISIBLE_DEVICES=3 \
+bash scripts/run_phase_c_value_suite.sh
+
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_CQR_SMOKE \
+RUN_PREFIX=phase_c_cqr_smoke \
+CUDA_VISIBLE_DEVICES=1 \
 bash scripts/run_phase_c_value_suite.sh
 ```
 
@@ -419,6 +428,10 @@ Supported lifecycle groups:
 12. `C2_STRATEGYQA_TRICK10_K16_COMBINED`
 13. `C2_STRATEGYQA_QUALITY_FIRST`
 14. `C2_STRATEGYQA_QUALITY_FIRST_FULL`
+15. `C2_STRATEGYQA_CQR_SMOKE`
+16. `C2_STRATEGYQA_CQR_FULL`
+17. `C2_STRATEGYQA_CQR_RERUN_TRICK10`
+18. `C2_STRATEGYQA_CQR_RERUN_QUALITY_FIRST`
 
 ## Phase D Public Direction
 
@@ -438,7 +451,7 @@ D1 teacher-sidecar entrypoint (implemented):
 CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_c_score_prm_teacher.py \
   --phase-c-dir <phase_c_artifact_dir> \
   --teacher-model-path assets/models/Qwen2.5-Math-PRM-7B \
-  --batch-size 256 \
+  --batch-size 192 \
   --max-length 2048 \
   --require-cuda
 ```

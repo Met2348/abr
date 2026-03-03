@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import sys
 import time
@@ -137,6 +138,9 @@ class TrainConfig:
     contrastive_score_gap_min: float
     contrastive_score_gap_max: float
     contrastive_use_pair_weights: bool
+    contrastive_stratified_sampling: bool
+    contrastive_stratify_step_bucket_size: int
+    contrastive_stratify_include_no_corruption: bool
     adaptive_loss_balancing: str
     adaptive_loss_init_log_variance: float
     checkpoint_selection_metric: str
@@ -346,6 +350,34 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Use C1 label-side pair_weight as a per-pair weight in the contrastive margin loss.",
     )
     parser.add_argument(
+        "--contrastive-stratified-sampling",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Enable type-aware stratified sampling for C2 training batches. "
+            "When enabled, examples are interleaved across "
+            "`primary_corruption_type x prefix_step_bucket` strata."
+        ),
+    )
+    parser.add_argument(
+        "--contrastive-stratify-step-bucket-size",
+        type=int,
+        default=2,
+        help=(
+            "Bucket size for prefix_step_index in stratified sampling. "
+            "Example: 0-1, 2-3, 4-5 when bucket size is 2."
+        ),
+    )
+    parser.add_argument(
+        "--contrastive-stratify-include-no-corruption",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "When stratified sampling is enabled, include no-primary-corruption "
+            "examples in dedicated strata so calibration coverage remains stable."
+        ),
+    )
+    parser.add_argument(
         "--adaptive-loss-balancing",
         choices=["none", "uncertainty"],
         default="none",
@@ -431,6 +463,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse CLI arguments and optional config defaults."""
     parser = _build_parser()
+    # 两段解析：先吸收 config-json 默认值，再解析完整 CLI 覆盖。
     partial, _ = parser.parse_known_args(argv)
     if partial.config_json is not None:
         defaults = _load_config_defaults(partial.config_json)
@@ -472,6 +505,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--contrastive-score-gap-min must be in [-1, 1]")
     if not (-1.0 <= args.contrastive_score_gap_max <= 1.0):
         raise ValueError("--contrastive-score-gap-max must be in [-1, 1]")
+    if args.contrastive_stratify_step_bucket_size <= 0:
+        raise ValueError("--contrastive-stratify-step-bucket-size must be > 0")
     if args.calibration_mse_weight < 0.0:
         raise ValueError("--calibration-mse-weight must be >= 0")
     if args.calibration_bce_weight < 0.0:
@@ -515,7 +550,7 @@ def main(argv: list[str] | None = None) -> int:
     """Run the full C2 training and held-out evaluation workflow."""
     args = parse_args(argv)
 
-    # Stage 1: load and validate the input artifact directories before touching the model.
+    # Stage 1: 先做 artifact 契约检查，再加载模型，避免 GPU 时间浪费在脏数据上。
     train_examples, train_manifest = load_value_supervision_examples(
         args.train_dir,
         max_samples=args.max_train_samples,
@@ -576,6 +611,11 @@ def main(argv: list[str] | None = None) -> int:
         contrastive_score_gap_min=float(args.contrastive_score_gap_min),
         contrastive_score_gap_max=float(args.contrastive_score_gap_max),
         contrastive_use_pair_weights=bool(args.contrastive_use_pair_weights),
+        contrastive_stratified_sampling=bool(args.contrastive_stratified_sampling),
+        contrastive_stratify_step_bucket_size=int(args.contrastive_stratify_step_bucket_size),
+        contrastive_stratify_include_no_corruption=bool(
+            args.contrastive_stratify_include_no_corruption
+        ),
         adaptive_loss_balancing=str(args.adaptive_loss_balancing),
         adaptive_loss_init_log_variance=float(args.adaptive_loss_init_log_variance),
         checkpoint_selection_metric=str(args.checkpoint_selection_metric),
@@ -637,6 +677,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"pair_gap_min      : {args.contrastive_score_gap_min}")
     print(f"pair_gap_max      : {args.contrastive_score_gap_max}")
     print(f"pair_weight_loss  : {args.contrastive_use_pair_weights}")
+    print(f"pair_stratified   : {args.contrastive_stratified_sampling}")
+    print(f"pair_step_bucket  : {args.contrastive_stratify_step_bucket_size}")
+    print(f"pair_include_noc  : {args.contrastive_stratify_include_no_corruption}")
     print(f"posthoc_calib     : {args.posthoc_calibration}")
     print(f"ckpt_metric       : {args.checkpoint_selection_metric}")
     print(f"batch_train       : {args.per_device_train_batch_size}")
@@ -645,7 +688,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"seed              : {args.seed}")
     print("=" * 88)
 
-    # Stage 2: load the frozen backbone once and cache pooled features.
+    # Stage 2: 冻结 backbone 并一次性缓存特征；后续仅训练小 value head。
     model_load_start = time.perf_counter()
     resolved_dtype = _resolve_dtype(args.dtype, torch)
     tokenizer_path = _resolve_tokenizer_load_path(model_path=model_path, adapter_path=(Path(adapter_path) if adapter_path else None))
@@ -710,8 +753,27 @@ def main(argv: list[str] | None = None) -> int:
         batch_size=args.per_device_eval_batch_size,
     )
     feature_cache_elapsed = time.perf_counter() - feature_cache_start
+    if bool(args.contrastive_stratified_sampling):
+        strata_summary = _summarize_strata_for_logging(
+            train_cache=train_cache,
+            step_bucket_size=int(args.contrastive_stratify_step_bucket_size),
+            include_no_corruption=bool(args.contrastive_stratify_include_no_corruption),
+        )
+        print(
+            "pair_strata      : "
+            f"num_strata={strata_summary['num_strata']} "
+            f"max={strata_summary['max_size']} "
+            f"median={strata_summary['median_size']} "
+            f"min={strata_summary['min_size']}",
+            flush=True,
+        )
+        print(
+            "pair_strata_top  : "
+            + ", ".join(str(item) for item in strata_summary["top_strata"]),
+            flush=True,
+        )
 
-    # Stage 3: train only the small value head on the cached features.
+    # Stage 3: 仅在缓存特征上训练 value head，避免重复大模型前向。
     # Trick-3 (adaptive loss balancing):
     # Build optional learnable balancing scalars once, keep them in the same
     # optimizer so updates remain synchronized with the value-head step updates.
@@ -771,8 +833,7 @@ def main(argv: list[str] | None = None) -> int:
     epoch_idx = 0
     optimizer.zero_grad(set_to_none=True)
 
-    # Drive the loop by optimizer steps rather than integer epochs so fractional
-    # `num_train_epochs` values behave as requested instead of being silently rounded.
+    # 用 optimizer steps 驱动而不是整 epoch，保证小数 epoch 语义准确。
     while global_step < total_steps:
         epoch_stats = _run_one_train_epoch(
             value_head=value_head,
@@ -800,6 +861,9 @@ def main(argv: list[str] | None = None) -> int:
             contrastive_score_gap_min=args.contrastive_score_gap_min,
             contrastive_score_gap_max=args.contrastive_score_gap_max,
             contrastive_use_pair_weights=args.contrastive_use_pair_weights,
+            contrastive_stratified_sampling=args.contrastive_stratified_sampling,
+            contrastive_stratify_step_bucket_size=args.contrastive_stratify_step_bucket_size,
+            contrastive_stratify_include_no_corruption=args.contrastive_stratify_include_no_corruption,
             adaptive_loss_balancing=args.adaptive_loss_balancing,
             adaptive_loss_state=adaptive_loss_state,
             logging_steps=args.logging_steps,
@@ -1020,6 +1084,125 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _build_stratified_train_permutation(
+    *,
+    train_cache: dict[str, Any],
+    torch_module: Any,
+    step_bucket_size: int,
+    include_no_corruption: bool,
+) -> Any:
+    """Build a type-aware training permutation for CQR-4 stratified sampling.
+
+    Strategy
+    --------
+    1. Build strata keyed by `(corruption_type, step_bucket)`.
+    2. Shuffle each stratum locally.
+    3. Round-robin interleave non-empty strata.
+
+    This keeps mini-batches from collapsing to one dominant corruption type while
+    preserving stochastic order each epoch.
+    """
+    device = train_cache["clean_features"].device
+    num_examples = int(train_cache["clean_features"].shape[0])
+    if num_examples <= 1:
+        return torch_module.arange(num_examples, device=device)
+
+    has_primary = train_cache["has_primary_corruption"].detach().cpu().tolist()
+    step_index = train_cache["prefix_step_index"].detach().cpu().tolist()
+    corruption_types = list(train_cache["primary_corruption_type"])
+
+    strata: dict[tuple[str, int], list[int]] = {}
+    fallback_indices: list[int] = []
+    for idx in range(num_examples):
+        has_corr = bool(has_primary[idx])
+        if has_corr:
+            ctype = str(corruption_types[idx] or "__unknown__")
+        else:
+            if include_no_corruption:
+                ctype = "__no_corruption__"
+            else:
+                fallback_indices.append(idx)
+                continue
+        bucket = int(step_index[idx]) // max(step_bucket_size, 1)
+        strata.setdefault((ctype, bucket), []).append(idx)
+
+    for key in list(strata.keys()):
+        bucket = strata[key]
+        if len(bucket) <= 1:
+            continue
+        order = torch_module.randperm(len(bucket)).tolist()
+        strata[key] = [bucket[pos] for pos in order]
+
+    pointers: dict[tuple[str, int], int] = {key: 0 for key in strata}
+    ordered: list[int] = []
+    while True:
+        active = [
+            key
+            for key, values in strata.items()
+            if pointers[key] < len(values)
+        ]
+        if not active:
+            break
+        if len(active) > 1:
+            shuffle_order = torch_module.randperm(len(active)).tolist()
+            active = [active[pos] for pos in shuffle_order]
+        for key in active:
+            pos = pointers[key]
+            ordered.append(strata[key][pos])
+            pointers[key] = pos + 1
+
+    if fallback_indices:
+        if len(fallback_indices) > 1:
+            order = torch_module.randperm(len(fallback_indices)).tolist()
+            fallback_indices = [fallback_indices[pos] for pos in order]
+        ordered.extend(fallback_indices)
+
+    if len(ordered) != num_examples:
+        # Safety fallback: never allow silent sample dropping in training.
+        return torch_module.randperm(num_examples, device=device)
+    return torch_module.tensor(ordered, dtype=torch_module.long, device=device)
+
+
+def _summarize_strata_for_logging(
+    *,
+    train_cache: dict[str, Any],
+    step_bucket_size: int,
+    include_no_corruption: bool,
+) -> dict[str, Any]:
+    """Summarize stratification buckets for quick operator visibility."""
+    has_primary = train_cache["has_primary_corruption"].detach().cpu().tolist()
+    step_index = train_cache["prefix_step_index"].detach().cpu().tolist()
+    corruption_types = list(train_cache["primary_corruption_type"])
+    counts: dict[tuple[str, int], int] = {}
+    for idx, has_corr in enumerate(has_primary):
+        if bool(has_corr):
+            ctype = str(corruption_types[idx] or "__unknown__")
+        else:
+            if not include_no_corruption:
+                continue
+            ctype = "__no_corruption__"
+        bucket = int(step_index[idx]) // max(step_bucket_size, 1)
+        key = (ctype, bucket)
+        counts[key] = counts.get(key, 0) + 1
+    sizes = sorted(counts.values())
+    if not sizes:
+        return {
+            "num_strata": 0,
+            "min_size": 0,
+            "max_size": 0,
+            "median_size": 0,
+            "top_strata": [],
+        }
+    top = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:5]
+    return {
+        "num_strata": int(len(sizes)),
+        "min_size": int(sizes[0]),
+        "max_size": int(sizes[-1]),
+        "median_size": int(sizes[len(sizes) // 2]),
+        "top_strata": top,
+    }
+
+
 def _run_one_train_epoch(
     *,
     value_head: Any,
@@ -1047,6 +1230,9 @@ def _run_one_train_epoch(
     contrastive_score_gap_min: float,
     contrastive_score_gap_max: float,
     contrastive_use_pair_weights: bool,
+    contrastive_stratified_sampling: bool,
+    contrastive_stratify_step_bucket_size: int,
+    contrastive_stratify_include_no_corruption: bool,
     adaptive_loss_balancing: str,
     adaptive_loss_state: dict[str, Any] | None,
     logging_steps: int,
@@ -1056,7 +1242,16 @@ def _run_one_train_epoch(
     """Train the head for one epoch over cached feature tensors."""
     value_head.train()
     num_examples = int(train_cache["clean_features"].shape[0])
-    permutation = torch_module.randperm(num_examples, device=train_cache["clean_features"].device)
+    if bool(contrastive_stratified_sampling):
+        # 分层采样避免 batch 被单一 corruption 类型主导。
+        permutation = _build_stratified_train_permutation(
+            train_cache=train_cache,
+            torch_module=torch_module,
+            step_bucket_size=int(contrastive_stratify_step_bucket_size),
+            include_no_corruption=bool(contrastive_stratify_include_no_corruption),
+        )
+    else:
+        permutation = torch_module.randperm(num_examples, device=train_cache["clean_features"].device)
     running_total = 0.0
     running_cal = 0.0
     running_ctr = 0.0
@@ -1089,6 +1284,7 @@ def _run_one_train_epoch(
         loss_ctr = torch_module.zeros((), device=clean_features.device)
         used_ctr_pairs = False
         if lambda_contrastive > 0.0:
+            # 对比分支先过 pair filter，再算 margin loss，尽量抑制噪声 pair。
             corruption_mask = train_cache["has_primary_corruption"][batch_indices]
             corruption_mask = _apply_contrastive_pair_filter(
                 batch_indices=batch_indices,
@@ -1204,6 +1400,7 @@ def _evaluate_value_head(
         prefix_scores = [float(v) for v in prefix_scores_tensor.detach().cpu().tolist()]
         target_scores = [float(v) for v in eval_cache["targets"].detach().cpu().tolist()]
 
+    # 先算 raw 校准指标，再可选做 post-hoc，二者都保留方便复盘。
     calibration_raw = compute_calibration_summary(
         prefix_scores,
         target_scores,
@@ -1690,11 +1887,20 @@ def _encode_example_cache(
         dtype=torch_module.bool,
         device=device,
     )
+    prefix_step_index = torch_module.tensor(
+        [int(example.prefix_step_index) for example in examples],
+        dtype=torch_module.long,
+        device=device,
+    )
     has_primary_corruption = torch_module.tensor(
         [example.has_primary_corruption() if use_primary_corruption else False for example in examples],
         dtype=torch_module.bool,
         device=device,
     )
+    primary_corruption_type = [
+        str(example.primary_corruption_type or "__none__")
+        for example in examples
+    ]
     corruption_features = torch_module.zeros_like(clean_features)
     if use_primary_corruption and bool(has_primary_corruption.any().item()):
         corruption_indices = [idx for idx, example in enumerate(examples) if example.has_primary_corruption()]
@@ -1723,7 +1929,9 @@ def _encode_example_cache(
         "primary_pair_z_delta": primary_pair_z_delta,
         "primary_pair_weight": primary_pair_weight,
         "primary_pair_pass_gate": primary_pair_pass_gate,
+        "prefix_step_index": prefix_step_index,
         "has_primary_corruption": has_primary_corruption,
+        "primary_corruption_type": primary_corruption_type,
         "primary_corruption_features": corruption_features,
     }
 
@@ -1765,6 +1973,7 @@ def _encode_text_list_in_batches(
     batch_size: int,
     progress_label: str = "cache",
     progress_every_batches: int = 0,
+    max_progress_updates: int = 8,
 ):
     """Encode a list of texts into one stacked pooled-feature tensor.
 
@@ -1785,8 +1994,13 @@ def _encode_text_list_in_batches(
         return torch_module.zeros((0, infer_backbone_hidden_size(backbone)), dtype=torch_module.float32, device=_resolve_value_device(backbone, torch_module))
 
     total_batches = (total_texts + batch_size - 1) // batch_size
+    max_progress_updates = max(int(max_progress_updates), 1)
+    bounded_every = max(1, math.ceil(total_batches / max_progress_updates))
+    _ = int(progress_every_batches)  # kept for API compatibility.
+    effective_every = bounded_every
     print(
-        f"{progress_label:16s}: start {total_texts} texts in {total_batches} batches (bs={batch_size})",
+        f"{progress_label:16s}: start {total_texts} texts in {total_batches} batches "
+        f"(bs={batch_size}, progress_every~{effective_every})",
         flush=True,
     )
     for batch_idx, start in enumerate(range(0, total_texts, batch_size), start=1):
@@ -1801,8 +2015,8 @@ def _encode_text_list_in_batches(
             )
         )
         if (
-            progress_every_batches > 0
-            and (batch_idx % progress_every_batches == 0 or batch_idx == total_batches)
+            effective_every > 0
+            and (batch_idx % effective_every == 0 or batch_idx == total_batches)
         ):
             print(
                 f"{progress_label:16s}: {batch_idx}/{total_batches} batches",

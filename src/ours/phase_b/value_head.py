@@ -105,6 +105,7 @@ def freeze_backbone(backbone: Any) -> None:
     freeze_backbone(model)
     ```
     """
+    # C2 默认冻结 backbone；只训练 value head，降低不稳定性和显存压力。
     for param in backbone.parameters():
         param.requires_grad = False
     backbone.eval()
@@ -137,6 +138,7 @@ def encode_text_features(
     """
     if not texts:
         raise ValueError("`texts` must contain at least one item")
+    # 统一通过 attention_mask 做池化定位，兼容左/右 padding。
     model_device = resolve_model_input_device(backbone)
     inputs = tokenizer(
         texts,

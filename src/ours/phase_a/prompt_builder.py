@@ -47,6 +47,8 @@ from .contracts import PreparedSample, PromptTemplateSpec, TargetStyle
 
 
 # Registry: template_id -> version -> spec
+# 模板库是 Phase A 可复现实验的核心之一：改模板文案时建议升 template_version，
+# 避免“同名模板行为变化”导致历史结果难对比。
 PROMPT_TEMPLATE_REGISTRY: dict[str, dict[str, PromptTemplateSpec]] = {
     "qa_direct": {
         "1.0.0": PromptTemplateSpec(
@@ -286,6 +288,7 @@ def resolve_template(template_id: str, template_version: str) -> PromptTemplateS
             f"Unknown template_version={template_version!r} for template_id={template_id!r}. "
             f"Supported versions: {sorted(versions.keys())}"
         )
+    # 统一在这里做模板存在性和版本校验，调用方只拿已验证的 spec。
     spec = versions[template_version]
     spec.validate()
     return spec

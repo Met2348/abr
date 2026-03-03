@@ -37,6 +37,8 @@ class ExtractedAnswer:
 
 def extract_answer(raw_text: str, dataset: str) -> ExtractedAnswer:
     """Dataset-aware extraction entry point."""
+    # Phase A 评测不是直接比较 raw text，而是先走任务感知提取器。
+    # 这一步决定 parse_error 与最终 accuracy 的计算基础。
     dataset = dataset.strip().lower()
     if dataset == "strategyqa":
         return _extract_strategyqa(raw_text)
@@ -94,6 +96,8 @@ def _extract_strategyqa(raw_text: str) -> ExtractedAnswer:
     if text == "":
         return ExtractedAnswer(text="", method="plain_text_fallback", parse_error=True)
 
+    # 优先级设计：先抓高置信格式，再逐步回退。
+    # 这样可在保持召回的同时，尽量降低误提取概率。
     # 1) Exact or near-exact one-token answer first.
     yes_no = _normalize_yes_no(text)
     if yes_no in {"yes", "no"}:
@@ -156,6 +160,8 @@ def _extract_math_style(raw_text: str) -> ExtractedAnswer:
     """Extract a math-style final answer using dataset-specific heuristics."""
     text = raw_text.strip()
 
+    # 优先级：final-answer tag > GSM8K #### > boxed > last_number 回退。
+    # 越靠后的方法越偏“兜底”，语义确定性通常越弱。
     # 1) explicit final-answer tags
     m = re.search(
         r"final\s*answer(?:\s*is)?\s*:\s*(.+)|final\s*answer\s*is\s+(.+)",

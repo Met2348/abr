@@ -89,6 +89,8 @@ class PreparedSample:
     template_id: str
     template_version: str
     prompt_text: str
+    # target_text 是 Phase A 到 Phase B/C 的监督桥梁字段：
+    # 后续 SFT、value data 构建都会直接读取它。
     target_text: str
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -191,6 +193,8 @@ class ScoredPrediction:
     extracted_prediction: str
     normalized_gold: str
     is_correct: bool
+    # parse_error=True 表示“答案提取失败或不可信”，并不等同于模型一定答错；
+    # 该标志会影响 parseable 子集指标。
     parse_error: bool
     extraction_method: str
     question: str | None = None

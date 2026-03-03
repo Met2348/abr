@@ -18,6 +18,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 ACTIVE_PHASE_C_PIK_GROUP="${ACTIVE_PHASE_C_PIK_GROUP:-PIK_STRATEGYQA_SMOKE}"
 RUN_PREFIX="${RUN_PREFIX:-phase_c_pik}"
 CURRENT_STAGE="init"
+# 中文：这个入口专门跑问题级 P(IK) 管线；切组只改 ACTIVE_PHASE_C_PIK_GROUP。
 
 
 timestamp() {
@@ -147,6 +148,8 @@ trap 'on_exit $?' EXIT
 
 
 resolve_group() {
+  # 组定义同时决定数据规模与训练配置，是复现实验的主入口。
+  # 中文：新增组时优先复制现有组，仅替换数据路径和训练超参，避免漏字段。
   case "$ACTIVE_PHASE_C_PIK_GROUP" in
     PIK_STRATEGYQA_SMOKE)
       GROUP_TITLE="Phase C P(IK) StrategyQA Smoke"
@@ -158,11 +161,11 @@ resolve_group() {
       EVAL_INPUT_JSONL="assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/validation.jsonl"
       TRAIN_MAX_SAMPLES="${TRAIN_MAX_SAMPLES:-256}"
       EVAL_MAX_SAMPLES="${EVAL_MAX_SAMPLES:-128}"
-      ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-256}"
+      ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-192}"
       ROLLOUT_COUNT="${ROLLOUT_COUNT:-20}"
       ROLLOUT_MAX_NEW_TOKENS="${ROLLOUT_MAX_NEW_TOKENS:-96}"
-      C2_TRAIN_BATCH_SIZE="${C2_TRAIN_BATCH_SIZE:-256}"
-      C2_EVAL_BATCH_SIZE="${C2_EVAL_BATCH_SIZE:-256}"
+      C2_TRAIN_BATCH_SIZE="${C2_TRAIN_BATCH_SIZE:-192}"
+      C2_EVAL_BATCH_SIZE="${C2_EVAL_BATCH_SIZE:-192}"
       C2_LR="${C2_LR:-1e-4}"
       C2_EPOCHS="${C2_EPOCHS:-8}"
       C2_TRAIN_EXTRA_ARGS_DEFAULT="${C2_TRAIN_EXTRA_ARGS_DEFAULT:---calibration-loss bce --known-threshold 0.5 --posthoc-calibration temperature --checkpoint-selection-metric posthoc_brier}"
@@ -178,11 +181,11 @@ resolve_group() {
       EVAL_INPUT_JSONL="assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/validation.jsonl"
       TRAIN_MAX_SAMPLES="${TRAIN_MAX_SAMPLES:-}"
       EVAL_MAX_SAMPLES="${EVAL_MAX_SAMPLES:-}"
-      ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-256}"
+      ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-192}"
       ROLLOUT_COUNT="${ROLLOUT_COUNT:-32}"
       ROLLOUT_MAX_NEW_TOKENS="${ROLLOUT_MAX_NEW_TOKENS:-96}"
-      C2_TRAIN_BATCH_SIZE="${C2_TRAIN_BATCH_SIZE:-256}"
-      C2_EVAL_BATCH_SIZE="${C2_EVAL_BATCH_SIZE:-256}"
+      C2_TRAIN_BATCH_SIZE="${C2_TRAIN_BATCH_SIZE:-192}"
+      C2_EVAL_BATCH_SIZE="${C2_EVAL_BATCH_SIZE:-192}"
       C2_LR="${C2_LR:-1e-4}"
       C2_EPOCHS="${C2_EPOCHS:-10}"
       C2_TRAIN_EXTRA_ARGS_DEFAULT="${C2_TRAIN_EXTRA_ARGS_DEFAULT:---calibration-loss bce --known-threshold 0.5 --posthoc-calibration temperature --checkpoint-selection-metric posthoc_brier}"
@@ -198,11 +201,11 @@ resolve_group() {
       EVAL_INPUT_JSONL="assets/artifacts/phase_a_prepared/gsm8k/e3abe2fb9883/validation.jsonl"
       TRAIN_MAX_SAMPLES="${TRAIN_MAX_SAMPLES:-512}"
       EVAL_MAX_SAMPLES="${EVAL_MAX_SAMPLES:-172}"
-      ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-256}"
+      ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-192}"
       ROLLOUT_COUNT="${ROLLOUT_COUNT:-20}"
       ROLLOUT_MAX_NEW_TOKENS="${ROLLOUT_MAX_NEW_TOKENS:-192}"
-      C2_TRAIN_BATCH_SIZE="${C2_TRAIN_BATCH_SIZE:-256}"
-      C2_EVAL_BATCH_SIZE="${C2_EVAL_BATCH_SIZE:-256}"
+      C2_TRAIN_BATCH_SIZE="${C2_TRAIN_BATCH_SIZE:-192}"
+      C2_EVAL_BATCH_SIZE="${C2_EVAL_BATCH_SIZE:-192}"
       C2_LR="${C2_LR:-1e-4}"
       C2_EPOCHS="${C2_EPOCHS:-8}"
       C2_TRAIN_EXTRA_ARGS_DEFAULT="${C2_TRAIN_EXTRA_ARGS_DEFAULT:---calibration-loss bce --known-threshold 0.5 --posthoc-calibration temperature --checkpoint-selection-metric posthoc_brier}"
@@ -241,6 +244,7 @@ run_c1_prepare() {
   if [[ -n "$max_samples" ]]; then
     cmd+=(--max-samples "$max_samples")
   fi
+  # 中文：这里是 P(IK) C1 阶段唯一的用户注入口，适合临时改 rollout 参数。
   append_extra_args cmd "${PHASE_C_PIK_PREP_EXTRA_ARGS:-}"
 
   CURRENT_STAGE="c1_prepare_${split_label}"
@@ -267,6 +271,7 @@ C1_TRAIN_RUN_NAME="${RUN_NAME}_c1_train"
 C1_EVAL_RUN_NAME="${RUN_NAME}_c1_eval"
 C2_TRAIN_RUN_NAME="${RUN_NAME}_c2"
 C2_STANDALONE_EVAL_RUN_NAME="${RUN_NAME}_c2_eval"
+# 中文：目录解析依赖这套命名后缀，改名规则会影响后续自动查找。
 
 {
   log_line "Repo root      : $REPO_ROOT"
@@ -346,12 +351,14 @@ c2_eval_cmd=(
 )
 append_extra_args c2_eval_cmd "${C2_EVAL_EXTRA_ARGS_DEFAULT:-}"
 append_extra_args c2_eval_cmd "${PHASE_C_PIK_EVAL_EXTRA_ARGS:-}"
+# 中文：train/eval 的 extra args 分开传，避免把训练参数误注入评估脚本。
 {
   log_line "PIK C2 eval command : ${c2_eval_cmd[*]}"
 } | tee -a "$SUITE_LOG_FILE"
 "${c2_eval_cmd[@]}" 2>&1 | tee -a "$SUITE_LOG_FILE"
 
 CURRENT_STAGE="resolve_c2_eval_dir"
+# 注意：下面指标全部来自 standalone eval，而不是训练过程中的中间日志。
 C2_EVAL_DIR="$(latest_pik_eval_run_dir_for_name "$C2_STANDALONE_EVAL_RUN_NAME")"
 C2_EVAL_METRICS="$C2_EVAL_DIR/metrics.json"
 C2_BRIER="$(json_value "$C2_EVAL_METRICS" "calibration.brier_score")"

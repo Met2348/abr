@@ -183,7 +183,8 @@ def main() -> int:
     """
     args = parse_args()
 
-    # Freeze split policy first so every dataset uses the exact same ratios/seed.
+    # 先固定切分配置，确保本次运行里所有数据集都使用同一套比例和 seed。
+    # 这样跨数据集结果更可比，也便于复现实验。
     split_cfg = SplitConfig(
         train_ratio=args.train_ratio,
         validation_ratio=args.validation_ratio,
@@ -228,6 +229,8 @@ def main() -> int:
             },
             "dataset_kwargs": dataset_kwargs,
         }
+        # run_spec -> run_fingerprint 是 Phase A prepared 目录可复现的核心。
+        # 只要 run_spec 不变，指纹和输出目录就稳定不变。
         run_fingerprint = _stable_fingerprint(run_spec)
         run_dir = args.output_dir / dataset.lower() / run_fingerprint
 
@@ -330,6 +333,7 @@ def _prepare_one_dataset(
     manifest_path = run_dir / "manifest.json"
     summary_path = run_dir / "summary.json"
 
+    # resume 语义：已有同指纹且 JSONL 可解析就直接复用，避免重复准备。
     if run_dir.exists() and resume and not overwrite:
         if manifest_path.exists() and summary_path.exists():
             previous = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -346,6 +350,7 @@ def _prepare_one_dataset(
                 for p in run_dir.glob("*.jsonl"):
                     p.unlink()
 
+    # overwrite 语义：仅清理本目录下的 json/jsonl，再按当前参数重建。
     if run_dir.exists() and overwrite:
         for p in run_dir.glob("*.json"):
             p.unlink()
@@ -372,6 +377,8 @@ def _prepare_one_dataset(
     split_counts = {"train": 0, "validation": 0, "test": 0}
     try:
         for sample in samples:
+            # official: 全部样本保留在 source_split 对应桶；
+            # hash: 由 sample_id + seed 稳定映射到 train/validation/test。
             if split_policy == "official":
                 target_split = source_split
             else:
@@ -448,6 +455,7 @@ def _dataset_specific_kwargs(dataset_name: str, args: argparse.Namespace) -> dic
     """
     name = dataset_name.lower()
     kwargs: dict[str, Any] = {}
+    # 数据集私有参数统一在这里集中管理，避免散落在主流程里难追踪。
     if name == "gsm8k":
         kwargs["config"] = args.gsm8k_config
     elif name in {"bbh", "bigbench_hard"}:

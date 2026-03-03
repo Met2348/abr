@@ -1176,6 +1176,9 @@ def _run_generation(
             free_indices: list[int] = []
             for local_idx, row in enumerate(batch_rows):
                 dataset = str(row["dataset"]).strip().lower()
+                # StrategyQA 可切两条解码路由：
+                # - binary_choice: 直接比较 yes/no 条件概率，几乎不受格式影响；
+                # - freeform: 正常文本生成，再走提取器解析答案。
                 if dataset == "strategyqa" and strategyqa_decode_mode == "binary_choice":
                     binary_indices.append(local_idx)
                 else:
@@ -1363,6 +1366,8 @@ def _generate_freeform_rows_with_optional_backoff(
         is_oom = "out of memory" in str(exc).lower()
         if not (oom_backoff and is_oom and len(rows) > 1):
             raise
+        # OOM 回退策略：二分当前 batch 递归重试，直到能在显存内完成。
+        # 这样可以在大多数场景下保住长跑任务，而不是整次 run 直接失败。
         if torch_module.cuda.is_available():
             torch_module.cuda.empty_cache()
         mid = len(rows) // 2
@@ -1476,6 +1481,7 @@ def _apply_truncation_recovery_if_needed(
         return outputs
 
     recovered_outputs: list[FreeformGenerationResult] = []
+    # 仅对“命中 token cap 且疑似未完成”的输出做 continuation 恢复。
     for row, result in zip(rows, outputs, strict=True):
         dataset = str(row.get("dataset", "")).strip().lower()
         if not _needs_truncation_recovery(
@@ -1914,6 +1920,7 @@ def _compare_metrics(
     )
     ```
     """
+    # 注意：若 evaluator_version 不一致，delta 可能混入“评分逻辑变化”。
     previous_metrics = json.loads(previous_metrics_path.read_text(encoding="utf-8"))
     current_eval_version = str(current_metrics.get("evaluator_version", "unknown"))
     previous_eval_version = str(previous_metrics.get("evaluator_version", "unknown"))

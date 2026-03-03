@@ -246,6 +246,7 @@ def load_pik_supervision_examples(
         raise FileNotFoundError(
             f"Missing pik_targets.jsonl: {target_path}. P(IK) training requires rollout targets."
         )
+    # question-level 路径只依赖 pik_targets，不走 prefix/corruption join。
     rows = _read_jsonl(target_path)
     examples: list[PIKSupervisionExample] = []
     for row in sorted(rows, key=lambda item: str(item["sample_id"])):

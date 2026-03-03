@@ -256,6 +256,58 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Write corrupted-prefix artifacts for faithfulness tests.",
     )
     parser.add_argument("--max-corruptions-per-prefix", type=int, default=1)
+    parser.add_argument(
+        "--corruption-selection-policy",
+        choices=["legacy", "cqr_balanced"],
+        default="legacy",
+        help=(
+            "Corruption candidate selection policy. "
+            "`legacy` preserves the historical deterministic behavior; "
+            "`cqr_balanced` enables CQR semantic expansion and per-prefix balancing."
+        ),
+    )
+    parser.add_argument(
+        "--min-non-step-drop-per-prefix",
+        type=int,
+        default=1,
+        help=(
+            "When using `cqr_balanced`, keep at least this many non-step-drop variants "
+            "per prefix when available."
+        ),
+    )
+    parser.add_argument(
+        "--max-step-drop-per-prefix",
+        type=int,
+        default=1,
+        help=(
+            "When using `cqr_balanced`, cap how many step-drop variants may be kept "
+            "for each clean prefix."
+        ),
+    )
+    parser.add_argument(
+        "--enable-negation-flip",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable semantic negation/polarity corruption in `cqr_balanced` mode.",
+    )
+    parser.add_argument(
+        "--enable-comparator-flip",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable semantic comparator reversal corruption in `cqr_balanced` mode.",
+    )
+    parser.add_argument(
+        "--enable-condition-reversal",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable semantic condition reversal corruption in `cqr_balanced` mode.",
+    )
+    parser.add_argument(
+        "--enable-entity-substitution",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable semantic entity substitution corruption in `cqr_balanced` mode.",
+    )
 
     # Rollout configuration.
     parser.add_argument(
@@ -441,6 +493,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--batch-size must be > 0")
     if args.rollout_count <= 0:
         raise ValueError("--rollout-count must be > 0")
+    if args.max_corruptions_per_prefix <= 0:
+        raise ValueError("--max-corruptions-per-prefix must be > 0")
+    if args.min_non_step_drop_per_prefix < 0:
+        raise ValueError("--min-non-step-drop-per-prefix must be >= 0")
+    if args.max_step_drop_per_prefix < 0:
+        raise ValueError("--max-step-drop-per-prefix must be >= 0")
     if args.rollout_stage1_count <= 0:
         raise ValueError("--rollout-stage1-count must be > 0")
     if args.rollout_stage2_count <= 0:
@@ -493,6 +551,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     corruption_config = CorruptionBuildConfig(
         max_corruptions_per_prefix=args.max_corruptions_per_prefix,
+        selection_policy=str(args.corruption_selection_policy),
+        min_non_step_drop_per_prefix=int(args.min_non_step_drop_per_prefix),
+        max_step_drop_per_prefix=int(args.max_step_drop_per_prefix),
+        enable_negation_flip=bool(args.enable_negation_flip),
+        enable_comparator_flip=bool(args.enable_comparator_flip),
+        enable_condition_reversal=bool(args.enable_condition_reversal),
+        enable_entity_substitution=bool(args.enable_entity_substitution),
     )
     target_quality_config = TargetQualityConfig(
         alpha=float(args.target_alpha),
@@ -544,6 +609,7 @@ def main(argv: list[str] | None = None) -> int:
             rollout_uncertain_ci_width=float(args.rollout_uncertain_ci_width),
         )
 
+    # run_spec 决定 fingerprint；任何会影响语义的参数都应纳入。
     run_spec = {
         "input_jsonl": str(args.input_jsonl),
         "input_sha256": input_sha256,
@@ -569,6 +635,7 @@ def main(argv: list[str] | None = None) -> int:
         build_pair_quality=args.build_pair_quality,
     )
     if run_dir.exists() and not args.overwrite and args.resume and _has_expected_outputs(run_dir, expected_files):
+        # resume 命中时直接复用，避免重复 rollout 成本。
         print("=" * 88)
         print("Phase C: Prepare Value Data")
         print("=" * 88)
@@ -1023,6 +1090,32 @@ def _select_uncertain_prefix_ids(
     return selected
 
 
+def _resolve_progress_interval(
+    *,
+    total_items: int,
+    requested_every: int,
+    max_updates: int = 8,
+) -> int:
+    """Return a bounded progress interval for long-running loops.
+
+    Why this helper exists
+    ----------------------
+    Some rollout loops can run for minutes after model loading. Historically,
+    logs were either too sparse (long silence) or too noisy. This helper keeps
+    output readable by guaranteeing:
+    - at most roughly `max_updates` periodic lines per stage,
+    - never less frequent than user-requested cadence if that cadence is already sparse.
+    """
+    total_items = max(int(total_items), 0)
+    max_updates = max(int(max_updates), 1)
+    if total_items <= 0:
+        return 1
+    # We intentionally cap by `max_updates` to avoid multi-minute silent spans
+    # while also preventing noisy logs.
+    _ = int(requested_every)  # kept for API stability/documentation symmetry.
+    return max(1, math.ceil(total_items / max_updates))
+
+
 def _generate_rollout_predictions_for_jobs(
     *,
     jobs: list[tuple[PrefixArtifact, int]],
@@ -1038,7 +1131,20 @@ def _generate_rollout_predictions_for_jobs(
     predictions: list[RolloutPredictionRecord] = []
     oom_backoff_events = 0
     done = 0
+    total_jobs = len(jobs)
+    progress_every = _resolve_progress_interval(
+        total_items=total_jobs,
+        requested_every=int(config.log_every),
+        max_updates=8,
+    )
+    next_progress = progress_every
     stage_start = time.perf_counter()
+    total_batches = (total_jobs + config.batch_size - 1) // config.batch_size
+    print(
+        f"{progress_label:16s}: start {total_jobs} jobs in {total_batches} batches "
+        f"(bs={config.batch_size}, progress_every~{progress_every})",
+        flush=True,
+    )
 
     for batch_start in range(0, len(jobs), config.batch_size):
         batch = jobs[batch_start : batch_start + config.batch_size]
@@ -1097,15 +1203,17 @@ def _generate_rollout_predictions_for_jobs(
             predictions.append(prediction)
             done += 1
 
-        if config.log_every > 0 and (done % config.log_every == 0 or done == len(jobs)):
+        if done >= next_progress or done == total_jobs:
             elapsed = max(time.perf_counter() - stage_start, 1e-6)
             rate = done / elapsed
             print(
                 f"{progress_label:16s}: "
-                f"{done}/{len(jobs)} ({done / max(len(jobs), 1):.1%}) | "
+                f"{done}/{total_jobs} ({done / max(total_jobs, 1):.1%}) | "
                 f"elapsed={elapsed:.1f}s | rate={rate:.3f} sample/s",
                 flush=True,
             )
+            while next_progress <= done:
+                next_progress += progress_every
     return predictions, int(oom_backoff_events)
 
 
@@ -1237,6 +1345,22 @@ def _build_corruption_rollout_targets_and_pair_quality(
             jobs.append((corruption, clean_prefix, rollout_index))
 
     by_corruption: dict[str, list[dict[str, Any]]] = {}
+    total_jobs = len(jobs)
+    progress_every = _resolve_progress_interval(
+        total_items=total_jobs,
+        requested_every=int(config.log_every),
+        max_updates=8,
+    )
+    next_progress = progress_every
+    done = 0
+    stage_start = time.perf_counter()
+    total_batches = (total_jobs + config.batch_size - 1) // config.batch_size if total_jobs > 0 else 0
+    print(
+        "corr_rollouts   : "
+        f"start {total_jobs} jobs in {total_batches} batches "
+        f"(bs={config.batch_size}, progress_every~{progress_every})",
+        flush=True,
+    )
     for batch_start in range(0, len(jobs), config.batch_size):
         batch = jobs[batch_start : batch_start + config.batch_size]
         prompts = [
@@ -1286,6 +1410,18 @@ def _build_corruption_rollout_targets_and_pair_quality(
                     "corruption_step_index": corruption.corruption_step_index,
                 }
             )
+        done += len(batch)
+        if done >= next_progress or done == total_jobs:
+            elapsed = max(time.perf_counter() - stage_start, 1e-6)
+            rate = done / elapsed
+            print(
+                "corr_rollouts   : "
+                f"{done}/{total_jobs} ({done / max(total_jobs, 1):.1%}) | "
+                f"elapsed={elapsed:.1f}s | rate={rate:.3f} sample/s",
+                flush=True,
+            )
+            while next_progress <= done:
+                next_progress += progress_every
 
     corr_targets: list[CorruptionRolloutTargetRecord] = []
     for corruption in sorted(corruption_artifacts, key=lambda c: c.corruption_id):
@@ -1350,9 +1486,15 @@ def _build_corruption_rollout_targets_and_pair_quality(
             delta_q >= float(target_quality_config.pair_delta_q_min)
             and z_delta >= float(target_quality_config.pair_z_min)
         )
+        # CQR-3: downweight uncertain pairs using both clean/corrupt reliability.
+        # `q_weight` is already uncertainty-aware (derived from CI width), so this
+        # factor suppresses high-noise pairs before C2 sees them.
+        clean_reliability = min(max(float(clean_target.q_weight), 0.0), 1.0)
+        corrupt_reliability = min(max(float(corr_target.q_weight), 0.0), 1.0)
+        uncertainty_weight = math.sqrt(clean_reliability * corrupt_reliability)
         delta_norm = min(max(delta_q, 0.0), 1.0)
         z_norm = min(max(z_delta, 0.0) / 5.0, 1.0)
-        pair_weight = 0.5 * delta_norm + 0.5 * z_norm
+        pair_weight = (0.5 * delta_norm + 0.5 * z_norm) * uncertainty_weight
         if not pair_pass:
             pair_weight *= 0.5
         pair = PairQualityRecord(
@@ -1382,6 +1524,9 @@ def _build_corruption_rollout_targets_and_pair_quality(
                 "z_min": float(target_quality_config.pair_z_min),
                 "clean_success_rate": float(clean_target.success_rate),
                 "corrupt_success_rate": float(corr_target.success_rate),
+                "uncertainty_weight": float(uncertainty_weight),
+                "clean_q_weight": float(clean_reliability),
+                "corrupt_q_weight": float(corrupt_reliability),
             },
         )
         pair.validate()

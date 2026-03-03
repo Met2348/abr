@@ -56,6 +56,8 @@ def score_prediction(record: PredictionRecord) -> ScoredPrediction:
     """Score one prediction record."""
     record.validate()
 
+    # 先抽取规范答案，再做 gold 归一化和等价判断。
+    # 这个顺序能把“格式问题”和“推理错误”分开记录到 parse_error / is_correct。
     extracted = extract_answer(raw_text=record.raw_prediction, dataset=record.dataset)
     gold_norm = normalize_gold_answer(record.gold_answer, dataset=record.dataset)
     is_correct = answers_equivalent(
@@ -88,6 +90,9 @@ def evaluate_predictions(records: list[PredictionRecord]) -> tuple[list[ScoredPr
     n_total = len(scored_rows)
     n_correct = sum(1 for row in scored_rows if row.is_correct)
     n_parse_error = sum(1 for row in scored_rows if row.parse_error)
+    # parseable 子集指标用于区分：
+    # - 提取失败导致的损失
+    # - 在可解析前提下模型真实决策质量
     n_parseable = n_total - n_parse_error
     n_correct_parseable = sum(
         1 for row in scored_rows if (not row.parse_error and row.is_correct)

@@ -332,6 +332,7 @@ def load_value_supervision_examples(
     if require_corruptions and not corruption_path.exists():
         raise FileNotFoundError(f"Missing corruptions.jsonl: {corruption_path}")
 
+    # 三路 join 的主键都是 prefix_id：prefixes / rollout_targets / (optional) corruptions。
     prefixes = {row["prefix_id"]: row for row in _read_jsonl(prefix_path)}
     rollout_targets = {row["prefix_id"]: row for row in _read_jsonl(rollout_target_path)}
     pair_quality_by_corruption, pair_quality_by_prefix = (
@@ -358,6 +359,7 @@ def load_value_supervision_examples(
         pair_quality = None
         if corruption is not None:
             pair_quality = pair_quality_by_corruption.get(str(corruption["corruption_id"]))
+        # 若 corruption 没有直接 pair_quality，回退到 prefix 级“最佳”pair_quality。
         if pair_quality is None:
             pair_quality = pair_quality_by_prefix.get(str(prefix_id))
 
@@ -492,6 +494,7 @@ def _build_primary_corruption_map(
 
     pair_quality_by_corruption = pair_quality_by_corruption or {}
 
+    # 每个 clean prefix 只保留一个 primary corruption，保持 C2 输入稳定。
     resolved: dict[str, dict[str, Any]] = {}
     for prefix_id, variants in grouped.items():
         if pair_quality_by_corruption:

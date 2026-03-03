@@ -38,8 +38,8 @@ CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_c_train_pik.py \
   --require-cuda \
   --dtype bfloat16 \
   --device-map auto \
-  --per-device-train-batch-size 256 \
-  --per-device-eval-batch-size 256 \
+  --per-device-train-batch-size 192 \
+  --per-device-eval-batch-size 192 \
   --learning-rate 1e-4 \
   --num-train-epochs 8 \
   --calibration-loss bce
@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import sys
 import time
@@ -164,8 +165,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--num-train-epochs", type=float, default=8.0)
     parser.add_argument("--max-steps", type=int, default=-1)
-    parser.add_argument("--per-device-train-batch-size", type=int, default=256)
-    parser.add_argument("--per-device-eval-batch-size", type=int, default=256)
+    parser.add_argument("--per-device-train-batch-size", type=int, default=192)
+    parser.add_argument("--per-device-eval-batch-size", type=int, default=192)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--warmup-ratio", type=float, default=0.05)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
@@ -235,6 +236,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse CLI arguments with optional config-json defaults."""
     parser = _build_parser()
+    # 两段解析：先读 config 默认值，再由 CLI 覆盖。
     partial, _ = parser.parse_known_args(argv)
     if partial.config_json is not None:
         defaults = _load_config_defaults(partial.config_json)
@@ -292,6 +294,7 @@ def main(argv: list[str] | None = None) -> int:
     """Run full P(IK) C2 training + epoch-level eval workflow."""
     args = parse_args(argv)
 
+    # Stage 1: 先检查 train/eval 产物契约一致，再触发模型加载。
     train_examples, train_manifest = load_pik_supervision_examples(
         args.train_dir,
         max_samples=args.max_train_samples,
@@ -378,6 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"seed              : {args.seed}")
     print("=" * 88)
 
+    # Stage 2: 加载并冻结 backbone，编码 question features 到缓存。
     model_load_start = time.perf_counter()
     resolved_dtype = _resolve_dtype(args.dtype, torch)
     tokenizer_path = _resolve_tokenizer_load_path(model_path=model_path, adapter_path=(Path(adapter_path) if adapter_path else None))
@@ -430,6 +434,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     feature_cache_elapsed = time.perf_counter() - feature_cache_start
 
+    # Stage 3: 仅训练小 value head，并按 eval 指标保存 best checkpoint。
     optimizer = torch.optim.AdamW(
         [{"params": list(value_head.parameters()), "weight_decay": args.weight_decay}],
         lr=args.learning_rate,
@@ -715,6 +720,7 @@ def _run_one_train_epoch(
         )
         head_outputs = value_head(features)
 
+        # PIK 只做 calibration，不引入 corruption 对比分支。
         loss = _compute_calibration_loss(
             calibration_loss=calibration_loss,
             head_outputs=head_outputs,
@@ -778,6 +784,7 @@ def _evaluate_pik_head(
         target_scores,
         reference_mean=float(train_target_mean),
     )
+    # known/unknown 标签由 success-rate 阈值离散化得到；阈值会影响 AUC 解释。
     known_labels = [1 if float(t) >= float(known_threshold) else 0 for t in target_scores]
     known_auc = compute_binary_auc(scores=scores, labels=known_labels)
 
@@ -785,6 +792,7 @@ def _evaluate_pik_head(
     posthoc_payload = None
     posthoc_scores: list[float] | None = None
     known_auc_posthoc = None
+    # 同时保留 raw 与 posthoc 指标，便于区分“表示能力”与“校准映射”问题。
     if posthoc_calibration == "temperature":
         posthoc_payload = fit_temperature_scaler(
             logits=logits_tensor,
@@ -979,6 +987,7 @@ def _encode_text_list_in_batches(
     batch_size: int,
     progress_label: str = "cache",
     progress_every_batches: int = 0,
+    max_progress_updates: int = 8,
 ):
     """Encode texts into one stacked pooled-feature tensor in float32."""
     chunks = []
@@ -991,8 +1000,13 @@ def _encode_text_list_in_batches(
         )
 
     total_batches = (total_texts + batch_size - 1) // batch_size
+    max_progress_updates = max(int(max_progress_updates), 1)
+    bounded_every = max(1, math.ceil(total_batches / max_progress_updates))
+    _ = int(progress_every_batches)  # kept for API compatibility.
+    effective_every = bounded_every
     print(
-        f"{progress_label:16s}: start {total_texts} texts in {total_batches} batches (bs={batch_size})",
+        f"{progress_label:16s}: start {total_texts} texts in {total_batches} batches "
+        f"(bs={batch_size}, progress_every~{effective_every})",
         flush=True,
     )
     for batch_idx, start in enumerate(range(0, total_texts, batch_size), start=1):
@@ -1007,8 +1021,8 @@ def _encode_text_list_in_batches(
             )
         )
         if (
-            progress_every_batches > 0
-            and (batch_idx % progress_every_batches == 0 or batch_idx == total_batches)
+            effective_every > 0
+            and (batch_idx % effective_every == 0 or batch_idx == total_batches)
         ):
             print(
                 f"{progress_label:16s}: {batch_idx}/{total_batches} batches",

@@ -202,6 +202,7 @@ def _load_pairs(args: argparse.Namespace) -> list[PairSummary]:
     for label, before_str, after_str in args.compare:
         before = MetricSnapshot.from_metrics_path(Path(before_str))
         after = MetricSnapshot.from_metrics_path(Path(after_str))
+        # 严格要求 before/after 样本数一致，避免 delta 被样本差异污染。
         if before.n_total != after.n_total:
             raise ValueError(
                 f"Split `{label}` compares mismatched totals: "
@@ -213,6 +214,7 @@ def _load_pairs(args: argparse.Namespace) -> list[PairSummary]:
 
 def _aggregate_pairs(pairs: list[PairSummary]) -> dict[str, Any]:
     """Compute held-out aggregate counts and deltas across all comparisons."""
+    # 先聚合“计数”，再换算 rate，避免浮点累计误差。
     n_total = sum(pair.before.n_total for pair in pairs)
     before_correct = sum(pair.before.n_correct for pair in pairs)
     after_correct = sum(pair.after.n_correct for pair in pairs)

@@ -42,6 +42,10 @@ class PhaseBTrainRow:
 
     Required fields are aligned with `scripts/phase_a_prepare.py` outputs.
 
+    中文要点
+    --------
+    这是 B 阶段最基础的数据契约；字段一旦变更，会影响 loader、训练与评测全链路。
+
     Example
     -------
     ```python
@@ -142,6 +146,7 @@ def _validate_non_empty_str(value: Any, field_name: str) -> None:
     _validate_non_empty_str("strategyqa", "dataset")
     ```
     """
+    # 保持校验严格，尽早在数据层失败，而不是在 tokenizer 或训练时才暴露。
     if not isinstance(value, str):
         raise TypeError(f"`{field_name}` must be str, got {type(value)!r}")
     if value.strip() == "":
