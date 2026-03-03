@@ -40,6 +40,13 @@ from ours.phase_b.faithfulness_eval import (  # noqa: E402
     compute_corruption_summary,
     render_faithfulness_summary_markdown,
 )
+from ours.phase_b.posthoc_calibration import (  # noqa: E402
+    IsotonicCalibrationConfig,
+    TemperatureCalibrationConfig,
+    apply_posthoc_calibration,
+    fit_isotonic_calibrator,
+    fit_temperature_scaler,
+)
 from ours.phase_b.value_data import (  # noqa: E402
     assert_phase_c_compatibility,
     load_corruption_variants,
@@ -75,12 +82,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-eval-samples", type=int, default=None)
     parser.add_argument("--max-corruption-variants", type=int, default=None)
     parser.add_argument("--max-length", type=int, default=None)
+    parser.add_argument(
+        "--posthoc-calibration",
+        choices=["none", "temperature", "isotonic", "from_run"],
+        default="none",
+        help=(
+            "Optional post-hoc calibration in standalone eval. "
+            "`temperature`/`isotonic` fit on the current eval set; `from_run` loads saved calibrator."
+        ),
+    )
+    parser.add_argument("--posthoc-temperature-lr", type=float, default=0.05)
+    parser.add_argument("--posthoc-temperature-max-iters", type=int, default=200)
+    parser.add_argument("--posthoc-temperature-min", type=float, default=0.05)
+    parser.add_argument("--posthoc-temperature-max", type=float, default=10.0)
+    parser.add_argument("--posthoc-isotonic-min-points", type=int, default=32)
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     """Run the standalone C2 evaluation path."""
     args = parse_args(argv)
+    if args.posthoc_temperature_lr <= 0.0:
+        raise ValueError("--posthoc-temperature-lr must be > 0")
+    if args.posthoc_temperature_max_iters <= 0:
+        raise ValueError("--posthoc-temperature-max-iters must be > 0")
+    if args.posthoc_temperature_min <= 0.0:
+        raise ValueError("--posthoc-temperature-min must be > 0")
+    if args.posthoc_temperature_max <= args.posthoc_temperature_min:
+        raise ValueError("--posthoc-temperature-max must be > --posthoc-temperature-min")
+    if args.posthoc_isotonic_min_points <= 0:
+        raise ValueError("--posthoc-isotonic-min-points must be > 0")
     manifest_path = args.value_run_dir / "manifest.json"
     if not manifest_path.exists():
         raise FileNotFoundError(f"Value-run manifest not found: {manifest_path}")
@@ -162,14 +193,41 @@ def main(argv: list[str] | None = None) -> int:
     value_head.to(clean_features.device)
     value_head.eval()
     with torch.no_grad():
-        clean_scores = value_head(clean_features)["scores"].detach().cpu().tolist()
+        clean_outputs = value_head(clean_features)
+        clean_scores_tensor = clean_outputs["scores"]
+        clean_scores = clean_scores_tensor.detach().cpu().tolist()
+        clean_logits = clean_outputs["logits"]
         corrupt_scores = value_head(corrupt_features)["scores"].detach().cpu().tolist() if corrupt_features is not None else []
 
-    calibration = compute_calibration_summary(
+    target_scores = [float(example.target_success_rate) for example in eval_examples]
+    calibration_raw = compute_calibration_summary(
         [float(x) for x in clean_scores],
-        [float(example.target_success_rate) for example in eval_examples],
+        target_scores,
         reference_mean=float(train_target_mean),
     )
+    posthoc_payload = _resolve_posthoc_payload(
+        args=args,
+        value_run_dir=args.value_run_dir,
+        checkpoint_name=args.checkpoint_name,
+        logits=clean_logits,
+        targets=clean_features.new_tensor(target_scores),
+        torch_module=torch,
+    )
+    calibration_posthoc = None
+    posthoc_scores: list[float] | None = None
+    if posthoc_payload is not None:
+        posthoc_scores_tensor = apply_posthoc_calibration(
+            logits=clean_logits,
+            scores=clean_scores_tensor,
+            calibrator=posthoc_payload,
+            torch_module=torch,
+        )
+        posthoc_scores = [float(x) for x in posthoc_scores_tensor.detach().cpu().tolist()]
+        calibration_posthoc = compute_calibration_summary(
+            posthoc_scores,
+            target_scores,
+            reference_mean=float(train_target_mean),
+        )
     corruption = None
     if eval_corruptions:
         prefix_score_by_id = {
@@ -193,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
 
     prefix_rows = []
     prefix_score_by_id = {}
-    for example, score in zip(eval_examples, clean_scores, strict=True):
+    for idx, (example, score) in enumerate(zip(eval_examples, clean_scores, strict=True)):
         row = {
             "prefix_id": example.prefix_id,
             "sample_id": example.sample_id,
@@ -202,10 +260,14 @@ def main(argv: list[str] | None = None) -> int:
             "question": example.question,
             "current_step_role": example.current_step_role,
             "prefix_step_index": example.prefix_step_index,
+            # Keep `predicted_value` for compatibility with existing scripts.
             "predicted_value": float(score),
+            "predicted_value_raw": float(score),
             "target_success_rate": float(example.target_success_rate),
             "target_parseable_rate": float(example.target_parseable_rate),
         }
+        if posthoc_scores is not None:
+            row["predicted_value_posthoc"] = float(posthoc_scores[idx])
         prefix_rows.append(row)
         prefix_score_by_id[example.prefix_id] = float(score)
     _write_jsonl(prefix_scores_path, prefix_rows)
@@ -230,19 +292,22 @@ def main(argv: list[str] | None = None) -> int:
     _write_jsonl(corruption_scores_path, corruption_rows)
 
     metrics = {
-        "calibration": calibration,
+        "calibration": calibration_raw,
+        "calibration_posthoc": calibration_posthoc,
+        "posthoc_calibration": posthoc_payload,
         "corruption": corruption,
     }
     metrics_path.write_text(json.dumps(metrics, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     summary_md_path.write_text(
         render_faithfulness_summary_markdown(
             title="Phase C C2 Standalone Value-Head Evaluation",
-            calibration=calibration,
+            calibration=calibration_raw,
             corruption=corruption,
             metadata={
                 "value_run_dir": args.value_run_dir,
                 "eval_dir": args.eval_dir,
                 "checkpoint_path": checkpoint_path,
+                "posthoc_calibration": args.posthoc_calibration,
             },
         ),
         encoding="utf-8",
@@ -255,6 +320,7 @@ def main(argv: list[str] | None = None) -> int:
                 "value_run_dir": str(args.value_run_dir),
                 "eval_dir": str(args.eval_dir),
                 "checkpoint_path": str(checkpoint_path),
+                "posthoc_calibration": str(args.posthoc_calibration),
                 "output_files": {
                     "metrics": str(metrics_path),
                     "prefix_scores": str(prefix_scores_path),
@@ -274,14 +340,77 @@ def main(argv: list[str] | None = None) -> int:
     print(f"value_run_dir     : {args.value_run_dir}")
     print(f"eval_dir          : {args.eval_dir}")
     print(f"checkpoint_path   : {checkpoint_path}")
-    print(f"brier_score       : {calibration['brier_score']:.6f}")
-    print(f"pearson           : {calibration['pearson']:.6f}")
+    print(f"brier_score       : {calibration_raw['brier_score']:.6f}")
+    print(f"pearson           : {calibration_raw['pearson']:.6f}")
+    if calibration_posthoc is not None:
+        print(f"posthoc_brier     : {calibration_posthoc['brier_score']:.6f}")
+        print(f"posthoc_pearson   : {calibration_posthoc['pearson']:.6f}")
     if corruption is not None:
         print(f"corr_pair_acc     : {corruption['pair_accuracy']:.6f}")
         print(f"corr_auc          : {corruption['auc_clean_vs_corrupt']:.6f}")
     print(f"metrics_path      : {metrics_path}")
     print("=" * 88)
     return 0
+
+
+def _resolve_posthoc_payload(
+    *,
+    args: argparse.Namespace,
+    value_run_dir: Path,
+    checkpoint_name: str,
+    logits: Any,
+    targets: Any,
+    torch_module: Any,
+) -> dict[str, Any] | None:
+    """Resolve which post-hoc calibration payload should be applied.
+
+    Modes
+    -----
+    - `none`: no post-hoc calibration
+    - `temperature`: fit a fresh temperature scaler on this eval set
+    - `isotonic`: fit an isotonic calibrator on this eval set
+    - `from_run`: load saved payload from the training run directory
+    """
+    if args.posthoc_calibration == "none":
+        return None
+    if args.posthoc_calibration == "temperature":
+        cfg = TemperatureCalibrationConfig(
+            lr=float(args.posthoc_temperature_lr),
+            max_iters=int(args.posthoc_temperature_max_iters),
+            min_temperature=float(args.posthoc_temperature_min),
+            max_temperature=float(args.posthoc_temperature_max),
+            init_temperature=1.0,
+        )
+        return fit_temperature_scaler(
+            logits=logits,
+            targets=targets,
+            torch_module=torch_module,
+            config=cfg,
+        )
+    if args.posthoc_calibration == "isotonic":
+        cfg = IsotonicCalibrationConfig(
+            min_points=int(args.posthoc_isotonic_min_points),
+        )
+        return fit_isotonic_calibrator(
+            scores=torch_module.sigmoid(logits),
+            targets=targets,
+            torch_module=torch_module,
+            config=cfg,
+        )
+    if args.posthoc_calibration == "from_run":
+        name = "best_posthoc_calibration.json" if checkpoint_name == "best" else "final_posthoc_calibration.json"
+        path = value_run_dir / name
+        if not path.exists() and checkpoint_name == "best":
+            path = value_run_dir / "final_posthoc_calibration.json"
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Requested --posthoc-calibration=from_run, but calibrator file is missing: {path}"
+            )
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise TypeError(f"Post-hoc calibration payload {path} must be a JSON object")
+        return payload
+    raise ValueError(f"Unsupported posthoc calibration mode: {args.posthoc_calibration!r}")
 
 
 def _import_runtime_deps():

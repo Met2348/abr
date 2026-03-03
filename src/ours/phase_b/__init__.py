@@ -27,6 +27,15 @@ from .faithfulness_eval import (
     compute_corruption_summary,
     render_faithfulness_summary_markdown,
 )
+from .posthoc_calibration import (
+    IsotonicCalibrationConfig,
+    TemperatureCalibrationConfig,
+    apply_posthoc_calibration,
+    apply_isotonic_calibrator,
+    apply_temperature_scaler,
+    fit_isotonic_calibrator,
+    fit_temperature_scaler,
+)
 from .data import load_phase_b_rows, summarize_rows
 from .supervision import (
     SupervisionPlan,
@@ -56,8 +65,10 @@ from .value_head import (
 )
 from .value_losses import (
     bellman_consistency_loss,
+    binary_cross_entropy_calibration_loss,
     contrastive_margin_loss,
     mean_squared_calibration_loss,
+    mixed_calibration_loss,
 )
 from .value_targets import (
     PrefixArtifact,
@@ -107,10 +118,19 @@ __all__ = [
     "load_value_head_checkpoint",
     "write_value_head_config_json",
     "mean_squared_calibration_loss",
+    "binary_cross_entropy_calibration_loss",
+    "mixed_calibration_loss",
     "contrastive_margin_loss",
     "bellman_consistency_loss",
     "compute_calibration_summary",
     "compute_corruption_summary",
     "compute_binary_auc",
     "render_faithfulness_summary_markdown",
+    "TemperatureCalibrationConfig",
+    "IsotonicCalibrationConfig",
+    "fit_temperature_scaler",
+    "fit_isotonic_calibrator",
+    "apply_temperature_scaler",
+    "apply_isotonic_calibrator",
+    "apply_posthoc_calibration",
 ]

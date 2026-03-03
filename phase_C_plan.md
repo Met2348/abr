@@ -394,6 +394,114 @@ Exit gates:
 2. corruption AUC above random,
 3. value drop localizes corruption better than untrained head.
 
+### C2 external method references (for implementation decisions)
+
+These references are used as practical guidance for C2 design choices:
+
+1. Process-level supervision and verifier direction:
+   - Let’s Verify Step by Step (`PRM800K`):
+     https://arxiv.org/abs/2305.20050
+   - Outcome-vs-process supervision:
+     https://arxiv.org/abs/2211.14275
+   - Tree-PLV (margin-filtered pairwise verifier construction):
+     https://aclanthology.org/2024.emnlp-main.125/
+   - Rewarding Progress (automated process verifier scaling):
+     https://openreview.net/pdf?id=QerCdAGjyl
+   - Theory result on outcome-vs-process verification:
+     https://proceedings.mlr.press/v267/jia25f.html
+2. Calibration fundamentals for probabilistic value heads:
+   - LM confidence/value head behavior (`P(IK)`):
+     https://arxiv.org/abs/2207.05221
+   - On Calibration of Modern Neural Networks:
+     https://proceedings.mlr.press/v70/guo17a.html
+   - `BCEWithLogitsLoss` (stable probabilistic binary objective):
+     https://docs.pytorch.org/docs/stable/generated/torch.nn.BCEWithLogitsLoss.html
+   - Calibration methods (sigmoid/isotonic):
+     https://scikit-learn.org/stable/modules/calibration.html
+3. Multi-objective balancing for calibration + contrastive:
+   - GradNorm:
+     https://proceedings.mlr.press/v80/chen18a.html
+   - Uncertainty-based multi-task weighting:
+     https://arxiv.org/abs/1705.07115
+4. Alternative verifier family for later branch:
+   - ThinkPRM (generative verifier):
+     https://arxiv.org/abs/2504.16828
+
+### Interpreting our current C2 outcomes (and teammate feedback)
+
+Our teammate's diagnosis is directionally correct: under current settings, C2 is
+still in a weak-signal regime.
+
+1. `pair_acc ~ 0.5` and `AUC ~ 0.5` means corruption ordering is close to random.
+2. Brier staying above baseline means calibration is still not deployment-ready.
+3. This is a common process-verifier failure mode, not proof that the idea is wrong.
+4. The literature repeatedly points to the same root cause:
+   - outcome-derived prefix labels are noisy,
+   - near-tie training pairs dilute ranking signal,
+   - small rollout budgets under-estimate true prefix quality gaps.
+
+So the immediate objective is not "more tricks at once"; it is
+"increase signal quality while preserving calibration."
+
+### What each trick really is in Phase C terms
+
+1. Calibration-objective upgrade (`mse -> bce` or `bce_mse`)
+   - What: probability-aware fit for rollout-derived success targets.
+   - Why: soft success labels are Bernoulli-like and often poorly handled by pure MSE.
+2. Post-hoc temperature scaling
+   - What: one-scalar logit rescaling learned on held-out logits.
+   - Why: fixes systematic over/under-confidence without retraining backbone/head.
+3. Adaptive multi-loss balancing
+   - What: learn relative weight between calibration and contrastive branches.
+   - Why: fixed contrastive lambda often overfits ranking noise and hurts Brier.
+4. Margin-aware pair filtering (next C1 target-quality upgrade)
+   - What: keep only clean/corrupt or sibling pairs with enough estimated Q-gap.
+   - Why: removes high-noise near-ties that push pair metrics toward random.
+5. Staged verifier curriculum
+   - What: solve calibration first, then add ranking, then test rerank utility.
+   - Why: avoids building C3/C4 on an uninformative value function.
+
+### How Phase C should apply these methods
+
+1. Keep C2 calibration-first as the anchor model.
+2. Treat contrastive loss as weak auxiliary supervision, not dominant objective.
+3. Prefer adaptive multi-loss balancing over static lambda sweeps once baseline C2 is stable.
+4. Add post-hoc calibration (temperature/sigmoid) before promoting value head to routing.
+5. Verify practical utility with rerank-style tests (sample multiple continuations, select by value score).
+
+### Top-to-try sequence for current C2 dilemma (2026-03-03)
+
+Run in this order; do not skip directly to stronger contrastive/Bellman terms:
+
+1. Calibration-objective upgrade:
+   - add `BCEWithLogitsLoss` path (optionally mixed with existing calibration MSE),
+   - keep contrastive disabled for this stage.
+2. Post-hoc calibration:
+   - fit temperature scaling on held-out validation logits,
+   - test isotonic only if temperature is insufficient.
+3. Adaptive multi-loss balancing:
+   - re-enable contrastive with adaptive weighting (GradNorm or uncertainty-based weights), not fixed lambda.
+4. Data-side target quality:
+   - keep `K=8`,
+   - add confidence-aware weighting from rollout disagreement/entropy,
+   - prioritize hard clean-vs-corrupt pairs where current model is near chance.
+5. Utility-level promotion check:
+   - run best-of-N rerank with value scores on held-out set,
+   - only promote to C3 if rerank shows net task utility and calibration gate improves.
+
+### Current full-scale execution policy (cluster profile, 2026-03-03)
+
+For current hardware availability and speed targets:
+
+1. Use `batch_size=256` for C1 rollout generation.
+2. Use `per-device-{train,eval}-batch-size=256` for C2 when memory allows.
+3. Use all GPUs `0/1/2/3` with one major job per GPU.
+4. Keep C1 and C2 run names explicit about `full` and `bs256` for reproducibility.
+5. Keep split discipline strict:
+   - train split for fitting,
+   - validation split for checkpoint selection/calibration fitting,
+   - separate report split for final claims when available.
+
 ## 8.4 Stage C3: BCR-Lite
 
 Only after C2 is stable.

@@ -181,6 +181,7 @@ Main implementation files:
 - `src/ours/phase_b/value_head.py`
 - `src/ours/phase_b/value_losses.py`
 - `src/ours/phase_b/faithfulness_eval.py`
+- `src/ours/phase_b/posthoc_calibration.py`
 
 ### C2 data prerequisites
 
@@ -203,14 +204,79 @@ CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_b_train_value.py \
   --dtype bfloat16 \
   --device-map auto \
   --max-length 1024 \
-  --per-device-train-batch-size 64 \
-  --per-device-eval-batch-size 64 \
+  --per-device-train-batch-size 256 \
+  --per-device-eval-batch-size 256 \
   --learning-rate 1e-3 \
   --num-train-epochs 5 \
   --use-contrastive-loss \
   --lambda-contrastive 1.0 \
   --contrastive-margin 0.1
 ```
+
+### Top-three C2 tricks (new options)
+
+The following options are now implemented and can be enabled/disabled directly:
+
+1. Trick-1: calibration objective upgrade
+- `--calibration-loss {mse,bce,bce_mse}`
+- `--calibration-bce-pos-weight`
+- `--calibration-mse-weight`, `--calibration-bce-weight` (for mixed mode)
+
+2. Trick-2: post-hoc temperature calibration
+- `--posthoc-calibration {none,temperature,isotonic}`
+- `--checkpoint-selection-metric {raw_brier,posthoc_brier}`
+- `--posthoc-temperature-lr`, `--posthoc-temperature-max-iters`
+- `--posthoc-temperature-min`, `--posthoc-temperature-max`
+- `--posthoc-isotonic-min-points`
+
+3. Trick-3: adaptive calibration/contrastive balancing
+- `--adaptive-loss-balancing {none,uncertainty}`
+- `--adaptive-loss-init-log-variance`
+
+4. Trick-4: confidence-aware calibration weighting
+- `--calibration-sample-weighting {none,confidence,entropy_inverse,parseable,confidence_parseable}`
+- `--calibration-weight-floor`
+- `--calibration-weight-gamma`
+
+5. Trick-5: contrastive pair filtering
+- `--contrastive-pair-filter {none,confidence,parseable,confidence_parseable}`
+- `--contrastive-confidence-threshold`
+- `--contrastive-parseable-threshold`
+
+6. Trick-6: calibration target smoothing
+- `--calibration-target-smoothing` (epsilon in `[0, 0.5)`)
+
+7. Trick-7: contrastive score-gap mining
+- `--contrastive-score-gap-min`
+- `--contrastive-score-gap-max`
+- use a narrow band (for example `[0.0, 0.2]`) for hard-negative focus
+
+Example (Trick-1 + Trick-2 together):
+
+```bash
+CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_b_train_value.py \
+  --train-dir assets/artifacts/phase_c_data/strategyqa/strategyqa_value_rollouts_k8_train__<train_fp> \
+  --eval-dir assets/artifacts/phase_c_data/strategyqa/strategyqa_value_rollouts_k8_val__<eval_fp> \
+  --run-name strategyqa_value_c2_bce_temp \
+  --require-cuda \
+  --dtype bfloat16 \
+  --device-map auto \
+  --max-length 1024 \
+  --per-device-train-batch-size 256 \
+  --per-device-eval-batch-size 256 \
+  --learning-rate 1e-4 \
+  --num-train-epochs 8 \
+  --calibration-loss bce \
+  --calibration-bce-pos-weight 1.0 \
+  --no-use-contrastive-loss \
+  --posthoc-calibration temperature \
+  --checkpoint-selection-metric posthoc_brier
+```
+
+Runtime note:
+- After model shard loading, C2 now prints lightweight feature-cache progress
+  (`cache_train_clean`, `cache_eval_clean`, `cache_eval_corruptions`) so long
+  cache phases are visible without excessive log noise.
 
 ### C2 standalone evaluation command
 
@@ -219,6 +285,7 @@ CUDA_VISIBLE_DEVICES=3 python -u scripts/phase_b_eval_faithfulness.py \
   --value-run-dir assets/artifacts/phase_c_runs/strategyqa_value_c2_smoke_<timestamp> \
   --eval-dir assets/artifacts/phase_c_data/strategyqa/strategyqa_value_rollouts_val__<eval_fp> \
   --checkpoint-name best \
+  --posthoc-calibration from_run \
   --run-name strategyqa_value_c2_eval
 ```
 
@@ -249,14 +316,89 @@ CUDA_VISIBLE_DEVICES=2 \
 bash scripts/run_phase_c_value_suite.sh
 ```
 
+Trick-group lifecycle runs:
+
+```bash
+# Trick-1: BCE calibration objective
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_TRICK1_BCE \
+RUN_PREFIX=phase_c_trick1_bce \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_c_value_suite.sh
+
+# Trick-2: Post-hoc temperature scaling
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_TRICK2_POSTHOC_TEMP \
+RUN_PREFIX=phase_c_trick2_temp \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_c_value_suite.sh
+
+# Trick-3: Adaptive cal/contrastive balancing
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_TRICK3_ADAPTIVE_BALANCE \
+RUN_PREFIX=phase_c_trick3_adaptive \
+CUDA_VISIBLE_DEVICES=3 \
+bash scripts/run_phase_c_value_suite.sh
+
+# Trick-4: Isotonic post-hoc calibration
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_TRICK4_ISOTONIC \
+RUN_PREFIX=phase_c_trick4_isotonic \
+CUDA_VISIBLE_DEVICES=0 \
+bash scripts/run_phase_c_value_suite.sh
+
+# Trick-5: Confidence-weighted calibration
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_TRICK5_WEIGHTED_CAL \
+RUN_PREFIX=phase_c_trick5_weighted \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_c_value_suite.sh
+
+# Trick-6: Contrastive pair filtering
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_TRICK6_PAIR_FILTER \
+RUN_PREFIX=phase_c_trick6_pair_filter \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_c_value_suite.sh
+
+# Trick-7: Combined retry
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_TRICK7_COMBINED \
+RUN_PREFIX=phase_c_trick7_combined \
+CUDA_VISIBLE_DEVICES=3 \
+bash scripts/run_phase_c_value_suite.sh
+
+# Trick-8: Calibration target smoothing
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_TRICK8_LABEL_SMOOTH \
+RUN_PREFIX=phase_c_trick8_label_smooth \
+CUDA_VISIBLE_DEVICES=0 \
+bash scripts/run_phase_c_value_suite.sh
+
+# Trick-9: Hard-negative pair mining
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_TRICK9_HARD_NEG_MINING \
+RUN_PREFIX=phase_c_trick9_hard_neg \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_c_value_suite.sh
+
+# Trick-10: K16 + combined noise-control
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_TRICK10_K16_COMBINED \
+RUN_PREFIX=phase_c_trick10_k16_combined \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_c_value_suite.sh
+```
+
 Supported groups:
 1. `C2_STRATEGYQA_SMOKE`
 2. `C2_STRATEGYQA_FULL`
+3. `C2_STRATEGYQA_TRICK1_BCE`
+4. `C2_STRATEGYQA_TRICK2_POSTHOC_TEMP`
+5. `C2_STRATEGYQA_TRICK3_ADAPTIVE_BALANCE`
+6. `C2_STRATEGYQA_TRICK4_ISOTONIC`
+7. `C2_STRATEGYQA_TRICK5_WEIGHTED_CAL`
+8. `C2_STRATEGYQA_TRICK6_PAIR_FILTER`
+9. `C2_STRATEGYQA_TRICK7_COMBINED`
+10. `C2_STRATEGYQA_TRICK8_LABEL_SMOOTH`
+11. `C2_STRATEGYQA_TRICK9_HARD_NEG_MINING`
+12. `C2_STRATEGYQA_TRICK10_K16_COMBINED`
 
 Useful overrides:
 - `TRAIN_MAX_SAMPLES`, `EVAL_MAX_SAMPLES`
 - `ROLLOUT_BATCH_SIZE`, `ROLLOUT_COUNT`, `ROLLOUT_MAX_NEW_TOKENS`
 - `C2_TRAIN_BATCH_SIZE`, `C2_EVAL_BATCH_SIZE`, `C2_LR`, `C2_EPOCHS`
+- `C2_TRAIN_EXTRA_ARGS_DEFAULT`, `C2_EVAL_EXTRA_ARGS_DEFAULT`
 - `PHASE_C_PREP_EXTRA_ARGS`, `PHASE_C_TRAIN_EXTRA_ARGS`, `PHASE_C_EVAL_EXTRA_ARGS`
 
 ### C2 outputs
@@ -266,6 +408,8 @@ Training run dir:
 - key files:
   - `best_value_head.pt` (if enabled)
   - `final_value_head.pt`
+  - `best_posthoc_calibration.json` (if enabled)
+  - `final_posthoc_calibration.json` (if enabled)
   - `value_head_config.json`
   - `train_metrics.json`
   - `eval_metrics.json`
@@ -281,8 +425,10 @@ Standalone eval run dir:
   - `prefix_scores.jsonl`
   - `corruption_scores.jsonl`
   - `summary.md`
+  - note: `metrics.json` now includes both `calibration` (raw) and
+    `calibration_posthoc` (when post-hoc mode is enabled)
 
-### C2 current empirical status (StrategyQA, 2026-03-02)
+### C2 current empirical status (StrategyQA, updated 2026-03-03)
 
 Current completed C2 variants on the same held-out eval artifact:
 
@@ -291,30 +437,89 @@ Current completed C2 variants on the same held-out eval artifact:
 | `strategyqa_value_c2_smoke_20260302T215825Z` | calibration + strong contrastive (`lr=1e-3`, `lambda=1.0`) | 0.3681 | 0.0334 | 0.5082 | 0.5179 |
 | `strategyqa_value_c2_cal_only_lr3e4_20260302T220411Z` | calibration only (`lr=3e-4`) | 0.2446 | 0.0232 | 0.4496 | 0.4130 |
 | `strategyqa_value_c2_cal_plus_ctr_lr3e4_20260302T220429Z` | calibration + weak contrastive (`lr=3e-4`, `lambda=0.2`) | 0.2540 | -0.0002 | 0.2904 | 0.5460 |
+| `strategyqa_value_c2_k8_cal_only_lr1e4_full_20260303T032550Z` | K=8 calibration-first (`lr=1e-4`, wd=0.01, dropout=0.1) | **0.1924** | **0.1915** | 0.4707 | 0.4765 |
+| `strategyqa_value_c2_k8_ctr_l005_m002_20260303T064706Z` | K=8 + contrastive (`lambda=0.05`, margin=0.02) | 0.1949 | 0.1847 | **0.4988** | **0.4917** |
+| `strategyqa_value_c2_k8_ctr_l002_m001_20260303T064742Z` | K=8 + weaker contrastive (`lambda=0.02`, margin=0.01) | 0.1948 | 0.1859 | 0.4895 | 0.4818 |
+| `strategyqa_value_c2_k8_ctr_l001_m001_20260303T065230Z` | K=8 + even weaker (`lambda=0.01`, margin=0.01) | 0.1948 | 0.1862 | 0.4801 | 0.4786 |
+| `strategyqa_value_c2_k8_ctr_l005_m0005_20260303T065233Z` | K=8 + tiny margin (`lambda=0.005`, margin=0.005) | 0.1948 | 0.1864 | 0.4801 | 0.4767 |
 
 Reference baseline from the same eval set:
-- mean-predictor brier: `0.1510`
+- old K=4 eval set baseline mean-predictor brier: `0.1510`
+- K=8 eval set baseline mean-predictor brier: `0.1394`
 
 Current interpretation:
 1. C2 engineering pipeline is working end-to-end (train/eval artifacts and metrics are stable).
 2. C2 quality is not yet sufficient for BCR/ABR routing:
-   - calibration is still worse than baseline,
-   - linear correlation to rollout targets is near zero,
-   - corruption ordering remains unstable.
-3. C2 should continue with better targets and stronger regularization before starting O5.
+   - best calibration (`brier=0.1924`) is still worse than baseline (`0.1394`),
+   - correlation improved with K=8 (`pearson~0.19`) but corruption discrimination is still near random,
+   - contrastive variants slightly improve corruption ordering but consistently degrade calibration.
+3. Current Phase C bottleneck is no longer runtime reliability; it is objective/data signal quality.
+4. C2 should continue with calibration-preserving improvements before starting O5.
 
-### Recommended next C2 commands
+### Why current C2 tries are not yet positive
 
-1) Rebuild C1 train/eval artifacts with higher rollout quality (`K=8`):
+1. We introduced contrastive because ABR/BCR needs local corruption sensitivity, not only average calibration.
+2. Our runs confirm the expected tradeoff:
+   - calibration-only gives the best Brier/Pearson,
+   - contrastive gives slightly better corruption metrics.
+3. However, both families still fail the practical promotion gate:
+   - does not beat trivial baseline calibration,
+   - corruption metrics remain close to random.
+4. Therefore these are informative failed attempts, not invalid experiments:
+   - they de-risk implementation,
+   - they isolate the next research target to objective/data quality instead of engineering bugs.
+
+### External references and what they imply for our C2 dilemma
+
+- Process supervision is useful but noisy and data-hungry:
+  - Let’s Verify Step by Step (PRM800K): https://arxiv.org/abs/2305.20050
+  - Solving Math Word Problems With Process- and Outcome-Based Feedback: https://arxiv.org/abs/2211.14275
+  - Tree-PLV (EMNLP 2024): https://aclanthology.org/2024.emnlp-main.125/
+- Outcome-only labels often underdetermine step quality:
+  - Do We Need to Verify Step by Step? (ICML 2025): https://proceedings.mlr.press/v267/jia25f.html
+  - Rewarding Progress: Scaling Automated Process Verifiers for LLM Reasoning: https://openreview.net/pdf?id=QerCdAGjyl
+- Confidence/value calibration is non-trivial:
+  - Language Models (Mostly) Know What They Know: https://arxiv.org/abs/2207.05221
+  - On Calibration of Modern Neural Networks: https://proceedings.mlr.press/v70/guo17a.html
+- Implementation levers already wired in this repo:
+  - `BCEWithLogitsLoss`: https://docs.pytorch.org/docs/stable/generated/torch.nn.BCEWithLogitsLoss.html
+  - post-hoc calibration basics: https://scikit-learn.org/stable/modules/calibration.html
+  - adaptive multi-loss balancing:
+    - GradNorm: https://proceedings.mlr.press/v80/chen18a.html
+    - uncertainty weighting: https://arxiv.org/abs/1705.07115
+  - generative PRM direction (later branch, not yet in C2 baseline path):
+    - ThinkPRM: https://arxiv.org/abs/2504.16828
+
+### What these tricks really are in our code path
+
+1. Trick-A: probability-aware calibration objective
+   - Replace MSE-only target fit with `BCE` or `BCE+MSE` on rollout-derived soft targets.
+   - Goal: reduce overconfident raw scores and improve Brier/ECE before any routing.
+2. Trick-B: post-hoc temperature scaling
+   - Fit one scalar temperature on held-out logits and report both raw and post-hoc metrics.
+   - Goal: improve calibration without changing the backbone/value-head weights.
+3. Trick-C: adaptive calibration-vs-contrastive balancing
+   - Use uncertainty-based weighting (or GradNorm-style balancing) instead of static `lambda`.
+   - Goal: avoid the common failure where contrastive gains on corruption ordering destroy calibration.
+4. Trick-D: margin-aware pair mining (next C1 upgrade)
+   - Keep only clean/corrupt pairs with enough estimated Q-gap, downweight near-tie noisy pairs.
+   - Goal: reduce ranking noise that causes pair metrics to stay near random.
+5. Trick-E: staged verifier training
+   - First make C2 calibration non-random; only then promote to rerank utility tests and C3/C4.
+   - Goal: avoid Bellman/router training on an uninformative value head.
+
+### Full-scale C2 commands (bs=256, GPUs 0/1/2/3)
+
+1) Rebuild C1 train/eval artifacts with `K=8` and `batch_size=256`:
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_b_prepare_value_data.py \
+CUDA_VISIBLE_DEVICES=0 python -u scripts/phase_b_prepare_value_data.py \
   --input-jsonl assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl \
-  --run-name strategyqa_value_rollouts_k8_train \
+  --run-name strategyqa_value_rollouts_k8_train_full_bs256 \
   --build-corruptions \
   --build-rollouts \
   --model-path assets/models/Qwen2.5-7B-Instruct \
-  --batch-size 64 \
+  --batch-size 256 \
   --rollout-count 8 \
   --max-new-tokens 96 \
   --temperature 0.7 \
@@ -323,13 +528,13 @@ CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_b_prepare_value_data.py \
   --device-map auto \
   --require-cuda
 
-CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_b_prepare_value_data.py \
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_b_prepare_value_data.py \
   --input-jsonl assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/validation.jsonl \
-  --run-name strategyqa_value_rollouts_k8_eval \
+  --run-name strategyqa_value_rollouts_k8_eval_full_bs256 \
   --build-corruptions \
   --build-rollouts \
   --model-path assets/models/Qwen2.5-7B-Instruct \
-  --batch-size 64 \
+  --batch-size 256 \
   --rollout-count 8 \
   --max-new-tokens 96 \
   --temperature 0.7 \
@@ -339,13 +544,13 @@ CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_b_prepare_value_data.py \
   --require-cuda
 ```
 
-2) Calibration-first C2 run on K=8 targets:
+2) Resolve latest completed artifact dirs:
 
 ```bash
 TRAIN_DIR="$(python - <<'PY'
 from pathlib import Path
 base = Path('assets/artifacts/phase_c_data/strategyqa')
-for d in sorted(base.glob('strategyqa_value_rollouts_k8_train__*'), reverse=True):
+for d in sorted(base.glob('strategyqa_value_rollouts_k8_train_full_bs256__*'), reverse=True):
     if (d / 'manifest.json').exists() and (d / 'rollout_targets.jsonl').exists():
         print(d)
         raise SystemExit(0)
@@ -356,51 +561,136 @@ PY
 EVAL_DIR="$(python - <<'PY'
 from pathlib import Path
 base = Path('assets/artifacts/phase_c_data/strategyqa')
-for d in sorted(base.glob('strategyqa_value_rollouts_k8_eval__*'), reverse=True):
+for d in sorted(base.glob('strategyqa_value_rollouts_k8_eval_full_bs256__*'), reverse=True):
     if (d / 'manifest.json').exists() and (d / 'rollout_targets.jsonl').exists():
         print(d)
         raise SystemExit(0)
 raise SystemExit('ERROR: no completed k8 eval artifact found (missing manifest/rollout_targets)')
 PY
 )"
+```
 
-CUDA_VISIBLE_DEVICES=3 python -u scripts/phase_b_train_value.py \
+3) Launch four full-scale C2 variants (one GPU each, `bs=256`):
+
+```bash
+# GPU 0: MSE calibration anchor
+CUDA_VISIBLE_DEVICES=0 python -u scripts/phase_b_train_value.py \
   --train-dir "$TRAIN_DIR" \
   --eval-dir "$EVAL_DIR" \
-  --run-name strategyqa_value_c2_k8_cal_only_lr1e4 \
+  --run-name c2_full_bs256_cal_mse \
   --require-cuda \
   --dtype bfloat16 \
   --device-map auto \
   --max-length 1024 \
-  --per-device-train-batch-size 64 \
-  --per-device-eval-batch-size 64 \
+  --per-device-train-batch-size 256 \
+  --per-device-eval-batch-size 256 \
   --learning-rate 1e-4 \
   --weight-decay 0.01 \
   --dropout-prob 0.1 \
   --num-train-epochs 12 \
+  --calibration-loss mse \
   --no-use-contrastive-loss
-```
 
-3) Weak-contrastive follow-up (only after step 2 improves brier):
-
-```bash
+# GPU 1: BCE calibration
 CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_b_train_value.py \
   --train-dir "$TRAIN_DIR" \
   --eval-dir "$EVAL_DIR" \
-  --run-name strategyqa_value_c2_k8_cal_plus_ctr \
+  --run-name c2_full_bs256_cal_bce \
   --require-cuda \
   --dtype bfloat16 \
   --device-map auto \
   --max-length 1024 \
-  --per-device-train-batch-size 64 \
-  --per-device-eval-batch-size 64 \
+  --per-device-train-batch-size 256 \
+  --per-device-eval-batch-size 256 \
   --learning-rate 1e-4 \
   --weight-decay 0.01 \
   --dropout-prob 0.1 \
   --num-train-epochs 12 \
+  --calibration-loss bce \
+  --calibration-bce-pos-weight 1.0 \
+  --no-use-contrastive-loss
+
+# GPU 2: MSE + post-hoc temperature
+CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_b_train_value.py \
+  --train-dir "$TRAIN_DIR" \
+  --eval-dir "$EVAL_DIR" \
+  --run-name c2_full_bs256_cal_mse_posthoc \
+  --require-cuda \
+  --dtype bfloat16 \
+  --device-map auto \
+  --max-length 1024 \
+  --per-device-train-batch-size 256 \
+  --per-device-eval-batch-size 256 \
+  --learning-rate 1e-4 \
+  --weight-decay 0.01 \
+  --dropout-prob 0.1 \
+  --num-train-epochs 12 \
+  --calibration-loss mse \
+  --no-use-contrastive-loss \
+  --posthoc-calibration temperature \
+  --checkpoint-selection-metric posthoc_brier \
+  --posthoc-temperature-lr 0.05 \
+  --posthoc-temperature-max-iters 200
+
+# GPU 3: BCE+MSE + adaptive contrastive + post-hoc
+CUDA_VISIBLE_DEVICES=3 python -u scripts/phase_b_train_value.py \
+  --train-dir "$TRAIN_DIR" \
+  --eval-dir "$EVAL_DIR" \
+  --run-name c2_full_bs256_hybrid_adaptive \
+  --require-cuda \
+  --dtype bfloat16 \
+  --device-map auto \
+  --max-length 1024 \
+  --per-device-train-batch-size 256 \
+  --per-device-eval-batch-size 256 \
+  --learning-rate 1e-4 \
+  --weight-decay 0.01 \
+  --dropout-prob 0.1 \
+  --num-train-epochs 12 \
+  --calibration-loss bce_mse \
+  --calibration-bce-weight 1.0 \
+  --calibration-mse-weight 1.0 \
   --use-contrastive-loss \
   --lambda-contrastive 0.05 \
-  --contrastive-margin 0.02
+  --contrastive-margin 0.02 \
+  --adaptive-loss-balancing uncertainty \
+  --adaptive-loss-init-log-variance 0.0 \
+  --posthoc-calibration temperature \
+  --checkpoint-selection-metric posthoc_brier \
+  --posthoc-temperature-lr 0.05 \
+  --posthoc-temperature-max-iters 200
+```
+
+4) Evaluate best checkpoints (`from_run` for post-hoc-enabled runs):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -u scripts/phase_b_eval_faithfulness.py \
+  --value-run-dir "$(ls -dt assets/artifacts/phase_c_runs/c2_full_bs256_cal_mse_* | head -n 1)" \
+  --eval-dir "$EVAL_DIR" \
+  --checkpoint-name best \
+  --run-name c2_full_bs256_cal_mse_eval \
+  --posthoc-calibration none
+
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_b_eval_faithfulness.py \
+  --value-run-dir "$(ls -dt assets/artifacts/phase_c_runs/c2_full_bs256_cal_bce_* | head -n 1)" \
+  --eval-dir "$EVAL_DIR" \
+  --checkpoint-name best \
+  --run-name c2_full_bs256_cal_bce_eval \
+  --posthoc-calibration none
+
+CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_b_eval_faithfulness.py \
+  --value-run-dir "$(ls -dt assets/artifacts/phase_c_runs/c2_full_bs256_cal_mse_posthoc_* | head -n 1)" \
+  --eval-dir "$EVAL_DIR" \
+  --checkpoint-name best \
+  --run-name c2_full_bs256_cal_mse_posthoc_eval \
+  --posthoc-calibration from_run
+
+CUDA_VISIBLE_DEVICES=3 python -u scripts/phase_b_eval_faithfulness.py \
+  --value-run-dir "$(ls -dt assets/artifacts/phase_c_runs/c2_full_bs256_hybrid_adaptive_* | head -n 1)" \
+  --eval-dir "$EVAL_DIR" \
+  --checkpoint-name best \
+  --run-name c2_full_bs256_hybrid_adaptive_eval \
+  --posthoc-calibration from_run
 ```
 
 Current non-goals:

@@ -397,37 +397,46 @@ Reason:
 - [ ] Corruption AUC is clearly above random.
 - [ ] Value drops localize around corrupted steps better than untrained value head.
 
-### C2 status snapshot (2026-03-02 runs, StrategyQA)
+### C2 status snapshot (2026-03-03 runs, StrategyQA)
 
-- Current best `brier_score`: `0.2446`
-- Trivial baseline `brier_score`: `0.1510`
-- Current best `pearson`: `0.0334` (near zero in all tested variants)
+- Current best `brier_score`: `0.1924` (`strategyqa_value_c2_k8_cal_only_lr1e4_full`)
+- K=8 trivial baseline `brier_score`: `0.1394`
+- Current best `pearson`: `0.1915`
 - Corruption metrics across tested variants:
-  - `pair_accuracy`: `0.2904` to `0.5082`
-  - `auc_clean_vs_corrupt`: `0.4130` to `0.5460`
+  - `pair_accuracy`: `0.4707` to `0.5082`
+  - `auc_clean_vs_corrupt`: `0.4765` to `0.5460`
 - Interpretation:
-  - implementation is stable and reproducible,
-  - value quality is still below deployment gate for BCR/ABR routing.
+  - engineering is stable and reproducible,
+  - C2 is still below deployment gate for BCR/ABR routing because calibration does not yet beat trivial baseline.
 
-### Immediate C2 recovery tasks (must finish before O5)
+### Immediate C2 recovery tasks (ranked top-to-try list)
 
-- [ ] Rebuild C1 targets with higher rollout quality:
-  - same StrategyQA split pair,
-  - `rollout_count=8` (from 4).
-- [ ] Run calibration-first C2 on K=8 targets:
-  - `learning_rate=1e-4`,
-  - `weight_decay=0.01`,
-  - `value_head_dropout=0.1`,
-  - `num_train_epochs=12`,
-  - no contrastive loss.
-- [ ] Run weak-contrastive C2 only if calibration-first improves:
-  - `lambda_contrastive=0.05`,
-  - `contrastive_margin=0.02`.
-- [ ] Gate check for O5 enable:
-  - `brier_score < 0.1510` on held-out eval set,
-  - `pearson >= 0.10`,
-  - `auc_clean_vs_corrupt >= 0.60`,
-  - `pair_accuracy >= 0.55`.
+These tasks are prioritized from highest expected impact to lowest, based on current runs plus external references in `phase_C_plan.md`.
+
+- [ ] `P0` Promote calibration objective from MSE-only to probability-aware calibration:
+  - add `BCEWithLogitsLoss` option (optionally mixed with current MSE),
+  - add per-example weighting by rollout support/hardness,
+  - keep contrastive off in the first pass.
+- [ ] `P1` Add post-hoc calibration layer for deployment scoring:
+  - temperature scaling on validation logits first,
+  - optional isotonic fallback if monotonic nonlinearity improves brier/reliability.
+- [ ] `P2` Replace static contrastive lambda sweep with adaptive balancing:
+  - implement GradNorm-style or uncertainty-based dynamic weighting for `L_cal` and `L_ctr`,
+  - keep contrastive as auxiliary signal instead of dominant objective.
+- [ ] `P3` Upgrade C1 supervision quality instead of only expanding quantity:
+  - keep K=8, add disagreement-aware target confidence (high-entropy prefixes get lower target weight),
+  - prioritize hard negatives where clean/corrupt are currently inseparable.
+- [ ] `P4` Add utility-level gate before O5:
+  - run best-of-N rerank with value score on held-out StrategyQA,
+  - verify value ranking improves final answer quality or sample efficiency.
+
+### Updated gate check for O5 enable
+
+- [ ] `brier_score < 0.1394` on the K=8 held-out eval set
+- [ ] `pearson >= 0.20`
+- [ ] `auc_clean_vs_corrupt >= 0.60`
+- [ ] `pair_accuracy >= 0.55`
+- [ ] Positive utility signal on rerank test (best-of-N by value score)
 
 ---
 

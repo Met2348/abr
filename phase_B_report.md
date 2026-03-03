@@ -487,6 +487,29 @@ Current strongest statement that is defensible:
   - and, if short rationale is revisited later, rewritten/distilled short-CoT data rather than clipped long-CoT traces,
   - and only after that, more complex mixed-data strategies.
 
+### 6.10.1 Web-backed mitigation shortlist for GSM8K drop
+
+External references now support the current diagnosis that single-task fine-tuning can induce capability drift/forgetting, and suggest mitigation by keeping some base-distribution signal during adaptation.
+
+Primary references:
+- Catastrophic forgetting under LLM fine-tuning:
+  - https://arxiv.org/abs/2308.08747
+- Memory-retaining fine-tuning (inject pre-training distribution signal):
+  - https://arxiv.org/abs/2502.06042
+
+Top to-try sequence for the next GSM8K repair cycle:
+1. Keep checkpoint sweep as mandatory and select by held-out benchmark (not final step).
+2. Keep answer-weighted supervision as default objective baseline for GSM8K.
+3. Add a replay/mix ratio experiment:
+   - blend GSM8K training with a small generic instruction/reasoning subset to reduce forgetting pressure.
+4. Add a KL-anchor/distillation regularization experiment:
+   - constrain adapter outputs not to drift too far from the frozen base on replay samples.
+5. Evaluate a short adaptation budget:
+   - fixed small max-steps + early-stop-on-held-out to avoid late-run drift.
+
+Promotion criterion:
+- only promote a GSM8K recipe if it is non-negative against frozen baseline on held-out validation+test, and stable under rerun.
+
 ### 6.11 New GSM8K diagnostics now added to the codebase
 
 The next GSM8K diagnostic layer is now implemented, even if some runs are still

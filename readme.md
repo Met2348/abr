@@ -236,14 +236,23 @@ CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_b_train_value.py \
   --require-cuda \
   --dtype bfloat16 \
   --device-map auto \
-  --per-device-train-batch-size 64 \
-  --per-device-eval-batch-size 64 \
+  --per-device-train-batch-size 256 \
+  --per-device-eval-batch-size 256 \
   --learning-rate 1e-3 \
   --num-train-epochs 5 \
   --use-contrastive-loss \
   --lambda-contrastive 1.0 \
   --contrastive-margin 0.1
 ```
+
+New C2 options (can be toggled independently):
+- calibration objective: `--calibration-loss {mse,bce,bce_mse}`
+- post-hoc calibration: `--posthoc-calibration {none,temperature,isotonic}` and `--checkpoint-selection-metric {raw_brier,posthoc_brier}`
+- adaptive cal/contrastive balancing: `--adaptive-loss-balancing {none,uncertainty}`
+- confidence-aware calibration weighting: `--calibration-sample-weighting`, `--calibration-weight-floor`, `--calibration-weight-gamma`
+- contrastive pair filtering: `--contrastive-pair-filter`, `--contrastive-confidence-threshold`, `--contrastive-parseable-threshold`
+- calibration target smoothing: `--calibration-target-smoothing`
+- contrastive score-gap mining: `--contrastive-score-gap-min`, `--contrastive-score-gap-max`
 
 C2 standalone evaluation entrypoint:
 
@@ -252,6 +261,7 @@ CUDA_VISIBLE_DEVICES=3 python -u scripts/phase_b_eval_faithfulness.py \
   --value-run-dir assets/artifacts/phase_c_runs/strategyqa_value_c2_smoke_<timestamp> \
   --eval-dir assets/artifacts/phase_c_data/strategyqa/strategyqa_value_rollouts_val__<eval_fingerprint> \
   --checkpoint-name best \
+  --posthoc-calibration from_run \
   --run-name strategyqa_value_c2_eval
 ```
 
@@ -267,6 +277,16 @@ bash scripts/run_phase_c_value_suite.sh
 Supported lifecycle groups:
 1. `C2_STRATEGYQA_SMOKE`
 2. `C2_STRATEGYQA_FULL`
+3. `C2_STRATEGYQA_TRICK1_BCE`
+4. `C2_STRATEGYQA_TRICK2_POSTHOC_TEMP`
+5. `C2_STRATEGYQA_TRICK3_ADAPTIVE_BALANCE`
+6. `C2_STRATEGYQA_TRICK4_ISOTONIC`
+7. `C2_STRATEGYQA_TRICK5_WEIGHTED_CAL`
+8. `C2_STRATEGYQA_TRICK6_PAIR_FILTER`
+9. `C2_STRATEGYQA_TRICK7_COMBINED`
+10. `C2_STRATEGYQA_TRICK8_LABEL_SMOOTH`
+11. `C2_STRATEGYQA_TRICK9_HARD_NEG_MINING`
+12. `C2_STRATEGYQA_TRICK10_K16_COMBINED`
 
 Smoke training run:
 

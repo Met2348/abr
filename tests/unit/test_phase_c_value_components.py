@@ -24,6 +24,17 @@ from ours.phase_b.value_head import (
     load_value_head_checkpoint,
     save_value_head_checkpoint,
 )
+from ours.phase_b.value_losses import (
+    binary_cross_entropy_calibration_loss,
+    mixed_calibration_loss,
+)
+from ours.phase_b.posthoc_calibration import (
+    IsotonicCalibrationConfig,
+    TemperatureCalibrationConfig,
+    apply_posthoc_calibration,
+    fit_isotonic_calibrator,
+    fit_temperature_scaler,
+)
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -205,3 +216,80 @@ def test_value_head_checkpoint_round_trip(tmp_path: Path) -> None:
     for left, right in zip(head.state_dict().values(), loaded_head.state_dict().values(), strict=True):
         assert torch.allclose(left, right)
 
+
+def test_bce_and_mixed_calibration_losses_are_finite() -> None:
+    torch = pytest.importorskip("torch")
+    logits = torch.tensor([0.0, 1.0, -1.0, 2.0], dtype=torch.float32)
+    scores = torch.sigmoid(logits)
+    targets = torch.tensor([0.0, 1.0, 0.2, 0.9], dtype=torch.float32)
+
+    bce = binary_cross_entropy_calibration_loss(
+        logits,
+        targets,
+        torch_module=torch,
+        pos_weight=1.0,
+    )
+    mixed = mixed_calibration_loss(
+        logits,
+        scores,
+        targets,
+        torch_module=torch,
+        bce_weight=1.0,
+        mse_weight=1.0,
+        bce_pos_weight=1.0,
+    )
+    assert float(bce.item()) > 0.0
+    assert float(mixed.item()) >= float(bce.item())
+
+
+def test_temperature_scaler_fit_and_apply() -> None:
+    torch = pytest.importorskip("torch")
+    logits = torch.tensor([3.0, 2.0, -2.0, -3.0], dtype=torch.float32)
+    # Deliberately softer targets so raw logits are overconfident.
+    targets = torch.tensor([0.8, 0.7, 0.3, 0.2], dtype=torch.float32)
+    cfg = TemperatureCalibrationConfig(
+        lr=0.05,
+        max_iters=200,
+        min_temperature=0.05,
+        max_temperature=10.0,
+        init_temperature=1.0,
+    )
+    payload = fit_temperature_scaler(
+        logits=logits,
+        targets=targets,
+        torch_module=torch,
+        config=cfg,
+    )
+    calibrated_scores = apply_posthoc_calibration(
+        logits=logits,
+        scores=None,
+        calibrator=payload,
+        torch_module=torch,
+    )
+    assert payload["method"] == "temperature"
+    assert payload["temperature"] > 0.0
+    assert calibrated_scores.shape == logits.shape
+    assert all(0.0 <= float(x) <= 1.0 for x in calibrated_scores.tolist())
+
+
+def test_isotonic_calibrator_fit_and_apply() -> None:
+    torch = pytest.importorskip("torch")
+    # Slightly miscalibrated probabilities with non-trivial ordering.
+    scores = torch.tensor([0.05, 0.2, 0.4, 0.6, 0.8, 0.95], dtype=torch.float32)
+    targets = torch.tensor([0.0, 0.2, 0.3, 0.7, 0.9, 1.0], dtype=torch.float32)
+    payload = fit_isotonic_calibrator(
+        scores=scores,
+        targets=targets,
+        torch_module=torch,
+        config=IsotonicCalibrationConfig(min_points=4),
+    )
+    calibrated_scores = apply_posthoc_calibration(
+        logits=None,
+        scores=scores,
+        calibrator=payload,
+        torch_module=torch,
+    )
+    assert payload["method"] == "isotonic"
+    assert int(payload["num_bins"]) >= 1
+    assert calibrated_scores.shape == scores.shape
+    assert all(0.0 <= float(x) <= 1.0 for x in calibrated_scores.tolist())

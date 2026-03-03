@@ -2,6 +2,79 @@
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
 
+## 2026-03-03 17:10:00 +08 (+0800)
+- Type: Phase C C2 Top-3 Mitigation Implementation / CLI + Suite + Docs
+- Summary: Implemented three web-backed C2 interventions (BCE calibration path, post-hoc temperature scaling, adaptive loss balancing) with explicit toggles, manifests, and experiment groups.
+- Details:
+  - `scripts/phase_b_train_value.py`:
+    - added calibration objective switch: `mse`, `bce`, `bce_mse`,
+    - added post-hoc temperature calibration during eval passes,
+    - added checkpoint selection by `raw_brier` or `posthoc_brier`,
+    - added uncertainty-based adaptive balancing for calibration/contrastive losses,
+    - persisted post-hoc payload files for best/final checkpoints.
+  - `scripts/phase_b_eval_faithfulness.py`:
+    - added standalone post-hoc modes: `none`, `temperature`, `from_run`,
+    - now reports both raw and post-hoc calibration metrics when enabled.
+  - New shared module:
+    - `src/ours/phase_b/posthoc_calibration.py` for temperature fitting/application.
+  - Loss module extension:
+    - `src/ours/phase_b/value_losses.py` now includes BCE and mixed calibration helpers.
+  - Lifecycle experiment groups:
+    - `C2_STRATEGYQA_TRICK1_BCE`
+    - `C2_STRATEGYQA_TRICK2_POSTHOC_TEMP`
+    - `C2_STRATEGYQA_TRICK3_ADAPTIVE_BALANCE`
+  - Docs updated:
+    - `readme_full.md`
+    - `readme.md`
+  - Unit tests extended:
+    - `tests/unit/test_phase_c_value_components.py` for BCE/mixed losses and temperature calibration helpers.
+
+## 2026-03-03 16:20:00 +08 (+0800)
+- Type: Phase B GSM8K Web-Backed Mitigation Integration
+- Summary: Added a concise, source-backed mitigation shortlist in the Phase B report to connect GSM8K regression findings with forgetting-mitigation literature and concrete next diagnostics.
+- Details:
+  - Updated `phase_B_report.md` with:
+    - two external references on forgetting/memory-retaining fine-tuning,
+    - ranked next-repair sequence (checkpoint selection, answer weighting, replay mixing, KL-anchor regularization, short-budget early stopping),
+    - explicit promotion criterion for GSM8K recipe acceptance.
+
+## 2026-03-03 16:05:00 +08 (+0800)
+- Type: Phase C C2 Recovery Prioritization / Web-Backed To-Try Integration
+- Summary: Added a ranked, source-backed C2 recovery checklist focused on calibration-first improvement, post-hoc calibration, adaptive multi-loss balancing, and utility-level promotion gates.
+- Details:
+  - Updated C2 status snapshot in `TODO_ours.md` to reflect latest K8 full runs.
+  - Replaced old immediate tasks with ranked `P0..P4` top-to-try list.
+  - Added explicit updated O5 promotion gates aligned with K8 baseline (`brier < 0.1394`).
+  - Added a concrete "Top-to-try sequence for current C2 dilemma" section in `phase_C_plan.md`.
+  - Added a concise "Ranked top-to-try list (web-backed)" block in `readme_full.md`.
+  - External references used are now documented in Phase C docs:
+    - process supervision / verifier papers,
+    - calibration foundations and post-hoc calibration,
+    - adaptive multi-task loss weighting methods.
+
+## 2026-03-03 15:25:00 +08 (+0800)
+- Type: Phase C C2 K8 Sweep Consolidation / External-Method Reference Integration
+- Summary: Consolidated the latest K8 StrategyQA C2 runs (calibration-first + four weaker-contrastive variants) and updated Phase C docs with external method references explaining why current attempts are informative but not yet positive.
+- Details:
+  - Newly consolidated K8 runs:
+    - `strategyqa_value_c2_k8_cal_only_lr1e4_full_20260303T032550Z`
+    - `strategyqa_value_c2_k8_ctr_l005_m002_20260303T064706Z`
+    - `strategyqa_value_c2_k8_ctr_l002_m001_20260303T064742Z`
+    - `strategyqa_value_c2_k8_ctr_l001_m001_20260303T065230Z`
+    - `strategyqa_value_c2_k8_ctr_l005_m0005_20260303T065233Z`
+  - Key diagnosis after full sweep:
+    - best calibration remains calibration-only (`brier=0.1924`, `pearson=0.1915`),
+    - best corruption sensitivity remains a contrastive variant (`pair_acc=0.4988`, `auc=0.4917`),
+    - no run beats the K8 trivial baseline brier (`0.1394`),
+    - corruption metrics remain near-random overall.
+  - Method-reference documentation added:
+    - process supervision / verifier papers,
+    - calibration literature and implementation references,
+    - multi-task loss balancing references.
+  - Updated files:
+    - `phase_C_plan.md`
+    - `readme_full.md`
+
 ## 2026-03-03 06:20:00 +08 (+0800)
 - Type: Phase C C2 Diagnosis Update / Calibration-Only And Weak-Contrastive Runs
 - Summary: Integrated the latest StrategyQA C2 runs and concluded that C2 is now technically stable but still not quality-ready for BCR/ABR routing because calibration and corruption metrics remain below baseline.
