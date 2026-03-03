@@ -353,8 +353,15 @@ Risk E: extractor-template mismatch inflates parse-error metrics.
 
 1. D1 is implemented:
    - `scripts/phase_c_score_prm_teacher.py`
-2. Implement D2 fusion fields in C1 output contract.
-3. Implement D3 target-source switch in C2.
+2. D2 is implemented in C1:
+   - `scripts/phase_b_prepare_value_data.py` now emits
+     `q_teacher/q_fused/teacher_available/teacher_disagree/teacher_model_id`
+     when teacher sidecar scores are provided.
+3. D3 is implemented in C2:
+   - `scripts/phase_b_train_value.py` now supports
+     `--target-source {q_mean_smoothed,q_teacher,q_fused}`.
+   - `scripts/phase_b_eval_faithfulness.py` supports `--target-source from_run`
+     for evaluation consistency with training.
 4. Run the first D4 four-way ablation on StrategyQA smoke, then full.
 5. Publish `phase_D_report.md` as the new live report file.
 

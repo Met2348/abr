@@ -85,6 +85,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-corruption-variants", type=int, default=None)
     parser.add_argument("--max-length", type=int, default=None)
     parser.add_argument(
+        "--target-source",
+        choices=["from_run", "q_mean_smoothed", "q_teacher", "q_fused"],
+        default="from_run",
+        help=(
+            "Target source used for calibration metrics. "
+            "`from_run` reuses training config target_source."
+        ),
+    )
+    parser.add_argument(
+        "--target-source-missing-policy",
+        choices=["from_run", "fail", "fallback_mc"],
+        default="from_run",
+        help=(
+            "Missing-value policy for selected target source. "
+            "`from_run` follows training config."
+        ),
+    )
+    parser.add_argument(
         "--posthoc-calibration",
         choices=["none", "temperature", "isotonic", "from_run"],
         default="none",
@@ -145,6 +163,23 @@ def main(argv: list[str] | None = None) -> int:
         args.eval_dir,
         max_variants=args.max_corruption_variants,
     )
+    # D3: 评估阶段与训练阶段保持同一 target-source，避免指标口径不一致。
+    run_train_cfg = value_manifest.get("train_config", {})
+    resolved_target_source = (
+        str(run_train_cfg.get("target_source", "q_mean_smoothed"))
+        if args.target_source == "from_run"
+        else str(args.target_source)
+    )
+    resolved_missing_policy = (
+        str(run_train_cfg.get("target_source_missing_policy", "fail"))
+        if args.target_source_missing_policy == "from_run"
+        else str(args.target_source_missing_policy)
+    )
+    target_scores, target_source_stats = _resolve_eval_targets(
+        examples=eval_examples,
+        target_source=resolved_target_source,
+        missing_policy=resolved_missing_policy,
+    )
 
     torch, AutoModelForCausalLM, AutoTokenizer = _import_runtime_deps()
     resolved = value_manifest["resolved_backbone"]
@@ -204,7 +239,6 @@ def main(argv: list[str] | None = None) -> int:
         clean_logits = clean_outputs["logits"]
         corrupt_scores = value_head(corrupt_features)["scores"].detach().cpu().tolist() if corrupt_features is not None else []
 
-    target_scores = [float(example.target_success_rate) for example in eval_examples]
     calibration_raw = compute_calibration_summary(
         [float(x) for x in clean_scores],
         target_scores,
@@ -269,6 +303,17 @@ def main(argv: list[str] | None = None) -> int:
             "predicted_value": float(score),
             "predicted_value_raw": float(score),
             "target_success_rate": float(example.target_success_rate),
+            "target_source": str(resolved_target_source),
+            "target_selected_value": float(target_scores[idx]),
+            "target_q_mean_smoothed": float(example.target_q_mean_smoothed),
+            "target_q_teacher": (
+                float(example.target_q_teacher) if example.target_q_teacher is not None else None
+            ),
+            "target_q_fused": (
+                float(example.target_q_fused) if example.target_q_fused is not None else None
+            ),
+            "target_teacher_available": bool(example.target_teacher_available),
+            "target_teacher_disagree": bool(example.target_teacher_disagree),
             "target_parseable_rate": float(example.target_parseable_rate),
         }
         if posthoc_scores is not None:
@@ -298,6 +343,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # 输出结构与训练脚本保持对齐，便于做 run 间对比。
     metrics = {
+        "target_source": str(resolved_target_source),
+        "target_source_missing_policy": str(resolved_missing_policy),
+        "target_source_stats": target_source_stats,
         "calibration": calibration_raw,
         "calibration_posthoc": calibration_posthoc,
         "posthoc_calibration": posthoc_payload,
@@ -314,6 +362,8 @@ def main(argv: list[str] | None = None) -> int:
                 "eval_dir": args.eval_dir,
                 "checkpoint_path": checkpoint_path,
                 "posthoc_calibration": args.posthoc_calibration,
+                "target_source": resolved_target_source,
+                "target_source_missing_policy": resolved_missing_policy,
             },
         ),
         encoding="utf-8",
@@ -327,6 +377,8 @@ def main(argv: list[str] | None = None) -> int:
                 "eval_dir": str(args.eval_dir),
                 "checkpoint_path": str(checkpoint_path),
                 "posthoc_calibration": str(args.posthoc_calibration),
+                "target_source": str(resolved_target_source),
+                "target_source_missing_policy": str(resolved_missing_policy),
                 "output_files": {
                     "metrics": str(metrics_path),
                     "prefix_scores": str(prefix_scores_path),
@@ -346,6 +398,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"value_run_dir     : {args.value_run_dir}")
     print(f"eval_dir          : {args.eval_dir}")
     print(f"checkpoint_path   : {checkpoint_path}")
+    print(f"target_source     : {resolved_target_source}")
+    print(f"target_missing    : {resolved_missing_policy}")
+    print(f"target_cov_eval   : {target_source_stats['coverage_ratio']:.6f}")
+    print(f"teacher_dis_eval  : {target_source_stats['teacher_disagree_ratio']:.6f}")
     print(f"brier_score       : {calibration_raw['brier_score']:.6f}")
     print(f"pearson           : {calibration_raw['pearson']:.6f}")
     if calibration_posthoc is not None:
@@ -357,6 +413,87 @@ def main(argv: list[str] | None = None) -> int:
     print(f"metrics_path      : {metrics_path}")
     print("=" * 88)
     return 0
+
+
+def _resolve_eval_targets(
+    *,
+    examples: list[Any],
+    target_source: str,
+    missing_policy: str,
+) -> tuple[list[float], dict[str, Any]]:
+    """Resolve standalone-eval targets from the selected D3 source.
+
+    中文要点
+    --------
+    - standalone eval 默认应与训练 run 使用同一 target source。
+    - 若 teacher/fused 有缺失，按 missing policy 处理并输出覆盖率统计。
+    """
+    values: list[float] = []
+    missing = 0
+    available = 0
+    fallback = 0
+    teacher_available = 0
+    teacher_disagree = 0
+    for example in examples:
+        if target_source == "q_mean_smoothed":
+            source_value = float(example.target_q_mean_smoothed)
+            available += 1
+        elif target_source == "q_teacher":
+            source_value = (
+                float(example.target_q_teacher)
+                if example.target_q_teacher is not None
+                else None
+            )
+            if source_value is not None:
+                available += 1
+        elif target_source == "q_fused":
+            source_value = (
+                float(example.target_q_fused)
+                if example.target_q_fused is not None
+                else None
+            )
+            if source_value is not None:
+                available += 1
+        else:
+            raise ValueError(f"Unsupported target_source: {target_source!r}")
+
+        if bool(example.target_teacher_available):
+            teacher_available += 1
+        if bool(example.target_teacher_disagree):
+            teacher_disagree += 1
+
+        if source_value is None:
+            missing += 1
+            if missing_policy == "fail":
+                raise ValueError(
+                    f"Missing target_source={target_source} for eval prefix_id={example.prefix_id}"
+                )
+            if missing_policy == "fallback_mc":
+                values.append(float(example.target_q_mean_smoothed))
+                fallback += 1
+                continue
+            raise ValueError(f"Unsupported missing policy: {missing_policy!r}")
+        values.append(float(source_value))
+    total = len(examples)
+    stats = {
+        "target_source": str(target_source),
+        "missing_policy": str(missing_policy),
+        "num_examples": int(total),
+        "available_count": int(available),
+        "missing_count": int(missing),
+        "coverage_ratio": (float(available / total) if total else 0.0),
+        "fallback_count": int(fallback),
+        "fallback_ratio": (float(fallback / total) if total else 0.0),
+        "teacher_available_count": int(teacher_available),
+        "teacher_available_ratio": (float(teacher_available / total) if total else 0.0),
+        "teacher_disagree_count": int(teacher_disagree),
+        "teacher_disagree_ratio": (
+            float(teacher_disagree / teacher_available)
+            if teacher_available > 0
+            else 0.0
+        ),
+    }
+    return values, stats
 
 
 def _resolve_posthoc_payload(

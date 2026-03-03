@@ -472,6 +472,58 @@ def _build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Minimum label-side z_delta to mark a pair as high-quality.",
     )
+    # D2: teacher-side supervision fusion controls.
+    parser.add_argument(
+        "--teacher-prefix-scores-jsonl",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to D1 output `teacher_prefix_scores.jsonl`. "
+            "When provided, C1 will join teacher scores into rollout_targets."
+        ),
+    )
+    parser.add_argument(
+        "--teacher-fuse-mode",
+        choices=["none", "fixed", "confidence"],
+        default="none",
+        help=(
+            "How to build q_fused from q_mc and q_teacher. "
+            "`none`: only attach q_teacher; `fixed`: fixed lambda; "
+            "`confidence`: lambda_mc from MC CI width."
+        ),
+    )
+    parser.add_argument(
+        "--teacher-fusion-lambda",
+        type=float,
+        default=0.5,
+        help=(
+            "Lambda for fixed fusion: q_fused = lambda*q_mc + (1-lambda)*q_teacher."
+        ),
+    )
+    parser.add_argument(
+        "--teacher-confidence-ci-ref",
+        type=float,
+        default=0.3,
+        help=(
+            "Reference CI width for confidence fusion. "
+            "lambda_mc = clip(1 - q_ci_width / ref, 0, 1)."
+        ),
+    )
+    parser.add_argument(
+        "--teacher-disagree-threshold",
+        type=float,
+        default=0.25,
+        help="Mark `teacher_disagree=true` when |q_mc - q_teacher| >= threshold.",
+    )
+    parser.add_argument(
+        "--teacher-min-coverage",
+        type=float,
+        default=0.0,
+        help=(
+            "Hard-fail when teacher join coverage is below this ratio in [0,1]. "
+            "Useful for promotion-grade runs."
+        ),
+    )
     return parser
 
 
@@ -525,6 +577,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--target-weight-gamma must be > 0")
     if args.pair_z_min < 0.0:
         raise ValueError("--pair-z-min must be >= 0")
+    if not (0.0 <= args.teacher_fusion_lambda <= 1.0):
+        raise ValueError("--teacher-fusion-lambda must be in [0, 1]")
+    if args.teacher_confidence_ci_ref <= 0.0:
+        raise ValueError("--teacher-confidence-ci-ref must be > 0")
+    if not (0.0 <= args.teacher_disagree_threshold <= 1.0):
+        raise ValueError("--teacher-disagree-threshold must be in [0, 1]")
+    if not (0.0 <= args.teacher_min_coverage <= 1.0):
+        raise ValueError("--teacher-min-coverage must be in [0, 1]")
+    if args.teacher_fuse_mode != "none" and args.teacher_prefix_scores_jsonl is None:
+        raise ValueError(
+            "--teacher-fuse-mode requires --teacher-prefix-scores-jsonl "
+            "(or set --teacher-fuse-mode none)"
+        )
+    if args.teacher_prefix_scores_jsonl is not None and not args.build_rollouts:
+        raise ValueError(
+            "--teacher-prefix-scores-jsonl requires --build-rollouts because "
+            "teacher fusion is written into rollout_targets.jsonl"
+        )
     if args.build_pair_quality and not args.build_rollouts:
         raise ValueError("--build-pair-quality requires --build-rollouts")
     if args.build_pair_quality and not args.build_corruptions:
@@ -576,6 +646,11 @@ def main(argv: list[str] | None = None) -> int:
     rows = load_phase_b_rows(args.input_jsonl, max_samples=args.max_samples)
     row_summary = summarize_rows(rows)
     input_sha256 = _sha256_file(args.input_jsonl)
+    teacher_scores_sha256 = (
+        _sha256_file(args.teacher_prefix_scores_jsonl)
+        if args.teacher_prefix_scores_jsonl is not None
+        else None
+    )
     datasets = sorted({row.dataset for row in rows}) or ["unknown"]
     dataset_tag = datasets[0] if len(datasets) == 1 else "mixed"
 
@@ -625,6 +700,17 @@ def main(argv: list[str] | None = None) -> int:
         "build_pair_quality": bool(args.build_pair_quality),
         "pair_rollout_count": int(args.pair_rollout_count),
         "target_quality_config": target_quality_config.to_dict(),
+        "teacher_prefix_scores_jsonl": (
+            str(args.teacher_prefix_scores_jsonl)
+            if args.teacher_prefix_scores_jsonl is not None
+            else None
+        ),
+        "teacher_prefix_scores_sha256": teacher_scores_sha256,
+        "teacher_fuse_mode": str(args.teacher_fuse_mode),
+        "teacher_fusion_lambda": float(args.teacher_fusion_lambda),
+        "teacher_confidence_ci_ref": float(args.teacher_confidence_ci_ref),
+        "teacher_disagree_threshold": float(args.teacher_disagree_threshold),
+        "teacher_min_coverage": float(args.teacher_min_coverage),
     }
     run_fingerprint = _stable_hash_json(run_spec)
     run_dir = args.output_root / dataset_tag / f"{args.run_name}__{run_fingerprint}"
@@ -671,6 +757,18 @@ def main(argv: list[str] | None = None) -> int:
     print(f"build_rollouts   : {args.build_rollouts}")
     print(f"build_pair_quality: {args.build_pair_quality}")
     print(f"target_quality   : {target_quality_config.to_dict()}")
+    print(
+        "teacher_fusion  : "
+        f"mode={args.teacher_fuse_mode} "
+        f"lambda={float(args.teacher_fusion_lambda):.3f} "
+        f"ci_ref={float(args.teacher_confidence_ci_ref):.3f} "
+        f"disagree>={float(args.teacher_disagree_threshold):.3f} "
+        f"min_cov={float(args.teacher_min_coverage):.3f}"
+    )
+    print(
+        "teacher_scores  : "
+        f"{str(args.teacher_prefix_scores_jsonl) if args.teacher_prefix_scores_jsonl is not None else '<none>'}"
+    )
     if rollout_config is not None:
         print(
             "rollout_config   : "
@@ -734,6 +832,7 @@ def main(argv: list[str] | None = None) -> int:
     rollout_targets: list[RolloutTargetRecord] = []
     corruption_rollout_targets: list[CorruptionRolloutTargetRecord] = []
     pair_quality_records: list[PairQualityRecord] = []
+    teacher_fusion_summary: dict[str, Any] | None = None
     rollout_runtime: dict[str, Any] | None = None
     if args.build_rollouts:
         can_reuse_clean_rollouts = (
@@ -796,6 +895,22 @@ def main(argv: list[str] | None = None) -> int:
                 pair_quality_path,
                 (record.to_dict() for record in pair_quality_records),
             )
+        # D2: 在 C1 阶段把 teacher sidecar 分数写回 clean rollout_targets。
+        # 中文说明：这一步是“标签增强”，不会改动 prefixes/corruptions 主体结构。
+        if args.teacher_prefix_scores_jsonl is not None:
+            rollout_targets, teacher_fusion_summary = _attach_teacher_scores_to_rollout_targets(
+                rollout_targets=rollout_targets,
+                teacher_scores_path=args.teacher_prefix_scores_jsonl,
+                fuse_mode=str(args.teacher_fuse_mode),
+                fusion_lambda=float(args.teacher_fusion_lambda),
+                confidence_ci_ref=float(args.teacher_confidence_ci_ref),
+                disagree_threshold=float(args.teacher_disagree_threshold),
+                min_coverage=float(args.teacher_min_coverage),
+            )
+            _write_jsonl(
+                rollout_target_path,
+                (record.to_dict() for record in rollout_targets),
+            )
 
     prefix_summary = summarize_prefix_artifacts(prefixes)
     corruption_summary = (
@@ -820,6 +935,7 @@ def main(argv: list[str] | None = None) -> int:
         "run_dir": str(run_dir),
         "input_jsonl": str(args.input_jsonl),
         "input_sha256": input_sha256,
+        "teacher_prefix_scores_sha256": teacher_scores_sha256,
         "num_rows_input": row_summary["num_rows"],
         "num_rows_failed": len(error_records),
         "num_step_sequences": len(step_sequences),
@@ -830,6 +946,7 @@ def main(argv: list[str] | None = None) -> int:
         "rollout_summary": rollout_summary,
         "corruption_rollout_summary": corruption_rollout_summary,
         "pair_quality_summary": pair_quality_summary,
+        "teacher_fusion_summary": teacher_fusion_summary,
         "rollout_runtime": rollout_runtime,
     }
     summary_path.write_text(
@@ -845,6 +962,7 @@ def main(argv: list[str] | None = None) -> int:
         "run_fingerprint": run_fingerprint,
         "input_jsonl": str(args.input_jsonl),
         "input_sha256": input_sha256,
+        "teacher_prefix_scores_sha256": teacher_scores_sha256,
         "row_summary": row_summary,
         "step_config": step_config.to_dict(),
         "step_config_signature": step_config.stable_signature(),
@@ -855,6 +973,18 @@ def main(argv: list[str] | None = None) -> int:
         ),
         "rollout_config": (rollout_config.to_dict() if rollout_config is not None else None),
         "target_quality_config": target_quality_config.to_dict(),
+        "teacher_fusion_config": {
+            "teacher_prefix_scores_jsonl": (
+                str(args.teacher_prefix_scores_jsonl)
+                if args.teacher_prefix_scores_jsonl is not None
+                else None
+            ),
+            "fuse_mode": str(args.teacher_fuse_mode),
+            "fusion_lambda": float(args.teacher_fusion_lambda),
+            "confidence_ci_ref": float(args.teacher_confidence_ci_ref),
+            "disagree_threshold": float(args.teacher_disagree_threshold),
+            "min_coverage": float(args.teacher_min_coverage),
+        },
         "output_files": {
             "step_sequences": str(step_path),
             "prefixes": str(prefix_path),
@@ -866,6 +996,11 @@ def main(argv: list[str] | None = None) -> int:
                 str(corruption_rollout_target_path) if args.build_pair_quality else None
             ),
             "pair_quality": str(pair_quality_path) if args.build_pair_quality else None,
+            "teacher_prefix_scores_input": (
+                str(args.teacher_prefix_scores_jsonl)
+                if args.teacher_prefix_scores_jsonl is not None
+                else None
+            ),
             "summary": str(summary_path),
         },
     }
@@ -887,6 +1022,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.build_rollouts:
         print(f"num_rollout_preds  : {len(rollout_predictions)}")
         print(f"num_rollout_targets: {len(rollout_targets)}")
+        if teacher_fusion_summary is not None:
+            print(
+                "teacher_cov_ratio : "
+                f"{float(teacher_fusion_summary.get('teacher_available_ratio', 0.0)):.4f}"
+            )
+            print(
+                "teacher_dis_ratio : "
+                f"{float(teacher_fusion_summary.get('teacher_disagree_ratio', 0.0)):.4f}"
+            )
+            print(
+                "teacher_fuse_mode : "
+                f"{str(teacher_fusion_summary.get('fuse_mode', '<none>'))}"
+            )
         if args.build_pair_quality:
             print(f"num_corr_targets   : {len(corruption_rollout_targets)}")
             print(f"num_pair_quality   : {len(pair_quality_records)}")
@@ -980,6 +1128,10 @@ def _build_rollout_targets(
         oom_backoff_events += local_oom
         predictions.extend(stage1_predictions)
     else:
+        # 两阶段策略：
+        # 1) 先用较小预算扫全量 prefix；
+        # 2) 再仅对“靠近 0.5 或 CI 很宽”的不确定 prefix 做补采样。
+        # 这样把预算集中在最可能噪声大的样本上。
         stage1_count = int(config.rollout_stage1_count)
         stage2_count = int(config.rollout_stage2_count)
         stage1_jobs = _build_rollout_jobs(
@@ -1083,7 +1235,9 @@ def _select_uncertain_prefix_ids(
     selected: set[str] = set()
     for target in targets:
         q = float(target.q_mean_smoothed)
+        # 条件 A：q 靠近 0.5，语义上“模型半信半疑”。
         near_uncertain = abs(q - 0.5) < float(band)
+        # 条件 B：置信区间很宽，统计上“估计还不稳定”。
         ci_uncertain = float(target.q_ci_width) >= float(ci_width_threshold)
         if near_uncertain or ci_uncertain:
             selected.add(str(target.prefix_id))
@@ -1281,6 +1435,158 @@ def _aggregate_rollout_targets(
     return targets
 
 
+def _attach_teacher_scores_to_rollout_targets(
+    *,
+    rollout_targets: list[RolloutTargetRecord],
+    teacher_scores_path: Path,
+    fuse_mode: str,
+    fusion_lambda: float,
+    confidence_ci_ref: float,
+    disagree_threshold: float,
+    min_coverage: float,
+) -> tuple[list[RolloutTargetRecord], dict[str, Any]]:
+    """Attach teacher scores and optional fused targets onto clean rollout targets.
+
+    Design notes
+    ------------
+    - D2 works as a sidecar join over `prefix_id`; no mutation of prefix artifacts.
+    - Backward compatibility is preserved: when no teacher row is found for a
+      prefix, `q_teacher/q_fused` remain `None`, and MC fields remain untouched.
+    - Join diagnostics are returned and written into summary/manifest so team
+      members can audit coverage and disagreement quickly.
+
+    中文要点
+    --------
+    - 这是 D2 的核心：把 D1 的 teacher 分数接入 C1 标签层。
+    - `q_teacher` 是教师监督，`q_fused` 是融合监督。
+    - 覆盖率/冲突率会被记录，便于后续 D3 选择 target source。
+    """
+    if not teacher_scores_path.exists():
+        raise FileNotFoundError(f"Teacher score file not found: {teacher_scores_path}")
+    teacher_by_prefix, duplicates, teacher_model_ids = _load_teacher_prefix_scores(
+        teacher_scores_path
+    )
+    if duplicates > 0:
+        raise ValueError(
+            "Duplicate prefix_id detected in teacher score file: "
+            f"{duplicates} duplicates in {teacher_scores_path}"
+        )
+    target_ids = {str(target.prefix_id) for target in rollout_targets}
+    extra_teacher_ids = sorted(prefix_id for prefix_id in teacher_by_prefix if prefix_id not in target_ids)
+
+    enriched: list[RolloutTargetRecord] = []
+    joined = 0
+    disagree = 0
+    fused_count = 0
+    sum_mc = 0.0
+    sum_teacher = 0.0
+    sum_fused = 0.0
+    for target in rollout_targets:
+        prefix_id = str(target.prefix_id)
+        teacher_row = teacher_by_prefix.get(prefix_id)
+        q_mc = float(target.q_mean_smoothed)
+        q_teacher: float | None = None
+        q_fused: float | None = None
+        teacher_available = False
+        teacher_disagree = False
+        teacher_model_id: str | None = None
+        lambda_mc: float | None = None
+        if teacher_row is not None:
+            q_teacher = float(min(max(float(teacher_row["teacher_score_mean"]), 0.0), 1.0))
+            teacher_available = True
+            teacher_model_id = teacher_row.get("teacher_model_id")
+            if teacher_model_id is not None:
+                teacher_model_id = str(teacher_model_id)
+            teacher_disagree = abs(q_mc - q_teacher) >= float(disagree_threshold)
+            if teacher_disagree:
+                disagree += 1
+            joined += 1
+            sum_teacher += q_teacher
+            if fuse_mode == "fixed":
+                lambda_mc = float(fusion_lambda)
+                q_fused = (lambda_mc * q_mc) + ((1.0 - lambda_mc) * q_teacher)
+            elif fuse_mode == "confidence":
+                # 中文：MC 区间越窄（越确定），越信任 MC；越宽则越信任 teacher。
+                lambda_mc = 1.0 - (float(target.q_ci_width) / max(float(confidence_ci_ref), 1e-8))
+                lambda_mc = float(min(max(lambda_mc, 0.0), 1.0))
+                q_fused = (lambda_mc * q_mc) + ((1.0 - lambda_mc) * q_teacher)
+            if q_fused is not None:
+                q_fused = float(min(max(q_fused, 0.0), 1.0))
+                fused_count += 1
+                sum_fused += q_fused
+        payload = target.to_dict()
+        payload["q_teacher"] = q_teacher
+        payload["q_fused"] = q_fused
+        payload["teacher_available"] = bool(teacher_available)
+        payload["teacher_disagree"] = bool(teacher_disagree)
+        payload["teacher_model_id"] = teacher_model_id
+        metadata = dict(payload.get("metadata", {}))
+        if lambda_mc is not None:
+            metadata["teacher_lambda_mc"] = float(lambda_mc)
+        metadata["teacher_join_version"] = "phase_d_d2_v1"
+        payload["metadata"] = metadata
+        record = RolloutTargetRecord(**payload)
+        record.validate()
+        enriched.append(record)
+        sum_mc += q_mc
+
+    total = len(rollout_targets)
+    coverage = float(joined / total) if total else 0.0
+    if coverage < float(min_coverage):
+        raise ValueError(
+            "Teacher coverage below requested threshold: "
+            f"coverage={coverage:.4f} < min_coverage={float(min_coverage):.4f}"
+        )
+    summary = {
+        "teacher_scores_path": str(teacher_scores_path),
+        "fuse_mode": str(fuse_mode),
+        "fusion_lambda": float(fusion_lambda),
+        "confidence_ci_ref": float(confidence_ci_ref),
+        "disagree_threshold": float(disagree_threshold),
+        "num_targets": int(total),
+        "num_teacher_rows": int(len(teacher_by_prefix)),
+        "duplicate_teacher_ids": int(duplicates),
+        "num_joined": int(joined),
+        "teacher_available_ratio": float(coverage),
+        "num_missing_teacher": int(total - joined),
+        "num_extra_teacher_ids": int(len(extra_teacher_ids)),
+        "extra_teacher_id_examples": extra_teacher_ids[:10],
+        "teacher_disagree_ratio": (float(disagree / joined) if joined > 0 else 0.0),
+        "num_disagree": int(disagree),
+        "num_fused": int(fused_count),
+        "mean_q_mc": (float(sum_mc / total) if total > 0 else 0.0),
+        "mean_q_teacher": (float(sum_teacher / joined) if joined > 0 else 0.0),
+        "mean_q_fused": (float(sum_fused / fused_count) if fused_count > 0 else 0.0),
+        "teacher_model_ids": sorted(teacher_model_ids),
+    }
+    return enriched, summary
+
+
+def _load_teacher_prefix_scores(
+    path: Path,
+) -> tuple[dict[str, dict[str, Any]], int, set[str]]:
+    """Load D1 teacher prefix scores keyed by prefix_id with duplicate checks."""
+    rows = _read_jsonl(path)
+    by_prefix: dict[str, dict[str, Any]] = {}
+    duplicates = 0
+    model_ids: set[str] = set()
+    for row in rows:
+        prefix_id = str(row.get("prefix_id", "")).strip()
+        if prefix_id == "":
+            continue
+        if prefix_id in by_prefix:
+            duplicates += 1
+            # 中文：重复 ID 取第一条，保证 join 可重复且不会随机漂移。
+            continue
+        if "teacher_score_mean" not in row:
+            continue
+        model_id = str(row.get("teacher_model_id", "")).strip()
+        if model_id:
+            model_ids.add(model_id)
+        by_prefix[prefix_id] = row
+    return by_prefix, duplicates, model_ids
+
+
 def _build_corruption_rollout_targets_and_pair_quality(
     *,
     corruption_artifacts: list[CorruptionArtifact],
@@ -1423,6 +1729,7 @@ def _build_corruption_rollout_targets_and_pair_quality(
             while next_progress <= done:
                 next_progress += progress_every
 
+    # 先把每个 corruption 的 rollout 聚合成 corruption-side target。
     corr_targets: list[CorruptionRolloutTargetRecord] = []
     for corruption in sorted(corruption_artifacts, key=lambda c: c.corruption_id):
         rows = sorted(by_corruption.get(corruption.corruption_id, []), key=lambda row: row["rollout_index"])
@@ -1471,6 +1778,7 @@ def _build_corruption_rollout_targets_and_pair_quality(
         corr_targets.append(target)
 
     corr_target_by_id = {target.corruption_id: target for target in corr_targets}
+    # 再把 clean target 与 corruption target 做配对，得到 label-side pair 质量。
     pair_records: list[PairQualityRecord] = []
     for corruption in sorted(corruption_artifacts, key=lambda c: c.corruption_id):
         clean_target = clean_targets_by_prefix.get(corruption.clean_prefix_id)
@@ -1482,6 +1790,7 @@ def _build_corruption_rollout_targets_and_pair_quality(
             float(clean_target.q_std_error) ** 2 + float(corr_target.q_std_error) ** 2
         )
         z_delta = float(delta_q / max(se_delta, 1e-8))
+        # 门控条件：只有当差值幅度和统计显著性都达标，pair 才算高质量。
         pair_pass = (
             delta_q >= float(target_quality_config.pair_delta_q_min)
             and z_delta >= float(target_quality_config.pair_z_min)
@@ -1494,8 +1803,13 @@ def _build_corruption_rollout_targets_and_pair_quality(
         uncertainty_weight = math.sqrt(clean_reliability * corrupt_reliability)
         delta_norm = min(max(delta_q, 0.0), 1.0)
         z_norm = min(max(z_delta, 0.0) / 5.0, 1.0)
+        # pair_weight 是连续权重（不是硬筛选）：
+        # - delta_norm 反映 clean-corrupt 差值大小
+        # - z_norm 反映差值显著性
+        # - uncertainty_weight 惩罚 clean/corrupt 任一侧不稳定
         pair_weight = (0.5 * delta_norm + 0.5 * z_norm) * uncertainty_weight
         if not pair_pass:
+            # 不通过 gate 的 pair 仍可保留，但显式降权。
             pair_weight *= 0.5
         pair = PairQualityRecord(
             pair_id=_stable_hash(
@@ -1949,6 +2263,24 @@ def _render_summary_markdown(summary: dict[str, Any], manifest: dict[str, Any]) 
                 f"- positive_delta_ratio: `{summary['pair_quality_summary']['positive_delta_ratio']:.4f}`",
                 f"- mean_delta_q: `{summary['pair_quality_summary']['mean_delta_q']:.4f}`",
                 f"- mean_pair_weight: `{summary['pair_quality_summary']['mean_pair_weight']:.4f}`",
+            ]
+        )
+    if summary.get("teacher_fusion_summary") is not None:
+        teacher = summary["teacher_fusion_summary"]
+        lines.extend(
+            [
+                "",
+                "## Teacher Fusion Summary",
+                "",
+                f"- teacher_scores_path: `{teacher['teacher_scores_path']}`",
+                f"- fuse_mode: `{teacher['fuse_mode']}`",
+                f"- teacher_available_ratio: `{teacher['teacher_available_ratio']:.4f}`",
+                f"- teacher_disagree_ratio: `{teacher['teacher_disagree_ratio']:.4f}`",
+                f"- num_missing_teacher: `{teacher['num_missing_teacher']}`",
+                f"- num_extra_teacher_ids: `{teacher['num_extra_teacher_ids']}`",
+                f"- mean_q_mc: `{teacher['mean_q_mc']:.4f}`",
+                f"- mean_q_teacher: `{teacher['mean_q_teacher']:.4f}`",
+                f"- mean_q_fused: `{teacher['mean_q_fused']:.4f}`",
             ]
         )
     lines.append("")

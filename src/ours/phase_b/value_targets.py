@@ -266,6 +266,13 @@ class RolloutTargetRecord:
     - `q_std_error`: standard error estimate for the smoothed mean
     - `q_ci_*`: approximate confidence interval bounds and width
     - `q_weight`: normalized reliability weight in `[0, 1]`
+
+    Phase D extends this record with optional teacher/fusion fields:
+    - `q_teacher`: external PRM teacher score (nullable)
+    - `q_fused`: MC+teacher fused supervision target (nullable)
+    - `teacher_available`: whether teacher coverage exists for this prefix
+    - `teacher_disagree`: whether |q_teacher - q_mean_smoothed| crosses threshold
+    - `teacher_model_id`: teacher lineage tag for auditability
     """
 
     prefix_id: str
@@ -285,6 +292,11 @@ class RolloutTargetRecord:
     q_weight: float
     mean_generated_char_count: float
     metadata: dict[str, Any] = field(default_factory=dict)
+    q_teacher: float | None = None
+    q_fused: float | None = None
+    teacher_available: bool = False
+    teacher_disagree: bool = False
+    teacher_model_id: str | None = None
 
     def validate(self) -> None:
         """Validate one rollout target summary."""
@@ -318,6 +330,16 @@ class RolloutTargetRecord:
             raise ValueError("`mean_generated_char_count` must be >= 0")
         if not isinstance(self.metadata, dict):
             raise TypeError("`metadata` must be dict[str, Any]")
+        if self.q_teacher is not None:
+            _validate_unit_interval(self.q_teacher, "q_teacher")
+        if self.q_fused is not None:
+            _validate_unit_interval(self.q_fused, "q_fused")
+        if not isinstance(self.teacher_available, bool):
+            raise TypeError("`teacher_available` must be bool")
+        if not isinstance(self.teacher_disagree, bool):
+            raise TypeError("`teacher_disagree` must be bool")
+        if self.teacher_model_id is not None and not isinstance(self.teacher_model_id, str):
+            raise TypeError("`teacher_model_id` must be str or None")
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the record into a validated plain dictionary."""
@@ -399,6 +421,9 @@ class PairQualityRecord:
 
     These records are used to filter and weight contrastive supervision using
     rollout-derived label gaps rather than early noisy model score gaps.
+
+    在 CQR 路径里，`pair_pass_gate`（metadata）与 `pair_weight` 会直接影响
+    C2 是否纳入该 pair 以及纳入后的损失权重。
     """
 
     pair_id: str

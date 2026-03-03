@@ -723,6 +723,9 @@ C2_POST_BRIER="$(json_value "$C2_EVAL_METRICS" "calibration_posthoc.brier_score"
 C2_POST_PEARSON="$(json_value "$C2_EVAL_METRICS" "calibration_posthoc.pearson")"
 C2_PAIR_ACC="$(json_value "$C2_EVAL_METRICS" "corruption.pair_accuracy")"
 C2_AUC="$(json_value "$C2_EVAL_METRICS" "corruption.auc_clean_vs_corrupt")"
+C2_TARGET_SOURCE="$(json_value "$C2_EVAL_METRICS" "target_source")"
+C2_TARGET_COVERAGE="$(json_value "$C2_EVAL_METRICS" "target_source_stats.coverage_ratio")"
+C2_TEACHER_DISAGREE="$(json_value "$C2_EVAL_METRICS" "target_source_stats.teacher_disagree_ratio")"
 
 CURRENT_STAGE="final_summary"
 cat > "$SUMMARY_FILE" <<EOF
@@ -751,6 +754,9 @@ cat > "$SUMMARY_FILE" <<EOF
 - posthoc_pearson: ${C2_POST_PEARSON:-N/A}
 - corruption_pair_accuracy: ${C2_PAIR_ACC:-N/A}
 - corruption_auc_clean_vs_corrupt: ${C2_AUC:-N/A}
+- target_source: ${C2_TARGET_SOURCE:-N/A}
+- target_coverage_ratio: ${C2_TARGET_COVERAGE:-N/A}
+- teacher_disagree_ratio: ${C2_TEACHER_DISAGREE:-N/A}
 EOF
 
 {

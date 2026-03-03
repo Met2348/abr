@@ -53,6 +53,7 @@ class ValueSupervisionExample:
     This is the main C2 training/eval unit. Each example describes one clean
     reasoning state `h_t` together with:
     - empirical success target from rollouts,
+    - optional teacher/fused targets from Phase D (`q_teacher`, `q_fused`),
     - parseability metadata,
     - one deterministic corruption variant when available.
     """
@@ -74,6 +75,11 @@ class ValueSupervisionExample:
     target_q_std_error: float
     target_q_ci_width: float
     target_q_weight: float
+    target_q_teacher: float | None
+    target_q_fused: float | None
+    target_teacher_available: bool
+    target_teacher_disagree: bool
+    target_teacher_model_id: str | None
     target_parseable_rate: float
     target_k_rollouts: int
     mean_generated_char_count: float
@@ -124,6 +130,22 @@ class ValueSupervisionExample:
             value = getattr(self, name)
             if not isinstance(value, (int, float)) or not (0.0 <= float(value) <= 1.0):
                 raise ValueError(f"`{name}` must be a float in [0, 1]")
+        if self.target_q_teacher is not None:
+            value = self.target_q_teacher
+            if not isinstance(value, (int, float)) or not (0.0 <= float(value) <= 1.0):
+                raise ValueError("`target_q_teacher` must be None or a float in [0, 1]")
+        if self.target_q_fused is not None:
+            value = self.target_q_fused
+            if not isinstance(value, (int, float)) or not (0.0 <= float(value) <= 1.0):
+                raise ValueError("`target_q_fused` must be None or a float in [0, 1]")
+        if not isinstance(self.target_teacher_available, bool):
+            raise TypeError("`target_teacher_available` must be bool")
+        if not isinstance(self.target_teacher_disagree, bool):
+            raise TypeError("`target_teacher_disagree` must be bool")
+        if self.target_teacher_model_id is not None and not isinstance(
+            self.target_teacher_model_id, str
+        ):
+            raise TypeError("`target_teacher_model_id` must be str or None")
         for name in ("target_q_std_error", "target_q_ci_width"):
             value = getattr(self, name)
             if not isinstance(value, (int, float)) or float(value) < 0.0:
@@ -368,6 +390,31 @@ def load_value_supervision_examples(
         target_q_std_error = float(target.get("q_std_error", 0.0))
         target_q_ci_width = float(target.get("q_ci_width", 0.0))
         target_q_weight = float(target.get("q_weight", 1.0))
+        # D2 teacher/fusion fields are optional and must keep backward compatibility.
+        # 中文：老产物没有 teacher 字段时，这里保持 None/False，不影响旧实验复现。
+        target_q_teacher_raw = target.get("q_teacher")
+        target_q_fused_raw = target.get("q_fused")
+        target_q_teacher = (
+            float(target_q_teacher_raw) if target_q_teacher_raw is not None else None
+        )
+        target_q_fused = (
+            float(target_q_fused_raw) if target_q_fused_raw is not None else None
+        )
+        target_teacher_available = bool(
+            target.get("teacher_available", target_q_teacher is not None)
+        )
+        # 保护一致性：若 teacher 值缺失，teacher_available 不应为 True。
+        if target_q_teacher is None:
+            target_teacher_available = False
+        target_teacher_disagree = bool(target.get("teacher_disagree", False))
+        target_teacher_model_id_raw = target.get("teacher_model_id")
+        target_teacher_model_id = (
+            str(target_teacher_model_id_raw).strip()
+            if target_teacher_model_id_raw is not None
+            else None
+        )
+        if target_teacher_model_id == "":
+            target_teacher_model_id = None
         example = ValueSupervisionExample(
             prefix_id=str(prefix_id),
             sample_id=str(prefix["sample_id"]),
@@ -386,6 +433,11 @@ def load_value_supervision_examples(
             target_q_std_error=target_q_std_error,
             target_q_ci_width=target_q_ci_width,
             target_q_weight=target_q_weight,
+            target_q_teacher=target_q_teacher,
+            target_q_fused=target_q_fused,
+            target_teacher_available=target_teacher_available,
+            target_teacher_disagree=target_teacher_disagree,
+            target_teacher_model_id=target_teacher_model_id,
             target_parseable_rate=float(target["parseable_rate"]),
             target_k_rollouts=int(target["k_rollouts"]),
             mean_generated_char_count=float(target["mean_generated_char_count"]),
@@ -393,6 +445,7 @@ def load_value_supervision_examples(
                 "prefix_metadata": dict(prefix.get("metadata", {})),
                 "target_metadata": dict(target.get("metadata", {})),
                 "has_pair_quality": bool(pair_quality is not None),
+                "target_teacher_available": bool(target_teacher_available),
             },
             primary_corruption_text=(str(corruption["corrupted_prefix_text"]) if corruption is not None else None),
             primary_corruption_type=(str(corruption["corruption_type"]) if corruption is not None else None),
@@ -492,6 +545,8 @@ def _build_primary_corruption_map(
     for row in rows:
         grouped.setdefault(str(row["clean_prefix_id"]), []).append(row)
 
+    # CQR 后，这里是“把多 corruption 收敛成一个 primary corruption”的关键点。
+    # 设计目标是：固定、可复现、尽量优先高质量 pair。
     pair_quality_by_corruption = pair_quality_by_corruption or {}
 
     # 每个 clean prefix 只保留一个 primary corruption，保持 C2 输入稳定。
@@ -564,6 +619,8 @@ def _build_pair_quality_maps(
         if clean_prefix_id:
             grouped_by_prefix.setdefault(clean_prefix_id, []).append(row)
 
+    # by_prefix 作为 fallback：当 primary corruption 无直接 pair_quality 时，
+    # 仍能回退到“该 prefix 最佳 pair 质量”。
     by_prefix: dict[str, dict[str, Any]] = {}
     for prefix_id, variants in grouped_by_prefix.items():
         ranked = sorted(

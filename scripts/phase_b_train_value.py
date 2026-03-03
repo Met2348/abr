@@ -109,6 +109,8 @@ class TrainConfig:
     """Compact snapshot of C2 hyperparameters persisted in the manifest."""
 
     max_length: int
+    target_source: str
+    target_source_missing_policy: str
     learning_rate: float
     weight_decay: float
     num_train_epochs: float
@@ -181,6 +183,25 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-eval-samples", type=int, default=None)
     parser.add_argument("--max-corruption-variants-eval", type=int, default=None)
     parser.add_argument("--max-length", type=int, default=1024)
+    parser.add_argument(
+        "--target-source",
+        choices=["q_mean_smoothed", "q_teacher", "q_fused"],
+        default="q_mean_smoothed",
+        help=(
+            "Supervision target source for C2. "
+            "`q_mean_smoothed`=MC baseline, `q_teacher`=teacher-only, "
+            "`q_fused`=D2 fused labels."
+        ),
+    )
+    parser.add_argument(
+        "--target-source-missing-policy",
+        choices=["fail", "fallback_mc"],
+        default="fail",
+        help=(
+            "How to handle missing target-source values. "
+            "`fail` is strict for promotion runs; `fallback_mc` uses q_mean_smoothed."
+        ),
+    )
 
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=0.0)
@@ -477,6 +498,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("the following arguments are required: --train-dir, --eval-dir")
     if args.max_length <= 8:
         raise ValueError("--max-length must be > 8")
+    if args.target_source not in {"q_mean_smoothed", "q_teacher", "q_fused"}:
+        raise ValueError("--target-source has an unsupported value")
     if args.per_device_train_batch_size <= 0 or args.per_device_eval_batch_size <= 0:
         raise ValueError("Per-device batch sizes must be positive")
     if args.gradient_accumulation_steps <= 0:
@@ -567,6 +590,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     assert_phase_c_compatibility(train_manifest, eval_manifest)
 
+    # D3: 根据 target_source 选择监督目标列。
+    # 中文：这一步统一处理 teacher/fused 缺失策略，避免后续训练环节静默回退。
+    train_target_values, train_target_source_stats = _resolve_supervision_targets(
+        examples=train_examples,
+        target_source=str(args.target_source),
+        missing_policy=str(args.target_source_missing_policy),
+        split_label="train",
+    )
+    eval_target_values, eval_target_source_stats = _resolve_supervision_targets(
+        examples=eval_examples,
+        target_source=str(args.target_source),
+        missing_policy=str(args.target_source_missing_policy),
+        split_label="eval",
+    )
+
     rollout_config = dict(train_manifest["rollout_config"])
     model_path = str(rollout_config["model_path"])
     adapter_path = rollout_config.get("adapter_path")
@@ -582,6 +620,8 @@ def main(argv: list[str] | None = None) -> int:
 
     train_cfg = TrainConfig(
         max_length=int(args.max_length),
+        target_source=str(args.target_source),
+        target_source_missing_policy=str(args.target_source_missing_policy),
         learning_rate=float(args.learning_rate),
         weight_decay=float(args.weight_decay),
         num_train_epochs=float(args.num_train_epochs),
@@ -657,6 +697,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"run_dir           : {run_dir}")
     print(f"model_path        : {model_path}")
     print(f"adapter_path      : {adapter_path if adapter_path is not None else '<none>'}")
+    print(f"target_source     : {args.target_source}")
+    print(f"target_missing    : {args.target_source_missing_policy}")
+    print(f"target_cov_train  : {train_target_source_stats['coverage_ratio']:.4f}")
+    print(f"target_cov_eval   : {eval_target_source_stats['coverage_ratio']:.4f}")
+    print(f"teacher_dis_train : {train_target_source_stats['teacher_disagree_ratio']:.4f}")
+    print(f"teacher_dis_eval  : {eval_target_source_stats['teacher_disagree_ratio']:.4f}")
     print(f"train_examples    : {len(train_examples)}")
     print(f"eval_examples     : {len(eval_examples)}")
     print(f"eval_corruptions  : {len(eval_corruptions)}")
@@ -722,6 +768,7 @@ def main(argv: list[str] | None = None) -> int:
     feature_cache_start = time.perf_counter()
     train_cache = _encode_example_cache(
         examples=train_examples,
+        target_values=train_target_values,
         backbone=backbone,
         tokenizer=tokenizer,
         torch_module=torch,
@@ -734,6 +781,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     eval_cache = _encode_example_cache(
         examples=eval_examples,
+        target_values=eval_target_values,
         backbone=backbone,
         tokenizer=tokenizer,
         torch_module=torch,
@@ -882,6 +930,7 @@ def main(argv: list[str] | None = None) -> int:
             eval_corruption_cache=eval_corruption_cache,
             eval_corruptions=eval_corruptions,
             train_target_mean=train_target_mean,
+            target_source=str(args.target_source),
             posthoc_calibration=args.posthoc_calibration,
             posthoc_temperature_config=posthoc_temperature_config,
             posthoc_isotonic_config=posthoc_isotonic_config,
@@ -942,6 +991,7 @@ def main(argv: list[str] | None = None) -> int:
         eval_corruption_cache=eval_corruption_cache,
         eval_corruptions=eval_corruptions,
         train_target_mean=train_target_mean,
+        target_source=str(args.target_source),
         posthoc_calibration=args.posthoc_calibration,
         posthoc_temperature_config=posthoc_temperature_config,
         posthoc_isotonic_config=posthoc_isotonic_config,
@@ -966,6 +1016,12 @@ def main(argv: list[str] | None = None) -> int:
         "global_step": int(global_step),
         "train_curve": train_curve,
         "train_target_mean": float(train_target_mean),
+        "target_source": str(args.target_source),
+        "target_source_missing_policy": str(args.target_source_missing_policy),
+        "target_source_stats": {
+            "train": train_target_source_stats,
+            "eval": eval_target_source_stats,
+        },
         "best_eval_selection_brier": float(best_eval_selection_brier),
         "checkpoint_selection_metric": str(args.checkpoint_selection_metric),
         "adaptive_loss_state": (
@@ -1007,6 +1063,12 @@ def main(argv: list[str] | None = None) -> int:
         "num_train_examples": len(train_examples),
         "num_eval_examples": len(eval_examples),
         "num_eval_corruptions": len(eval_corruptions),
+        "target_source": str(args.target_source),
+        "target_source_missing_policy": str(args.target_source_missing_policy),
+        "teacher_coverage_ratio_train": float(train_target_source_stats["teacher_available_ratio"]),
+        "teacher_coverage_ratio_eval": float(eval_target_source_stats["teacher_available_ratio"]),
+        "teacher_disagreement_ratio_train": float(train_target_source_stats["teacher_disagree_ratio"]),
+        "teacher_disagreement_ratio_eval": float(eval_target_source_stats["teacher_disagree_ratio"]),
         "output_files": {
             "best_value_head": str(best_ckpt_path) if args.save_best_state else None,
             "final_value_head": str(final_ckpt_path),
@@ -1033,6 +1095,12 @@ def main(argv: list[str] | None = None) -> int:
             "feature_cache_seconds": float(feature_cache_elapsed),
             "model_load_seconds": float(model_load_elapsed),
             "train_target_mean": float(train_target_mean),
+            "target_source": str(args.target_source),
+            "target_source_missing_policy": str(args.target_source_missing_policy),
+            "target_source_stats": {
+                "train": train_target_source_stats,
+                "eval": eval_target_source_stats,
+            },
             "checkpoint_selection_metric": str(args.checkpoint_selection_metric),
             "posthoc_calibration": str(args.posthoc_calibration),
         },
@@ -1049,6 +1117,8 @@ def main(argv: list[str] | None = None) -> int:
                 "eval_dir": args.eval_dir,
                 "model_path": model_path,
                 "adapter_path": (adapter_path if adapter_path is not None else "<none>"),
+                "target_source": str(args.target_source),
+                "target_source_missing_policy": str(args.target_source_missing_policy),
                 "global_step": global_step,
                 "train_examples": len(train_examples),
                 "eval_examples": len(eval_examples),
@@ -1068,6 +1138,22 @@ def main(argv: list[str] | None = None) -> int:
     print(f"selected_criterion: {args.checkpoint_selection_metric}")
     print(f"selected_brier    : {_resolve_checkpoint_brier(eval_metrics=selected_eval_metrics, checkpoint_selection_metric=args.checkpoint_selection_metric):.6f}")
     print(f"selected_pearson  : {selected_eval_metrics['calibration']['pearson']:.6f}")
+    print(
+        "teacher_cov_train : "
+        f"{float(train_target_source_stats['teacher_available_ratio']):.4f}"
+    )
+    print(
+        "teacher_dis_train : "
+        f"{float(train_target_source_stats['teacher_disagree_ratio']):.4f}"
+    )
+    print(
+        "teacher_cov_eval  : "
+        f"{float(eval_target_source_stats['teacher_available_ratio']):.4f}"
+    )
+    print(
+        "teacher_dis_eval  : "
+        f"{float(eval_target_source_stats['teacher_disagree_ratio']):.4f}"
+    )
     if selected_eval_metrics.get("calibration_posthoc") is not None:
         print(f"selected_post_prs : {selected_eval_metrics['calibration_posthoc']['pearson']:.6f}")
     if adaptive_loss_state is not None:
@@ -1111,6 +1197,7 @@ def _build_stratified_train_permutation(
     step_index = train_cache["prefix_step_index"].detach().cpu().tolist()
     corruption_types = list(train_cache["primary_corruption_type"])
 
+    # key = (corruption_type, step_bucket)，保证 batch 不会长期被单一类型占满。
     strata: dict[tuple[str, int], list[int]] = {}
     fallback_indices: list[int] = []
     for idx in range(num_examples):
@@ -1135,6 +1222,7 @@ def _build_stratified_train_permutation(
 
     pointers: dict[tuple[str, int], int] = {key: 0 for key in strata}
     ordered: list[int] = []
+    # 轮转交织：每轮从各活跃分层取 1 个样本，减少 type/step 偏置。
     while True:
         active = [
             key
@@ -1386,6 +1474,7 @@ def _evaluate_value_head(
     eval_corruption_cache: dict[str, Any],
     eval_corruptions: list[CorruptionVariant],
     train_target_mean: float,
+    target_source: str,
     posthoc_calibration: str,
     posthoc_temperature_config: TemperatureCalibrationConfig,
     posthoc_isotonic_config: IsotonicCalibrationConfig,
@@ -1440,6 +1529,7 @@ def _evaluate_value_head(
     prefix_rows: list[dict[str, Any]] = []
     prefix_score_by_id: dict[str, float] = {}
     for idx, (example, score) in enumerate(zip(eval_examples, prefix_scores, strict=True)):
+        selected_target = float(eval_cache["targets"][idx].detach().cpu().item())
         row = {
             "prefix_id": example.prefix_id,
             "sample_id": example.sample_id,
@@ -1454,8 +1544,18 @@ def _evaluate_value_head(
             # ad-hoc analysis notebooks; `predicted_value_raw` is the explicit key.
             "predicted_value": float(score),
             "predicted_value_raw": float(score),
+            "target_source": str(target_source),
+            "target_selected_value": selected_target,
             "target_success_rate": float(example.target_success_rate),
             "target_q_mean_smoothed": float(example.target_q_mean_smoothed),
+            "target_q_teacher": (
+                float(example.target_q_teacher) if example.target_q_teacher is not None else None
+            ),
+            "target_q_fused": (
+                float(example.target_q_fused) if example.target_q_fused is not None else None
+            ),
+            "target_teacher_available": bool(example.target_teacher_available),
+            "target_teacher_disagree": bool(example.target_teacher_disagree),
             "target_q_weight": float(example.target_q_weight),
             "target_parseable_rate": float(example.target_parseable_rate),
         }
@@ -1501,6 +1601,100 @@ def _evaluate_value_head(
         "posthoc_calibration": posthoc_payload,
         "corruption": corruption_metrics,
     }, prefix_rows, corruption_rows
+
+
+def _resolve_supervision_targets(
+    *,
+    examples: list[ValueSupervisionExample],
+    target_source: str,
+    missing_policy: str,
+    split_label: str,
+) -> tuple[list[float], dict[str, Any]]:
+    """Resolve per-example scalar targets according to D3 target-source policy.
+
+    中文要点
+    --------
+    - `q_mean_smoothed`: 纯 MC 标签（Phase C 基线）。
+    - `q_teacher`: 纯 teacher 标签（D1 sidecar）。
+    - `q_fused`: D2 融合标签。
+    - 对于缺失值，`fail` 会直接中止；`fallback_mc` 会回退到 MC，且统计回退比例。
+    """
+    values: list[float] = []
+    missing_prefix_ids: list[str] = []
+    fallback_count = 0
+    available_count = 0
+    teacher_available_count = 0
+    teacher_disagree_count = 0
+    for example in examples:
+        source_value: float | None
+        if target_source == "q_mean_smoothed":
+            source_value = float(example.target_q_mean_smoothed)
+            available_count += 1
+        elif target_source == "q_teacher":
+            source_value = (
+                float(example.target_q_teacher)
+                if example.target_q_teacher is not None
+                else None
+            )
+            if source_value is not None:
+                available_count += 1
+        elif target_source == "q_fused":
+            source_value = (
+                float(example.target_q_fused)
+                if example.target_q_fused is not None
+                else None
+            )
+            if source_value is not None:
+                available_count += 1
+        else:
+            raise ValueError(f"Unsupported target_source: {target_source!r}")
+
+        if bool(example.target_teacher_available):
+            teacher_available_count += 1
+        if bool(example.target_teacher_disagree):
+            teacher_disagree_count += 1
+
+        if source_value is None:
+            missing_prefix_ids.append(str(example.prefix_id))
+            if missing_policy == "fail":
+                continue
+            if missing_policy == "fallback_mc":
+                values.append(float(example.target_q_mean_smoothed))
+                fallback_count += 1
+                continue
+            raise ValueError(f"Unsupported missing policy: {missing_policy!r}")
+        values.append(float(source_value))
+
+    if missing_prefix_ids and missing_policy == "fail":
+        preview = ", ".join(missing_prefix_ids[:10])
+        raise ValueError(
+            f"Missing target source `{target_source}` in split={split_label} for "
+            f"{len(missing_prefix_ids)} examples. Example prefix_ids: {preview}"
+        )
+    total = len(examples)
+    coverage_ratio = float(available_count / total) if total else 0.0
+    stats = {
+        "split": str(split_label),
+        "target_source": str(target_source),
+        "missing_policy": str(missing_policy),
+        "num_examples": int(total),
+        "available_count": int(available_count),
+        "missing_count": int(total - available_count),
+        "coverage_ratio": float(coverage_ratio),
+        "fallback_count": int(fallback_count),
+        "fallback_ratio": (float(fallback_count / total) if total else 0.0),
+        "teacher_available_count": int(teacher_available_count),
+        "teacher_available_ratio": (
+            float(teacher_available_count / total) if total else 0.0
+        ),
+        "teacher_disagree_count": int(teacher_disagree_count),
+        "teacher_disagree_ratio": (
+            float(teacher_disagree_count / teacher_available_count)
+            if teacher_available_count > 0
+            else 0.0
+        ),
+    }
+    return values, stats
 
 
 def _compute_calibration_loss(
@@ -1700,8 +1894,10 @@ def _build_calibration_sample_weights(
         elif mode == "confidence_parseable":
             weights = (confidence * parseable_clamped).clamp(0.0, 1.0)
         elif mode == "q_weight":
+            # q_weight 来自 C1 rollout 的 CI 宽度映射（越不确定，权重越低）。
             weights = q_weight.clamp(0.0, 1.0)
         elif mode == "q_weight_parseable":
+            # 进一步叠加 parseable 约束，过滤“可解析性差 + 不确定性高”的样本。
             weights = (q_weight.clamp(0.0, 1.0) * parseable_clamped).clamp(0.0, 1.0)
         else:
             raise ValueError(f"Unsupported calibration sample weighting mode: {mode!r}")
@@ -1745,12 +1941,14 @@ def _apply_contrastive_pair_filter(
     label_z = train_cache["primary_pair_z_delta"][batch_indices]
     label_pair_weight = train_cache["primary_pair_weight"][batch_indices]
     label_pair_pass = train_cache["primary_pair_pass_gate"][batch_indices]
+    # label_quality 分支使用 C1 预先估计的 pair 质量标签，而不是训练时瞬时分数。
     label_mask = (
         (label_delta_q >= float(label_delta_q_min))
         & (label_z >= float(label_z_min))
         & (label_pair_weight >= float(label_pair_weight_min))
     )
     if require_pair_pass_gate:
+        # 额外硬约束：只允许通过 pair_pass_gate 的样本参与对比学习。
         label_mask = label_mask & label_pair_pass
 
     if pair_filter == "confidence":
@@ -1764,6 +1962,10 @@ def _apply_contrastive_pair_filter(
     elif pair_filter == "label_quality":
         extra_mask = label_mask
     elif pair_filter == "confidence_parseable_label":
+        # 三重门控：
+        # 1) clean 置信度；
+        # 2) clean parseable 率；
+        # 3) label-side pair 质量。
         extra_mask = (
             (confidence >= float(confidence_threshold))
             & (parseable >= float(parseable_threshold))
@@ -1820,6 +2022,7 @@ def _apply_contrastive_score_gap_filter(
 def _encode_example_cache(
     *,
     examples: list[ValueSupervisionExample],
+    target_values: list[float],
     backbone: Any,
     tokenizer: Any,
     torch_module: Any,
@@ -1831,6 +2034,11 @@ def _encode_example_cache(
     calibration_weight_gamma: float,
 ) -> dict[str, Any]:
     """Encode clean examples and optional primary corruptions into cached tensors."""
+    if len(target_values) != len(examples):
+        raise ValueError(
+            "target_values length must match examples length: "
+            f"{len(target_values)} vs {len(examples)}"
+        )
     clean_features = _encode_text_list_in_batches(
         texts=[example.clean_input_text() for example in examples],
         backbone=backbone,
@@ -1843,7 +2051,7 @@ def _encode_example_cache(
     )
     device = clean_features.device
     targets = torch_module.tensor(
-        [example.target_q_mean_smoothed for example in examples],
+        [float(value) for value in target_values],
         dtype=torch_module.float32,
         device=device,
     )

@@ -459,6 +459,89 @@ CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_c_score_prm_teacher.py \
 If a historical artifact directory is missing `manifest.json`, add:
 - `--allow-missing-manifest`
 
+D2 C1 teacher/MC fusion (implemented):
+- `scripts/phase_b_prepare_value_data.py` now supports teacher join + fusion,
+- writes `q_teacher`, `q_fused`, `teacher_available`, `teacher_disagree` into `rollout_targets.jsonl`,
+- writes join diagnostics under `teacher_fusion_summary` in `summary.json`.
+
+```bash
+python -u scripts/phase_b_prepare_value_data.py \
+  --input-jsonl <phase_a_prepared_jsonl> \
+  --run-name <phase_d_c1_fused_name> \
+  --build-corruptions \
+  --build-rollouts \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --batch-size 192 \
+  --rollout-count 16 \
+  --max-new-tokens 128 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --require-cuda \
+  --teacher-prefix-scores-jsonl <path_to_teacher_prefix_scores.jsonl> \
+  --teacher-fuse-mode fixed \
+  --teacher-fusion-lambda 0.5 \
+  --teacher-min-coverage 0.98
+```
+
+D3 C2 target-source switch (implemented):
+- `scripts/phase_b_train_value.py`:
+  - `--target-source {q_mean_smoothed,q_teacher,q_fused}`
+  - `--target-source-missing-policy {fail,fallback_mc}`
+- `scripts/phase_b_eval_faithfulness.py`:
+  - `--target-source from_run` to reuse training selection.
+
+```bash
+python -u scripts/phase_b_train_value.py \
+  --train-dir <phase_d_c1_train_dir_with_teacher_fields> \
+  --eval-dir <phase_d_c1_eval_dir_with_teacher_fields> \
+  --run-name phase_d_c2_fused \
+  --target-source q_fused \
+  --target-source-missing-policy fail \
+  --require-cuda \
+  --dtype bfloat16 \
+  --device-map auto
+```
+
+```bash
+python -u scripts/phase_b_eval_faithfulness.py \
+  --value-run-dir <phase_d_c2_run_dir> \
+  --eval-dir <phase_d_c1_eval_dir_with_teacher_fields> \
+  --checkpoint-name best \
+  --target-source from_run \
+  --target-source-missing-policy from_run \
+  --run-name phase_d_c2_eval
+```
+
+Phase D bundled suite (new, recommended):
+- One command runs D2 prep (train+eval) and D3 three-way ablation (`mc/teacher/fused`).
+- Consolidates all metrics in one summary table.
+
+```bash
+ACTIVE_PHASE_D_GROUP=D4_STRATEGYQA_SMOKE_3WAY \
+RUN_PREFIX=phase_d_bundle_smoke \
+TRAIN_INPUT_JSONL=<phase_a_prepared_train_jsonl> \
+EVAL_INPUT_JSONL=<phase_a_prepared_eval_jsonl> \
+TEACHER_TRAIN_SCORES=<teacher_prefix_scores_train_jsonl> \
+TEACHER_EVAL_SCORES=<teacher_prefix_scores_eval_jsonl> \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_d_teacher_suite.sh
+```
+
+Main outputs:
+1. `assets/artifacts/phase_d_logs/<RUN_PREFIX>/suite.log`
+2. `assets/artifacts/phase_d_logs/<RUN_PREFIX>/final_summary.md`
+3. auto-linked D2 dirs in `assets/artifacts/phase_c_data/...`
+4. auto-linked D3 runs in `assets/artifacts/phase_c_runs/...` and `assets/artifacts/phase_c_eval/...`
+
+Suite usage for D3 ablation (example):
+
+```bash
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_CQR_SMOKE \
+RUN_PREFIX=phase_d_fused_smoke \
+PHASE_C_TRAIN_EXTRA_ARGS="--target-source q_fused --target-source-missing-policy fail" \
+bash scripts/run_phase_c_value_suite.sh
+```
+
 Smoke training run:
 
 ```bash

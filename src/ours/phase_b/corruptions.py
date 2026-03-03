@@ -36,8 +36,12 @@ class CorruptionBuildConfig:
     """Configuration controlling how corrupted prefixes are generated."""
 
     max_corruptions_per_prefix: int = 1
+    # `legacy`: 旧版 deterministic 逻辑，通常以简单算子翻转/step_drop 为主。
+    # `cqr_balanced`: CQR 平衡策略，优先保留语义型 corruption，并限制 step_drop 占比。
     selection_policy: str = "legacy"
+    # 在 cqr_balanced 下，尽量保证每个 prefix 至少有若干“非 step_drop”样本。
     min_non_step_drop_per_prefix: int = 1
+    # 在 cqr_balanced 下，限制 step_drop 样本数，避免 fallback 主导训练信号。
     max_step_drop_per_prefix: int = 1
     enable_binary_flip: bool = True
     enable_operator_flip: bool = True
@@ -208,8 +212,9 @@ def _build_corruptions_for_prefix(
     original_last = lines[-1].strip()
     candidates: list[_MutationCandidate] = []
 
-    # 当前只改“最后一个推理步”，保持其余上下文不变，
-    # 这样 clean/corrupt 的对比更聚焦于局部推理扰动。
+    # 当前只改“最后一个推理步”，保持其余上下文不变。
+    # 这样 clean/corrupt 的差异基本只来自局部步骤，而不是整段轨迹重写。
+    # 对 C2 来说，这更接近“同一状态附近的局部偏差判别”。
     if config.selection_policy == "legacy":
         if config.enable_binary_flip:
             flipped = _flip_binary_token(original_last)
@@ -257,8 +262,8 @@ def _build_corruptions_for_prefix(
                 )
             )
     else:
-        # CQR-1: semantic operators are enabled in balanced mode. They produce
-        # higher-information corruptions than trivial step-drop fallbacks.
+        # CQR-1: 平衡模式优先启用语义扰动。
+        # 这些变体通常比 step_drop 更“高信息量”，更能触发可学习的 clean/corrupt 差异。
         if config.enable_negation_flip:
             negated = _flip_negation_polarity(original_last)
             if negated is not None:
@@ -349,8 +354,7 @@ def _build_corruptions_for_prefix(
                     priority=99,
                 )
             )
-        # CQR-2: enforce per-prefix balancing so one fallback type does not
-        # dominate supervision quality.
+        # CQR-2: 每个 prefix 内部做类型平衡，避免一个 fallback 类型吞噬全部配额。
         candidates = _select_candidates_cqr_balanced(
             candidates,
             max_corruptions_per_prefix=config.max_corruptions_per_prefix,
@@ -436,6 +440,7 @@ def _select_candidates_cqr_balanced(
 
     selected: list[_MutationCandidate] = []
     if non_step:
+        # 先满足“至少保留若干非 step_drop 变体”的硬约束。
         min_non = min(max(min_non_step_drop_per_prefix, 1), len(non_step), max_corruptions_per_prefix)
         selected.extend(
             _round_robin_select_by_type(
@@ -449,6 +454,7 @@ def _select_candidates_cqr_balanced(
             if item not in selected
         ]
         slots_after_min = max_corruptions_per_prefix - len(selected)
+        # 先预留一部分 step_drop 槽位，再把剩余槽位给非 step_drop，保持两者共存。
         reserve_step = min(max_step_drop_per_prefix, len(step_drop), max(slots_after_min, 0))
         extra_non_limit = max(slots_after_min - reserve_step, 0)
         if extra_non_limit > 0:
@@ -564,6 +570,7 @@ def _perturb_first_number(text: str) -> str | None:
 
 def _flip_negation_polarity(text: str) -> str | None:
     """Flip simple polarity by removing/adding one local negation marker."""
+    # 规则 1：若存在 "aux + not"（如 is not），优先移除 not。
     remove_pattern = re.compile(
         r"\b(is|are|was|were|can|could|should|would|do|does|did|has|have|had)\s+not\b",
         flags=re.IGNORECASE,
@@ -573,6 +580,7 @@ def _flip_negation_polarity(text: str) -> str | None:
         aux = match.group(1)
         return text[: match.start()] + aux + text[match.end() :]
 
+    # 规则 2：否则尝试在首个助动词后插入 not。
     add_pattern = re.compile(
         r"\b(is|are|was|were|can|could|should|would|do|does|did|has|have|had)\b",
         flags=re.IGNORECASE,
@@ -610,6 +618,7 @@ def _flip_comparator(text: str) -> str | None:
 
 def _reverse_condition_clause(text: str) -> str | None:
     """Reverse a local condition by toggling `if not` around the condition head."""
+    # 只处理显式 if 子句，避免在无条件句上制造无意义扰动。
     pattern = re.compile(r"\bif\s+", flags=re.IGNORECASE)
     match = pattern.search(text)
     if not match:

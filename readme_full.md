@@ -964,6 +964,178 @@ Contract notes:
    - `--allow-missing-manifest`
    This keeps scoring usable while marking lineage as partial in `teacher_summary.json`.
 
+### D2: C1 Teacher/MC Fusion (Now Implemented)
+
+`scripts/phase_b_prepare_value_data.py` now supports D2 fields directly in
+`rollout_targets.jsonl`:
+1. `q_teacher`
+2. `q_fused`
+3. `teacher_available`
+4. `teacher_disagree`
+5. `teacher_model_id`
+
+Join/fusion controls:
+1. `--teacher-prefix-scores-jsonl`
+2. `--teacher-fuse-mode {none,fixed,confidence}`
+3. `--teacher-fusion-lambda`
+4. `--teacher-confidence-ci-ref`
+5. `--teacher-disagree-threshold`
+6. `--teacher-min-coverage`
+
+Hard checks in D2 join:
+1. duplicate `prefix_id` in teacher score file -> fail,
+2. coverage below `--teacher-min-coverage` -> fail.
+
+Example (fixed fusion):
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_b_prepare_value_data.py \
+  --input-jsonl assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl \
+  --run-name phase_d_c1_train_fused \
+  --build-corruptions \
+  --build-rollouts \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --batch-size 192 \
+  --rollout-count 16 \
+  --max-new-tokens 128 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --require-cuda \
+  --teacher-prefix-scores-jsonl assets/artifacts/phase_c_data/strategyqa/<c1_train_dir>/teacher_prefix_scores.jsonl \
+  --teacher-fuse-mode fixed \
+  --teacher-fusion-lambda 0.5 \
+  --teacher-min-coverage 0.98
+```
+
+Example (confidence fusion):
+
+```bash
+CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_b_prepare_value_data.py \
+  --input-jsonl assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/validation.jsonl \
+  --run-name phase_d_c1_eval_fused \
+  --build-corruptions \
+  --build-rollouts \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --batch-size 192 \
+  --rollout-count 16 \
+  --max-new-tokens 128 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --require-cuda \
+  --teacher-prefix-scores-jsonl assets/artifacts/phase_c_data/strategyqa/<c1_eval_dir>/teacher_prefix_scores.jsonl \
+  --teacher-fuse-mode confidence \
+  --teacher-confidence-ci-ref 0.30 \
+  --teacher-disagree-threshold 0.25 \
+  --teacher-min-coverage 0.98
+```
+
+### D3: C2 Target-Source Switch (Now Implemented)
+
+`scripts/phase_b_train_value.py` now supports:
+1. `--target-source {q_mean_smoothed,q_teacher,q_fused}`
+2. `--target-source-missing-policy {fail,fallback_mc}`
+
+`scripts/phase_b_eval_faithfulness.py` now supports:
+1. `--target-source {from_run,q_mean_smoothed,q_teacher,q_fused}`
+2. `--target-source-missing-policy {from_run,fail,fallback_mc}`
+
+Train on fused targets:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 python -u scripts/phase_b_train_value.py \
+  --train-dir assets/artifacts/phase_c_data/strategyqa/<phase_d_c1_train_fused_dir> \
+  --eval-dir assets/artifacts/phase_c_data/strategyqa/<phase_d_c1_eval_fused_dir> \
+  --run-name phase_d_c2_fused \
+  --target-source q_fused \
+  --target-source-missing-policy fail \
+  --require-cuda \
+  --dtype bfloat16 \
+  --device-map auto \
+  --per-device-train-batch-size 192 \
+  --per-device-eval-batch-size 192
+```
+
+Standalone eval with run-aligned target source:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -u scripts/phase_b_eval_faithfulness.py \
+  --value-run-dir assets/artifacts/phase_c_runs/<phase_d_c2_fused_run_dir> \
+  --eval-dir assets/artifacts/phase_c_data/strategyqa/<phase_d_c1_eval_fused_dir> \
+  --checkpoint-name best \
+  --target-source from_run \
+  --target-source-missing-policy from_run \
+  --run-name phase_d_c2_fused_eval
+```
+
+### D3 via Lifecycle Suite (Recommended)
+
+Use existing C2 groups and override only target source:
+
+```bash
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_CQR_SMOKE \
+RUN_PREFIX=phase_d_ablate_mc \
+PHASE_C_TRAIN_EXTRA_ARGS="--target-source q_mean_smoothed --target-source-missing-policy fail" \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_c_value_suite.sh
+
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_CQR_SMOKE \
+RUN_PREFIX=phase_d_ablate_teacher \
+PHASE_C_TRAIN_EXTRA_ARGS="--target-source q_teacher --target-source-missing-policy fail" \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_c_value_suite.sh
+
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_CQR_SMOKE \
+RUN_PREFIX=phase_d_ablate_fused \
+PHASE_C_TRAIN_EXTRA_ARGS="--target-source q_fused --target-source-missing-policy fail" \
+CUDA_VISIBLE_DEVICES=3 \
+bash scripts/run_phase_c_value_suite.sh
+```
+
+### D4: Bundled D2+D3 Teacher Suite (New)
+
+New orchestration script:
+- `scripts/run_phase_d_teacher_suite.sh`
+
+Why use it:
+1. Runs D2 C1 prep (`train` + `eval`) once with teacher fusion enabled.
+2. Runs D3 C2 ablation in one bundle:
+   - `q_mean_smoothed` (label `mc`)
+   - `q_teacher` (label `teacher`)
+   - `q_fused` (label `fused`)
+3. Writes one consolidated markdown table for fast comparison.
+
+Exact reproducible command (current private setup):
+
+```bash
+ACTIVE_PHASE_D_GROUP=D4_STRATEGYQA_SMOKE_3WAY \
+RUN_PREFIX=phase_d_bundle_smoke \
+TRAIN_INPUT_JSONL=assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl \
+EVAL_INPUT_JSONL=assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/validation.jsonl \
+TEACHER_TRAIN_SCORES=assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_full_mcorr4_c2_strategyqa_quality_first_full_c1_train__b7a8789f1974/teacher_prefix_scores.jsonl \
+TEACHER_EVAL_SCORES=assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_c2_strategyqa_quality_first_c1_eval__f608255f810d/teacher_prefix_scores.jsonl \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_d_teacher_suite.sh
+```
+
+Optional speed knobs:
+1. `TRAIN_MAX_SAMPLES=256`
+2. `EVAL_MAX_SAMPLES=128`
+3. `ROLLOUT_BATCH_SIZE=192`
+4. `C2_TRAIN_BATCH_SIZE=192`
+5. `C2_EVAL_BATCH_SIZE=192`
+
+Where to read results:
+1. `assets/artifacts/phase_d_logs/<RUN_PREFIX>/suite.log`
+2. `assets/artifacts/phase_d_logs/<RUN_PREFIX>/final_summary.md`
+3. C2 run dirs are listed per row in `final_summary.md`.
+
+Summary table columns:
+1. `label`, `target_source`
+2. calibration: `brier`, `pearson`, `posthoc_brier`
+3. corruption ordering: `pair_acc`, `auc`
+4. D2 join quality: `target_cov`, `teacher_dis`
+5. traceability: `c2_train_dir`, `c2_eval_dir`
+
 ## Phase A Retrospective (Before You Start Phase B)
 
 Treat these as operational lessons from the full Phase A cycle:
