@@ -292,6 +292,38 @@ Runtime note:
   (`cache_train_clean`, `cache_eval_clean`, `cache_eval_corruptions`) so long
   cache phases are visible without excessive log noise.
 
+### C1 quality-first fixes (new, high ROI)
+
+Two data-quality fixes are now implemented for Phase C and integrated into
+quality-first suite groups:
+
+1. Primary corruption selection by quality (not ID order)
+- implemented in `src/ours/phase_b/value_data.py`
+- when `pair_quality.jsonl` exists, primary corruption is selected by:
+  - `pair_pass_gate` first
+  - higher `pair_weight`
+  - larger `delta_q`
+  - larger `z_delta`
+- deterministic ID ordering is only a final tie-breaker
+
+2. Two-stage rollout enrichment for uncertain prefixes
+- implemented in `scripts/phase_b_prepare_value_data.py`
+- stage-1: all prefixes at `K = rollout_stage1_count`
+- stage-2: only uncertain prefixes are topped up to `K = rollout_stage2_count`
+- uncertainty condition:
+  - `|q_mean_smoothed - 0.5| < rollout_uncertain_band`
+  - or `q_ci_width >= rollout_uncertain_ci_width`
+
+New C1 CLI switches:
+- `--rollout-two-stage`
+- `--rollout-stage1-count`
+- `--rollout-stage2-count`
+- `--rollout-uncertain-band`
+- `--rollout-uncertain-ci-width`
+
+The suite groups `C2_STRATEGYQA_QUALITY_FIRST` and
+`C2_STRATEGYQA_QUALITY_FIRST_FULL` now enable this two-stage policy by default.
+
 ### C2 standalone evaluation command
 
 ```bash
@@ -429,6 +461,9 @@ Useful overrides:
 - `C1_PREP_EXTRA_ARGS_DEFAULT`
 - `C2_TRAIN_EXTRA_ARGS_DEFAULT`, `C2_EVAL_EXTRA_ARGS_DEFAULT`
 - `PHASE_C_PREP_EXTRA_ARGS`, `PHASE_C_TRAIN_EXTRA_ARGS`, `PHASE_C_EVAL_EXTRA_ARGS`
+- two-stage rollout overrides (via `PHASE_C_PREP_EXTRA_ARGS`):
+  - `--rollout-two-stage --rollout-stage1-count 8 --rollout-stage2-count 24`
+  - `--rollout-uncertain-band 0.2 --rollout-uncertain-ci-width 0.3`
 
 ### C2 outputs
 

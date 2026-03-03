@@ -110,6 +110,11 @@ class RolloutConfig:
     require_cuda: bool
     oom_backoff: bool
     log_every: int
+    rollout_two_stage: bool = False
+    rollout_stage1_count: int = 8
+    rollout_stage2_count: int = 24
+    rollout_uncertain_band: float = 0.2
+    rollout_uncertain_ci_width: float = 0.3
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable payload for manifests."""
@@ -277,6 +282,48 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Effective rollout generation batch size (sampled continuations per call).",
     )
     parser.add_argument("--rollout-count", type=int, default=4)
+    parser.add_argument(
+        "--rollout-two-stage",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Enable two-stage rollout enrichment: stage-1 on all prefixes, "
+            "then stage-2 top-up on uncertain prefixes only."
+        ),
+    )
+    parser.add_argument(
+        "--rollout-stage1-count",
+        type=int,
+        default=8,
+        help="Stage-1 rollout count per prefix when --rollout-two-stage is enabled.",
+    )
+    parser.add_argument(
+        "--rollout-stage2-count",
+        type=int,
+        default=24,
+        help=(
+            "Target rollout count per uncertain prefix in stage-2. "
+            "Must be >= --rollout-stage1-count."
+        ),
+    )
+    parser.add_argument(
+        "--rollout-uncertain-band",
+        type=float,
+        default=0.2,
+        help=(
+            "Uncertainty band around 0.5 used for stage-2 selection: "
+            "|q-0.5| < band."
+        ),
+    )
+    parser.add_argument(
+        "--rollout-uncertain-ci-width",
+        type=float,
+        default=0.3,
+        help=(
+            "CI-width threshold used for stage-2 selection: "
+            "q_ci_width >= threshold."
+        ),
+    )
     parser.add_argument("--max-new-tokens", type=int, default=96)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.95)
@@ -394,6 +441,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--batch-size must be > 0")
     if args.rollout_count <= 0:
         raise ValueError("--rollout-count must be > 0")
+    if args.rollout_stage1_count <= 0:
+        raise ValueError("--rollout-stage1-count must be > 0")
+    if args.rollout_stage2_count <= 0:
+        raise ValueError("--rollout-stage2-count must be > 0")
+    if args.rollout_stage2_count < args.rollout_stage1_count:
+        raise ValueError("--rollout-stage2-count must be >= --rollout-stage1-count")
+    if not (0.0 < args.rollout_uncertain_band < 0.5):
+        raise ValueError("--rollout-uncertain-band must be in (0, 0.5)")
+    if not (0.0 <= args.rollout_uncertain_ci_width <= 1.0):
+        raise ValueError("--rollout-uncertain-ci-width must be in [0, 1]")
     if args.pair_rollout_count < 0:
         raise ValueError("--pair-rollout-count must be >= 0")
     if args.max_new_tokens <= 0:
@@ -459,11 +516,16 @@ def main(argv: list[str] | None = None) -> int:
 
     rollout_config = None
     if args.build_rollouts:
+        effective_rollout_count = (
+            int(args.rollout_stage2_count)
+            if bool(args.rollout_two_stage)
+            else int(args.rollout_count)
+        )
         rollout_config = RolloutConfig(
             model_path=str(args.model_path),
             adapter_path=(str(args.adapter_path) if args.adapter_path is not None else None),
             batch_size=int(args.batch_size),
-            rollout_count=int(args.rollout_count),
+            rollout_count=effective_rollout_count,
             max_new_tokens=int(args.max_new_tokens),
             temperature=float(args.temperature),
             top_p=float(args.top_p),
@@ -475,6 +537,11 @@ def main(argv: list[str] | None = None) -> int:
             require_cuda=bool(args.require_cuda),
             oom_backoff=bool(args.oom_backoff),
             log_every=int(args.log_every),
+            rollout_two_stage=bool(args.rollout_two_stage),
+            rollout_stage1_count=int(args.rollout_stage1_count),
+            rollout_stage2_count=int(args.rollout_stage2_count),
+            rollout_uncertain_band=float(args.rollout_uncertain_band),
+            rollout_uncertain_ci_width=float(args.rollout_uncertain_ci_width),
         )
 
     run_spec = {
@@ -543,6 +610,14 @@ def main(argv: list[str] | None = None) -> int:
             f"k={rollout_config.rollout_count} batch={rollout_config.batch_size} "
             f"tok={rollout_config.max_new_tokens} sample={rollout_config.do_sample}"
         )
+        if rollout_config.rollout_two_stage:
+            print(
+                "rollout_2stage  : "
+                f"s1={rollout_config.rollout_stage1_count} "
+                f"s2={rollout_config.rollout_stage2_count} "
+                f"band={rollout_config.rollout_uncertain_band:.3f} "
+                f"ciw>={rollout_config.rollout_uncertain_ci_width:.3f}"
+            )
     print("=" * 88)
 
     step_sequences: list[StepSequence] = []
@@ -594,19 +669,41 @@ def main(argv: list[str] | None = None) -> int:
     pair_quality_records: list[PairQualityRecord] = []
     rollout_runtime: dict[str, Any] | None = None
     if args.build_rollouts:
-        rollout_predictions, rollout_targets, rollout_runtime = _build_rollout_targets(
-            prefixes=prefixes,
-            config=rollout_config,
-            target_quality_config=target_quality_config,
+        can_reuse_clean_rollouts = (
+            bool(args.resume)
+            and not bool(args.overwrite)
+            and rollout_pred_path.exists()
+            and rollout_target_path.exists()
         )
-        _write_jsonl(
-            rollout_pred_path,
-            (record.to_dict() for record in rollout_predictions),
-        )
-        _write_jsonl(
-            rollout_target_path,
-            (record.to_dict() for record in rollout_targets),
-        )
+        if can_reuse_clean_rollouts:
+            print(
+                "rollouts        : reusing existing clean rollout artifacts "
+                f"from {rollout_pred_path.name} and {rollout_target_path.name}",
+                flush=True,
+            )
+            rollout_predictions = _load_rollout_prediction_records(rollout_pred_path)
+            rollout_targets = _load_rollout_target_records(rollout_target_path)
+            rollout_runtime = {
+                "elapsed_seconds": 0.0,
+                "samples_per_second": 0.0,
+                "oom_backoff_events": 0,
+                "reused_existing": True,
+                "k_rollouts": int(rollout_config.rollout_count),
+            }
+        else:
+            rollout_predictions, rollout_targets, rollout_runtime = _build_rollout_targets(
+                prefixes=prefixes,
+                config=rollout_config,
+                target_quality_config=target_quality_config,
+            )
+            _write_jsonl(
+                rollout_pred_path,
+                (record.to_dict() for record in rollout_predictions),
+            )
+            _write_jsonl(
+                rollout_target_path,
+                (record.to_dict() for record in rollout_targets),
+            )
         if args.build_pair_quality:
             if corruption_artifacts:
                 (
@@ -784,16 +881,157 @@ def _build_rollout_targets(
         model = _attach_peft_adapter_for_inference(model, Path(config.adapter_path))
     model.eval()
 
-    jobs: list[tuple[PrefixArtifact, int]] = []
-    for prefix in prefixes:
-        prefix.validate()
-        for rollout_index in range(config.rollout_count):
-            jobs.append((prefix, rollout_index))
-
     predictions: list[RolloutPredictionRecord] = []
     start_ts = time.perf_counter()
     oom_backoff_events = 0
+    total_jobs = 0
+    stage1_predictions: list[RolloutPredictionRecord] = []
+    stage2_predictions: list[RolloutPredictionRecord] = []
+
+    if not config.rollout_two_stage:
+        jobs = _build_rollout_jobs(
+            prefixes=prefixes,
+            rollout_start_index=0,
+            rollout_count=config.rollout_count,
+        )
+        total_jobs = len(jobs)
+        stage1_predictions, local_oom = _generate_rollout_predictions_for_jobs(
+            jobs=jobs,
+            model=model,
+            tokenizer=tokenizer,
+            config=config,
+            torch_module=torch,
+            progress_label="rollouts",
+        )
+        oom_backoff_events += local_oom
+        predictions.extend(stage1_predictions)
+    else:
+        stage1_count = int(config.rollout_stage1_count)
+        stage2_count = int(config.rollout_stage2_count)
+        stage1_jobs = _build_rollout_jobs(
+            prefixes=prefixes,
+            rollout_start_index=0,
+            rollout_count=stage1_count,
+        )
+        total_jobs += len(stage1_jobs)
+        stage1_predictions, local_oom = _generate_rollout_predictions_for_jobs(
+            jobs=stage1_jobs,
+            model=model,
+            tokenizer=tokenizer,
+            config=config,
+            torch_module=torch,
+            progress_label="rollouts(s1)",
+        )
+        oom_backoff_events += local_oom
+        predictions.extend(stage1_predictions)
+
+        stage1_targets = _aggregate_rollout_targets(
+            stage1_predictions,
+            target_quality_config=target_quality_config,
+        )
+        uncertain_prefix_ids = _select_uncertain_prefix_ids(
+            targets=stage1_targets,
+            band=float(config.rollout_uncertain_band),
+            ci_width_threshold=float(config.rollout_uncertain_ci_width),
+        )
+        stage2_extra = max(stage2_count - stage1_count, 0)
+        if stage2_extra > 0 and uncertain_prefix_ids:
+            prefix_map = {prefix.prefix_id: prefix for prefix in prefixes}
+            uncertain_prefixes = [
+                prefix_map[prefix_id]
+                for prefix_id in sorted(uncertain_prefix_ids)
+                if prefix_id in prefix_map
+            ]
+            stage2_jobs = _build_rollout_jobs(
+                prefixes=uncertain_prefixes,
+                rollout_start_index=stage1_count,
+                rollout_count=stage2_extra,
+            )
+            total_jobs += len(stage2_jobs)
+            stage2_predictions, local_oom_stage2 = _generate_rollout_predictions_for_jobs(
+                jobs=stage2_jobs,
+                model=model,
+                tokenizer=tokenizer,
+                config=config,
+                torch_module=torch,
+                progress_label="rollouts(s2)",
+            )
+            oom_backoff_events += local_oom_stage2
+            predictions.extend(stage2_predictions)
+
+    targets = _aggregate_rollout_targets(predictions, target_quality_config=target_quality_config)
+    elapsed = max(time.perf_counter() - start_ts, 1e-6)
+    runtime_summary = {
+        "elapsed_seconds": float(elapsed),
+        "samples_per_second": float(len(predictions) / elapsed if predictions else 0.0),
+        "oom_backoff_events": int(oom_backoff_events),
+        "k_rollouts": int(config.rollout_count),
+        "two_stage_enabled": bool(config.rollout_two_stage),
+        "stage1_predictions": int(len(stage1_predictions)),
+        "stage2_predictions": int(len(stage2_predictions)),
+        "total_jobs": int(total_jobs if total_jobs > 0 else len(predictions)),
+        "uncertain_prefixes": (
+            int(len({p.prefix_id for p in stage2_predictions}))
+            if config.rollout_two_stage
+            else 0
+        ),
+    }
+    return predictions, targets, runtime_summary
+
+
+def _build_rollout_jobs(
+    *,
+    prefixes: list[PrefixArtifact],
+    rollout_start_index: int,
+    rollout_count: int,
+) -> list[tuple[PrefixArtifact, int]]:
+    """Create rollout jobs for each prefix with explicit rollout indices."""
+    jobs: list[tuple[PrefixArtifact, int]] = []
+    for prefix in prefixes:
+        prefix.validate()
+        for offset in range(int(rollout_count)):
+            jobs.append((prefix, int(rollout_start_index + offset)))
+    return jobs
+
+
+def _select_uncertain_prefix_ids(
+    *,
+    targets: list[RolloutTargetRecord],
+    band: float,
+    ci_width_threshold: float,
+) -> set[str]:
+    """Return prefix IDs selected for stage-2 uncertainty top-up.
+
+    Selection rule:
+    - near-uncertain probability: |q - 0.5| < band
+    - or high uncertainty interval: q_ci_width >= ci_width_threshold
+    """
+    selected: set[str] = set()
+    for target in targets:
+        q = float(target.q_mean_smoothed)
+        near_uncertain = abs(q - 0.5) < float(band)
+        ci_uncertain = float(target.q_ci_width) >= float(ci_width_threshold)
+        if near_uncertain or ci_uncertain:
+            selected.add(str(target.prefix_id))
+    return selected
+
+
+def _generate_rollout_predictions_for_jobs(
+    *,
+    jobs: list[tuple[PrefixArtifact, int]],
+    model: Any,
+    tokenizer: Any,
+    config: RolloutConfig,
+    torch_module: Any,
+    progress_label: str,
+) -> tuple[list[RolloutPredictionRecord], int]:
+    """Generate rollout predictions for one explicit job list."""
+    if not jobs:
+        return [], 0
+    predictions: list[RolloutPredictionRecord] = []
+    oom_backoff_events = 0
     done = 0
+    stage_start = time.perf_counter()
 
     for batch_start in range(0, len(jobs), config.batch_size):
         batch = jobs[batch_start : batch_start + config.batch_size]
@@ -808,26 +1046,27 @@ def _build_rollout_targets(
             top_p=config.top_p,
             top_k=config.top_k,
             oom_backoff=config.oom_backoff,
-            torch_module=torch,
+            torch_module=torch_module,
         )
         oom_backoff_events += local_oom_events
 
         for (prefix, rollout_index), continuation in zip(batch, continuations, strict=True):
             full_prediction = f"{prefix.prefix_target_text}{continuation}"
-            record = PredictionRecord(
-                sample_id=prefix.sample_id,
-                dataset=prefix.dataset,
-                split=prefix.split,
-                raw_prediction=full_prediction,
-                gold_answer=prefix.gold_answer,
-                question=prefix.question,
-                metadata={
-                    "prefix_id": prefix.prefix_id,
-                    "rollout_index": int(rollout_index),
-                    "prefix_step_index": int(prefix.prefix_step_index),
-                },
+            scored = score_prediction(
+                PredictionRecord(
+                    sample_id=prefix.sample_id,
+                    dataset=prefix.dataset,
+                    split=prefix.split,
+                    raw_prediction=full_prediction,
+                    gold_answer=prefix.gold_answer,
+                    question=prefix.question,
+                    metadata={
+                        "prefix_id": prefix.prefix_id,
+                        "rollout_index": int(rollout_index),
+                        "prefix_step_index": int(prefix.prefix_step_index),
+                    },
+                )
             )
-            scored = score_prediction(record)
             prediction = RolloutPredictionRecord(
                 prefix_id=prefix.prefix_id,
                 sample_id=prefix.sample_id,
@@ -852,27 +1091,15 @@ def _build_rollout_targets(
             done += 1
 
         if config.log_every > 0 and (done % config.log_every == 0 or done == len(jobs)):
-            elapsed = max(time.perf_counter() - start_ts, 1e-6)
+            elapsed = max(time.perf_counter() - stage_start, 1e-6)
             rate = done / elapsed
             print(
-                "rollouts        : "
+                f"{progress_label:16s}: "
                 f"{done}/{len(jobs)} ({done / max(len(jobs), 1):.1%}) | "
                 f"elapsed={elapsed:.1f}s | rate={rate:.3f} sample/s",
                 flush=True,
             )
-
-    targets = _aggregate_rollout_targets(
-        predictions,
-        target_quality_config=target_quality_config,
-    )
-    elapsed = max(time.perf_counter() - start_ts, 1e-6)
-    runtime_summary = {
-        "elapsed_seconds": float(elapsed),
-        "samples_per_second": float(len(jobs) / elapsed if jobs else 0.0),
-        "oom_backoff_events": int(oom_backoff_events),
-        "k_rollouts": int(config.rollout_count),
-    }
-    return predictions, targets, runtime_summary
+    return predictions, int(oom_backoff_events)
 
 
 def _aggregate_rollout_targets(
@@ -1405,11 +1632,57 @@ def _stable_hash_json(payload: dict[str, Any]) -> str:
     return hashlib.sha256(stable.encode("utf-8")).hexdigest()[:12]
 
 
+def _stable_hash(*parts: str) -> str:
+    """Hash one ordered sequence of string parts deterministically.
+
+    This helper is used for local IDs that are not naturally JSON objects.
+    Parts are joined with a non-printable separator to avoid accidental
+    collisions from simple concatenation.
+    """
+    payload = "\x1f".join(str(part) for part in parts)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     """Write one iterable of dictionaries as UTF-8 JSONL."""
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Read one UTF-8 JSONL file into a list of dictionaries."""
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_no, raw_line in enumerate(handle, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            payload = json.loads(line)
+            if not isinstance(payload, dict):
+                raise TypeError(f"Expected JSON object in {path} at line {line_no}")
+            rows.append(payload)
+    return rows
+
+
+def _load_rollout_prediction_records(path: Path) -> list[RolloutPredictionRecord]:
+    """Load validated rollout-prediction records from a JSONL file."""
+    records: list[RolloutPredictionRecord] = []
+    for row in _read_jsonl(path):
+        record = RolloutPredictionRecord(**row)
+        record.validate()
+        records.append(record)
+    return records
+
+
+def _load_rollout_target_records(path: Path) -> list[RolloutTargetRecord]:
+    """Load validated rollout-target records from a JSONL file."""
+    records: list[RolloutTargetRecord] = []
+    for row in _read_jsonl(path):
+        record = RolloutTargetRecord(**row)
+        record.validate()
+        records.append(record)
+    return records
 
 
 def _expected_output_files(

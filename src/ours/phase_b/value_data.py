@@ -334,15 +334,18 @@ def load_value_supervision_examples(
 
     prefixes = {row["prefix_id"]: row for row in _read_jsonl(prefix_path)}
     rollout_targets = {row["prefix_id"]: row for row in _read_jsonl(rollout_target_path)}
-    primary_corruptions = (
-        _build_primary_corruption_map(_read_jsonl(corruption_path))
-        if corruption_path.exists()
-        else {}
-    )
     pair_quality_by_corruption, pair_quality_by_prefix = (
         _build_pair_quality_maps(_read_jsonl(pair_quality_path))
         if pair_quality_path.exists()
         else ({}, {})
+    )
+    primary_corruptions = (
+        _build_primary_corruption_map(
+            _read_jsonl(corruption_path),
+            pair_quality_by_corruption=pair_quality_by_corruption,
+        )
+        if corruption_path.exists()
+        else {}
     )
 
     examples: list[ValueSupervisionExample] = []
@@ -469,20 +472,74 @@ def load_corruption_variants(
     return variants, manifest
 
 
-def _build_primary_corruption_map(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def _build_primary_corruption_map(
+    rows: list[dict[str, Any]],
+    *,
+    pair_quality_by_corruption: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Pick one deterministic corruption per clean prefix.
 
-    Current policy: choose the lexicographically smallest `corruption_id` per
-    clean prefix. This makes training reproducible even if later generators emit
-    multiple variants per prefix.
+    Policy:
+    1. If pair-quality artifacts are available, pick the best-quality variant
+       per prefix (pass-gate first, then highest pair_weight, then largest
+       delta_q/z_delta).
+    2. If no pair-quality info exists for that prefix, fall back to the
+       lexicographically smallest `corruption_id` for deterministic behavior.
     """
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         grouped.setdefault(str(row["clean_prefix_id"]), []).append(row)
+
+    pair_quality_by_corruption = pair_quality_by_corruption or {}
+
     resolved: dict[str, dict[str, Any]] = {}
     for prefix_id, variants in grouped.items():
-        resolved[prefix_id] = sorted(variants, key=lambda item: str(item["corruption_id"]))[0]
+        if pair_quality_by_corruption:
+            ranked = sorted(
+                variants,
+                key=lambda item: _primary_corruption_sort_key(
+                    item=item,
+                    pair_quality_by_corruption=pair_quality_by_corruption,
+                ),
+            )
+            resolved[prefix_id] = ranked[0]
+        else:
+            resolved[prefix_id] = sorted(
+                variants, key=lambda item: str(item["corruption_id"])
+            )[0]
     return resolved
+
+
+def _primary_corruption_sort_key(
+    *,
+    item: dict[str, Any],
+    pair_quality_by_corruption: dict[str, dict[str, Any]],
+) -> tuple[int, float, float, float, str]:
+    """Build a deterministic quality-aware sort key for primary corruption selection.
+
+    Sorting order (ascending key, so negated for larger-is-better terms):
+    1. prefer pair_pass_gate=True
+    2. prefer larger pair_weight
+    3. prefer larger delta_q
+    4. prefer larger z_delta
+    5. deterministic fallback on corruption_id
+    """
+    corruption_id = str(item.get("corruption_id", ""))
+    pair = pair_quality_by_corruption.get(corruption_id)
+    if pair is None:
+        # Unknown quality -> lowest priority, keep deterministic by id.
+        return (1, 0.0, 0.0, 0.0, corruption_id)
+    pair_pass_gate = bool(pair.get("metadata", {}).get("pair_pass_gate", False))
+    pair_weight = float(pair.get("pair_weight", 0.0))
+    delta_q = float(pair.get("delta_q", 0.0))
+    z_delta = float(pair.get("z_delta", 0.0))
+    return (
+        0 if pair_pass_gate else 1,
+        -pair_weight,
+        -delta_q,
+        -z_delta,
+        corruption_id,
+    )
 
 
 def _build_pair_quality_maps(

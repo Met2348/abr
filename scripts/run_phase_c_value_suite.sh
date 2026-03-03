@@ -439,7 +439,7 @@ resolve_group() {
       C2_LR="${C2_LR:-1e-4}"
       C2_EPOCHS="${C2_EPOCHS:-10}"
       C2_USE_CONTRASTIVE="${C2_USE_CONTRASTIVE:-1}"
-      C1_PREP_EXTRA_ARGS_DEFAULT="${C1_PREP_EXTRA_ARGS_DEFAULT:---build-pair-quality --pair-rollout-count 16 --target-alpha 1.0 --target-beta 1.0 --target-ci-z 1.96 --target-weight-floor 0.1 --target-weight-gamma 1.0 --pair-delta-q-min 0.1 --pair-z-min 0.5}"
+      C1_PREP_EXTRA_ARGS_DEFAULT="${C1_PREP_EXTRA_ARGS_DEFAULT:---build-pair-quality --pair-rollout-count 16 --target-alpha 1.0 --target-beta 1.0 --target-ci-z 1.96 --target-weight-floor 0.1 --target-weight-gamma 1.0 --pair-delta-q-min 0.1 --pair-z-min 0.5 --rollout-two-stage --rollout-stage1-count 8 --rollout-stage2-count 24 --rollout-uncertain-band 0.2 --rollout-uncertain-ci-width 0.3}"
       C2_TRAIN_EXTRA_ARGS_DEFAULT="${C2_TRAIN_EXTRA_ARGS_DEFAULT:---calibration-loss bce_mse --calibration-bce-weight 1.0 --calibration-mse-weight 0.5 --calibration-sample-weighting q_weight_parseable --calibration-weight-floor 0.1 --calibration-weight-gamma 1.0 --lambda-contrastive 0.08 --contrastive-margin 0.02 --contrastive-pair-filter confidence_parseable_label --contrastive-confidence-threshold 0.2 --contrastive-parseable-threshold 0.75 --contrastive-label-delta-q-min 0.1 --contrastive-label-z-min 0.5 --contrastive-label-pair-weight-min 0.3 --contrastive-require-pair-pass-gate --contrastive-use-pair-weights --posthoc-calibration temperature --checkpoint-selection-metric posthoc_brier}"
       C2_EVAL_EXTRA_ARGS_DEFAULT="${C2_EVAL_EXTRA_ARGS_DEFAULT:---posthoc-calibration from_run}"
       ;;
@@ -461,7 +461,7 @@ resolve_group() {
       C2_LR="${C2_LR:-1e-4}"
       C2_EPOCHS="${C2_EPOCHS:-10}"
       C2_USE_CONTRASTIVE="${C2_USE_CONTRASTIVE:-1}"
-      C1_PREP_EXTRA_ARGS_DEFAULT="${C1_PREP_EXTRA_ARGS_DEFAULT:---build-pair-quality --pair-rollout-count 16 --target-alpha 1.0 --target-beta 1.0 --target-ci-z 1.96 --target-weight-floor 0.1 --target-weight-gamma 1.0 --pair-delta-q-min 0.1 --pair-z-min 0.5}"
+      C1_PREP_EXTRA_ARGS_DEFAULT="${C1_PREP_EXTRA_ARGS_DEFAULT:---build-pair-quality --pair-rollout-count 16 --target-alpha 1.0 --target-beta 1.0 --target-ci-z 1.96 --target-weight-floor 0.1 --target-weight-gamma 1.0 --pair-delta-q-min 0.1 --pair-z-min 0.5 --rollout-two-stage --rollout-stage1-count 8 --rollout-stage2-count 24 --rollout-uncertain-band 0.2 --rollout-uncertain-ci-width 0.3}"
       C2_TRAIN_EXTRA_ARGS_DEFAULT="${C2_TRAIN_EXTRA_ARGS_DEFAULT:---calibration-loss bce_mse --calibration-bce-weight 1.0 --calibration-mse-weight 0.5 --calibration-sample-weighting q_weight_parseable --calibration-weight-floor 0.1 --calibration-weight-gamma 1.0 --lambda-contrastive 0.08 --contrastive-margin 0.02 --contrastive-pair-filter confidence_parseable_label --contrastive-confidence-threshold 0.2 --contrastive-parseable-threshold 0.75 --contrastive-label-delta-q-min 0.1 --contrastive-label-z-min 0.5 --contrastive-label-pair-weight-min 0.3 --contrastive-require-pair-pass-gate --contrastive-use-pair-weights --posthoc-calibration temperature --checkpoint-selection-metric posthoc_brier}"
       C2_EVAL_EXTRA_ARGS_DEFAULT="${C2_EVAL_EXTRA_ARGS_DEFAULT:---posthoc-calibration from_run}"
       ;;

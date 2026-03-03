@@ -16,6 +16,7 @@ from ours.phase_b.corruptions import (
 )
 from ours.phase_b.value_targets import (
     PrefixBuildConfig,
+    RolloutTargetRecord,
     build_prefix_artifacts,
     build_step_sequence_from_phase_b_row,
 )
@@ -204,3 +205,74 @@ def test_rollout_config_to_dict_is_json_serializable() -> None:
     payload = config.to_dict()
     assert payload["model_path"] == "assets/models/Qwen2.5-7B-Instruct"
     assert payload["batch_size"] == 64
+
+
+def test_select_uncertain_prefix_ids_uses_band_or_ci_width() -> None:
+    module = _load_prepare_value_module()
+    targets = [
+        RolloutTargetRecord(
+            prefix_id="p_certain",
+            sample_id="s0",
+            dataset="strategyqa",
+            split="train",
+            k_rollouts=8,
+            n_correct=8,
+            n_parse_error=0,
+            success_rate=1.0,
+            parseable_rate=1.0,
+            q_mean_smoothed=0.95,
+            q_std_error=0.01,
+            q_ci_low=0.93,
+            q_ci_high=0.97,
+            q_ci_width=0.04,
+            q_weight=0.9,
+            mean_generated_char_count=50.0,
+            metadata={},
+        ),
+        RolloutTargetRecord(
+            prefix_id="p_band",
+            sample_id="s1",
+            dataset="strategyqa",
+            split="train",
+            k_rollouts=8,
+            n_correct=4,
+            n_parse_error=0,
+            success_rate=0.5,
+            parseable_rate=1.0,
+            q_mean_smoothed=0.52,
+            q_std_error=0.05,
+            q_ci_low=0.42,
+            q_ci_high=0.62,
+            q_ci_width=0.20,
+            q_weight=0.8,
+            mean_generated_char_count=50.0,
+            metadata={},
+        ),
+        RolloutTargetRecord(
+            prefix_id="p_ci",
+            sample_id="s2",
+            dataset="strategyqa",
+            split="train",
+            k_rollouts=8,
+            n_correct=7,
+            n_parse_error=0,
+            success_rate=0.875,
+            parseable_rate=1.0,
+            q_mean_smoothed=0.88,
+            q_std_error=0.12,
+            q_ci_low=0.64,
+            q_ci_high=1.0,
+            q_ci_width=0.36,
+            q_weight=0.4,
+            mean_generated_char_count=50.0,
+            metadata={},
+        ),
+    ]
+    picked = module._select_uncertain_prefix_ids(  # noqa: SLF001
+        targets=targets,
+        band=0.2,
+        ci_width_threshold=0.3,
+    )
+    assert "p_band" in picked
+    assert "p_ci" in picked
+    assert "p_certain" not in picked
