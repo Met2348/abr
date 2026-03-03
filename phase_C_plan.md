@@ -1103,3 +1103,38 @@ Before moving to RL/BCR-lite expansion:
    - corruption AUC,
 3. confirm whether label-quality gates improve pair metrics without collapsing
    calibration.
+
+## 19. Phase C Handoff to Phase D (2026-03-03)
+
+Phase C is now treated as an infrastructure-complete stage with unresolved
+supervision quality limits.
+
+### 19.1 Final Phase C conclusions
+
+1. C1/C2 engineering is stable:
+   - reproducible artifacts,
+   - stable manifests/summaries,
+   - reliable suite execution.
+2. Value-head quality is still below promotion threshold:
+   - calibration improvements are real but inconsistent versus trivial baseline,
+   - corruption ordering remains near-random in most variants.
+3. Objective-only sweeps were not enough:
+   - post-hoc calibration and loss variations changed metrics but did not
+     deliver robust routing-quality gains.
+
+### 19.2 Remaining remnants from Phase C
+
+1. weak Monte Carlo supervision for fine-grained prefix ranking,
+2. many low-margin clean/corrupt pairs,
+3. unresolved calibration-vs-contrastive tradeoff under noisy labels,
+4. P(IK) branch did not yet establish strong separability.
+
+### 19.3 Official next-stage decision
+
+Project active track is now Phase D:
+- external-PRM-supported value supervision,
+- teacher + MC fusion,
+- target-source ablation before any new router/RL expansion.
+
+Authoritative Phase D plan:
+- `phase_D_plan.md`

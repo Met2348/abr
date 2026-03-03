@@ -80,6 +80,12 @@ def load_gsm8k(
     """Load GSM8K from local parquet files.
 
     ``config`` can be ``main`` or ``socratic``.
+
+    中文要点
+    --------
+    - GSM8K 原始 `answer` 往往同时包含推理与最终答案。
+    - 这里先拆成 `cot` 与 `answer`，供后续 Phase A 按 `target_style`
+      选择是否把推理写入监督目标。
     """
     requested_split = split
     split = _normalize_split(split, available={"train", "test"}, fallback="test")
@@ -98,6 +104,7 @@ def load_gsm8k(
     for idx, row in enumerate(rows):
         question = _as_clean_str(row.get("question", ""))
         raw_answer = _as_clean_str(row.get("answer", ""))
+        # 要点：GSM8K 的原始 answer 常含“推理+最终答案”，这里先规范拆分。
         cot, final_answer = _split_gsm8k_answer(raw_answer)
         samples.append(
             CanonicalSample(
@@ -125,6 +132,11 @@ def load_strategyqa(
     """Load StrategyQA from local JSON.
 
     Current snapshot in this repo includes only ``strategyQA_train.json``.
+
+    中文要点
+    --------
+    - StrategyQA 的 `decomposition` 被视作过程监督候选轨迹（cot）。
+    - 后续 Phase A 在 `cot_then_answer` 模式下会把这条轨迹写入 `target_text`。
     """
     del cache_dir  # not used; kept in signature for a uniform loader interface
 
@@ -158,6 +170,7 @@ def load_strategyqa(
         decomposition = row.get("decomposition")
         cot: str | None = None
         if isinstance(decomposition, list) and decomposition:
+            # 要点：decomposition 是 StrategyQA 的显式推理轨迹来源。
             cot = "\n".join(f"- {str(step).strip()}" for step in decomposition)
 
         sample_id = _as_clean_str(str(row.get("qid", f"row-{idx}")))

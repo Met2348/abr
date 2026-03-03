@@ -55,7 +55,7 @@ New BCR/ABR implementation work should go to new Phase B+ scripts/modules.
 
 ---
 
-## 0.2 Current Real Priorities (2026-03-03)
+## 0.2 Current Real Priorities (2026-03-03, Phase D Kickoff)
 
 This is the operational priority list now. Earlier generic checklists below should
 be read in this order.
@@ -63,21 +63,17 @@ be read in this order.
 1. Freeze Phase B PEFT conclusions:
    - StrategyQA PEFT is stable and positive.
    - GSM8K full long-CoT PEFT suffers late-run drift and should use checkpoint selection, not final-checkpoint reporting.
-2. Build the first unique-method layer:
-   - prefix-level value targets,
-   - value-head calibration,
-   - corruption sensitivity.
-3. Build BCR-lite on top of the value head:
-   - `L_sft + lambda_B * L_Bellman`,
-   - optional calibration / contrastive terms only after value bootstrap works.
-4. Build ABR-lite before any RL:
-   - heuristic `gen / ver / fin` router,
-   - explicit verification budget,
-   - logged action traces.
-5. Only then build RL:
-   - router-only RL first,
-   - freeze LM and value head initially,
-   - do not jointly train LM + value + router at the start.
+2. Phase D (official active track): external-PRM-supported value supervision.
+   - add teacher sidecar scoring on existing C1 artifacts,
+   - fuse `q_mc` and `q_teacher` into `q_fused`,
+   - re-train C2 with explicit target-source ablations (`mc`, `teacher`, `fused`).
+3. Promote only if both gates pass:
+   - calibration beats trivial baseline reproducibly,
+   - corruption ordering becomes clearly above random.
+4. Only after promotion gate:
+   - restart BCR-lite (`L_sft + lambda_B * L_Bellman`),
+   - then ABR-lite router,
+   - then router-only RL.
 
 Immediate no-go rules:
 1. No router RL on GSM8K first.
@@ -87,7 +83,7 @@ Immediate no-go rules:
 
 ---
 
-## 0.3 Phase C C1/C2 Quality-First Status (2026-03-03)
+## 0.3 Phase C C1/C2 Closeout and Remnants (2026-03-03)
 
 ### Newly Completed
 
@@ -105,20 +101,30 @@ Immediate no-go rules:
    - `C2_STRATEGYQA_QUALITY_FIRST`,
    - `C2_STRATEGYQA_QUALITY_FIRST_FULL`.
 
-### Immediate To-Do
+### Final Conclusion from Phase C Runs
 
-1. Run `C2_STRATEGYQA_QUALITY_FIRST` and compare to `TRICK10` and baseline.
-2. If smoke is positive, run `C2_STRATEGYQA_QUALITY_FIRST_FULL`.
-3. Add one report table with:
-   - Brier/raw-posthoc,
-   - Pearson/raw-posthoc,
-   - pair_acc,
-   - corruption AUC,
-   - train/eval C1 rollout count.
-4. If pair metrics still flat, escalate to architecture changes:
-   - true sibling-pair ranking datasets,
-   - larger per-prefix rollout budget (`k=20~32`),
-   - P(IK) simplification branch as explicit gating criterion.
+1. The implementation layer is stable:
+   - artifacts, manifests, and suites are reproducible.
+2. The model-quality layer is still blocked:
+   - best C2 calibration remains inconsistent versus trivial baseline,
+   - corruption ordering is near-random in most variants.
+3. Loss-side tricks alone are insufficient:
+   - objective sweeps changed metrics but did not cross promotion gates.
+4. Root issue is now treated as supervision quality, not engineering failure.
+
+### Phase C Remnants (Carried into Phase D)
+
+1. Weak Monte Carlo supervision for fine-grained prefix ranking.
+2. Low-margin clean/corrupt pair quality in many prefixes.
+3. Calibration-vs-contrastive tradeoff unresolved under current labels.
+4. P(IK) branch did not yet prove robust separability.
+
+### Immediate Phase D To-Do
+
+1. Implement teacher sidecar scoring (`Qwen2.5-Math-PRM-7B`) on C1 artifacts.
+2. Add C1 fusion fields (`q_teacher`, `q_fused`, disagreement flags).
+3. Add C2 target-source switch and run four-way ablation (`mc/teacher/fused`).
+4. Promote to BCR-lite/ABR-lite only if gates pass on repeat runs.
 
 ---
 
@@ -150,6 +156,32 @@ Phase B first-run target (frozen in B0):
    - `assets/models/Qwen2.5-7B-Instruct`
 3. First path:
    - PEFT (LoRA) default, full SFT fallback only if blocked.
+
+---
+
+## 0.5 Phase D Execution Checklist (Authoritative, 2026-03-03)
+
+Source of truth:
+- `phase_D_plan.md`
+
+Workstream checklist:
+- [ ] D0: Teacher environment gate and reproducible smoke scoring
+- [x] D1: Add teacher sidecar scoring script (`scripts/phase_c_score_prm_teacher.py`)
+- [ ] D2: Add C1 teacher+MC fusion fields and disagreement logging
+- [ ] D3: Add C2 target-source switch (`mc/teacher/fused`)
+- [ ] D4: Run four-way ablation on StrategyQA smoke then full
+- [ ] D5: Evaluate promotion gates and decide whether to resume BCR-lite/ABR-lite
+
+Promotion gates:
+1. calibration gate:
+   - selected Brier must beat trivial baseline on repeat runs
+2. corruption-order gate:
+   - pair/AUC metrics must be clearly above random and stable
+
+If either gate fails:
+1. increase pair quality (higher-margin pairs, selective rollout top-up),
+2. run control teacher ablation before architecture expansion,
+3. do not start router RL.
 
 ---
 

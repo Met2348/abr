@@ -2,11 +2,11 @@
 
 This repository is building an in-house reasoning-faithfulness pipeline from scratch.
 
-Current milestone status (2026-02-28):
+Current milestone status (2026-03-03):
 - Phase A is concluded.
 - Phase B B0 (scope freeze) is completed.
 - Phase B B1 code skeleton is implemented (smoke gate pending).
-- Project execution focus is officially switched to Phase B.
+- Project execution focus has moved past Phase B into Phase D.
 - Phase C planning is now frozen in `phase_C_plan.md`.
 - Phase C C0/C1 artifact-preparation code is implemented.
 - Phase C P(IK) diagnostic branch is implemented end-to-end:
@@ -14,6 +14,10 @@ Current milestone status (2026-02-28):
   - C2 question-level value-head training (`scripts/phase_c_train_pik.py`),
   - standalone re-eval (`scripts/phase_c_eval_pik.py`),
   - lifecycle suite (`scripts/run_phase_c_pik_suite.sh`).
+- Phase D is now the official active development track:
+  - external PRM-supported value supervision,
+  - teacher + MC fusion path,
+  - target-source ablation and promotion gates.
 - Phase A core conclusion:
   - parse-error inflation was mostly protocol/extraction/free-form formatting related,
   - after binary-choice decode, StrategyQA parse error reaches `0.0000`,
@@ -25,13 +29,12 @@ Current milestone status (2026-02-28):
   - StrategyQA direct (`max_new_tokens=32`, n=193):
   - `batch_size=1`: `accuracy=0.5492`, `parse_error_rate=0.1762`, `1.180 sample/s`
   - `batch_size=4`: `accuracy=0.5596`, `parse_error_rate=0.1658`, `4.189 sample/s`
-- Phase B should start now as a separate training track (value head + BCR-lite), while keeping Phase A scripts frozen as benchmark references.
-- Phase B execution plan and B0 freeze contract:
-  - `phase_B_plan.md`
+- Phase D authoritative plan:
+  - `phase_D_plan.md`
 
 Primary roadmap:
 - `TODO_ours.md`
-- `phase_B_plan.md`
+- `phase_D_plan.md`
 
 Context files:
 - `idea_polish.md`
@@ -43,7 +46,24 @@ Context files:
 - `phase_B_plan.md` (Phase B lifecycle and first-run freeze contract)
 - `phase_B_report.md` (live Phase B experiment report and diagnosis log)
 - `phase_C_plan.md` (Phase C ABR/value-head implementation guidance)
+- `phase_C_fix_value_head.md` (Phase C diagnosis and external-help rationale)
+- `phase_D_plan.md` (Phase D external-PRM-supported execution plan)
 - `foundation_reliability_audit.md` (low-level risk scan + hardening plan before Phase B scale)
+
+## Phase D Kickoff (Active Track)
+
+Phase D objective is to fix the remaining value-head learnability bottleneck by
+injecting external PRM teacher signal into the existing C1/C2 pipeline.
+
+Phase C closeout summary:
+1. C1/C2 infra is stable and reproducible; this is no longer a tooling-failure problem.
+2. Best C2 calibration improved versus early runs but still fails the baseline promotion gate.
+3. Corruption-ordering metrics remain near-random in most variants.
+4. Conclusion: supervision quality is the main blocker, so Phase D shifts to
+   external-PRM-supported label quality improvement.
+
+Authoritative Phase D plan:
+- `phase_D_plan.md`
 
 ## Phase C Entry Points (Current Implemented Scope)
 
@@ -829,6 +849,78 @@ Current non-goals:
 - RL.
 
 Those remain intentionally deferred until C2 metrics are stable.
+
+## Phase D Entry Point (Active Track)
+
+Phase D is now the official active stage. Theme:
+- external-PRM-supported value supervision.
+
+Why this switch:
+1. Phase C infra is stable, but value quality still fails promotion gates.
+2. The dominant blocker is supervision quality, not implementation reliability.
+
+Authoritative plan:
+- `phase_D_plan.md`
+
+Phase D first implementation targets:
+1. teacher sidecar scoring on existing C1 artifacts,
+2. C1 teacher/MC fusion fields (`q_teacher`, `q_fused`),
+3. C2 target-source ablation (`mc`, `teacher`, `fused`),
+4. promotion gate before restarting BCR-lite/ABR-lite expansion.
+
+### D1: Teacher Sidecar Scoring (Implemented)
+
+New script:
+- `scripts/phase_c_score_prm_teacher.py`
+
+Purpose:
+1. score existing C1 prefixes with external PRM teacher,
+2. optionally score C1 corruptions,
+3. persist sidecar outputs for D2 fusion.
+
+Smoke command:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_c_score_prm_teacher.py \
+  --phase-c-dir assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_c2_strategyqa_quality_first_c1_eval__f608255f810d \
+  --teacher-model-path assets/models/Qwen2.5-Math-PRM-7B \
+  --batch-size 256 \
+  --max-length 2048 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --require-cuda
+```
+
+Full-train command (overwrite old sidecars):
+
+```bash
+CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_c_score_prm_teacher.py \
+  --phase-c-dir assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_full_c2_strategyqa_quality_first_full_c1_train__90dcbacfbae1 \
+  --teacher-model-path assets/models/Qwen2.5-Math-PRM-7B \
+  --batch-size 256 \
+  --max-length 2048 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --require-cuda \
+  --overwrite
+```
+
+Outputs written into the same C1 directory:
+1. `teacher_prefix_scores.jsonl`
+2. `teacher_corruption_scores.jsonl` (when `--score-corruptions`)
+3. `teacher_errors.jsonl`
+4. `teacher_summary.json`
+5. `teacher_summary.md`
+
+Contract notes:
+1. D1 is sidecar-only and does not mutate existing C1/C2 artifacts.
+2. If chat-template calls fail on another tokenizer, D1 falls back to a plain
+   `[SYSTEM]/[USER]/[ASSISTANT]` prompt format.
+3. Keep `use_cache=False` in PRM forward path for compatibility with remote-code
+   model variants.
+4. For legacy/incomplete C1 dirs that are missing `manifest.json`, use:
+   - `--allow-missing-manifest`
+   This keeps scoring usable while marking lineage as partial in `teacher_summary.json`.
 
 ## Phase A Retrospective (Before You Start Phase B)
 

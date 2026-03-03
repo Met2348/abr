@@ -842,7 +842,14 @@ def _build_rollout_targets(
     config: RolloutConfig,
     target_quality_config: TargetQualityConfig,
 ) -> tuple[list[RolloutPredictionRecord], list[RolloutTargetRecord], dict[str, Any]]:
-    """Generate rollout predictions and aggregate them into prefix targets."""
+    """Generate rollout predictions and aggregate them into prefix targets.
+
+    中文要点
+    --------
+    - 对每个 prefix 采样 K 次 continuation，并按最终答对情况评分。
+    - 再把 K 次结果聚合为一个前缀价值目标（含不确定性统计）。
+    - 支持两阶段 rollout：先全量，再对不确定前缀补采样。
+    """
     if not prefixes:
         return [], [], {
             "elapsed_seconds": 0.0,
@@ -1107,7 +1114,15 @@ def _aggregate_rollout_targets(
     *,
     target_quality_config: TargetQualityConfig,
 ) -> list[RolloutTargetRecord]:
-    """Aggregate low-level rollout predictions into one target per prefix."""
+    """Aggregate low-level rollout predictions into one target per prefix.
+
+    中文要点
+    --------
+    - 同一前缀的多次 rollout 会被压缩成一条目标记录。
+    - 目标不只是对错比例，还包含置信区间和权重信息。
+    """
+    # 把“同一个 prefix 的 K 次 rollout 结果”汇总成一个价值监督目标；
+    # 目标不是单次对错，而是经验成功率及其不确定性统计。
     by_prefix: dict[str, list[RolloutPredictionRecord]] = {}
     for prediction in predictions:
         prediction.validate()
@@ -1173,6 +1188,11 @@ def _build_corruption_rollout_targets_and_pair_quality(
     - estimate empirical corruption-side Q values,
     - compare against clean-prefix Q estimates,
     - persist label-side delta/z statistics for robust filtering.
+
+    中文要点
+    --------
+    - 先估计 corruption 前缀的经验 Q 值，再与 clean 前缀做配对比较。
+    - 输出 `pair_quality`，为后续对比学习过滤低质量 pair 提供依据。
     """
     if not corruption_artifacts:
         return [], []
@@ -1379,7 +1399,14 @@ def _compute_target_quality_stats(
     weight_floor: float,
     weight_gamma: float,
 ) -> dict[str, float]:
-    """Compute uncertainty-aware target stats from Monte Carlo outcomes."""
+    """Compute uncertainty-aware target stats from Monte Carlo outcomes.
+
+    中文要点
+    --------
+    - 以 Beta 平滑成功率作为 `q_mean_smoothed`。
+    - 用近似标准误与区间宽度估计不确定性。
+    - 把区间宽度映射为 `q_weight`，用于降低噪声标签影响。
+    """
     if k_rollouts <= 0:
         return {
             "q_mean_smoothed": 0.0,
@@ -1389,6 +1416,8 @@ def _compute_target_quality_stats(
             "q_ci_width": 0.0,
             "q_weight": 0.0,
         }
+    # 使用 Beta 平滑后的成功率作为 q_mean_smoothed，
+    # 避免小样本下出现极端 0/1 值过于自信。
     q_smoothed = (float(n_correct) + float(alpha)) / (
         float(k_rollouts) + float(alpha) + float(beta)
     )
@@ -1397,6 +1426,8 @@ def _compute_target_quality_stats(
     q_ci_low = max(0.0, q_smoothed - float(ci_z) * q_std_error)
     q_ci_high = min(1.0, q_smoothed + float(ci_z) * q_std_error)
     q_ci_width = max(q_ci_high - q_ci_low, 0.0)
+    # CI 越宽，不确定性越高；q_weight 就越低。
+    # 后续 C2 可用该权重降低噪声标签的影响。
     q_weight = 1.0 - min(q_ci_width, 1.0)
     q_weight = max(q_weight, float(weight_floor))
     if float(weight_gamma) != 1.0:

@@ -109,7 +109,13 @@ def build_corruptions_for_prefixes(
     *,
     config: CorruptionBuildConfig | None = None,
 ) -> list[CorruptionArtifact]:
-    """Build deterministic corruption artifacts for a list of clean prefixes."""
+    """Build deterministic corruption artifacts for a list of clean prefixes.
+
+    中文要点
+    --------
+    - 输入是 clean prefix 列表，输出是可追踪的 corruption 变体。
+    - 目标是构造“最小但可复现”的扰动集，用于 clean/corrupt 对比评估。
+    """
     cfg = config or CorruptionBuildConfig()
     cfg.validate()
 
@@ -152,7 +158,13 @@ def _build_corruptions_for_prefix(
     prefix: PrefixArtifact,
     config: CorruptionBuildConfig,
 ) -> list[CorruptionArtifact]:
-    """Build up to `max_corruptions_per_prefix` variants for one prefix."""
+    """Build up to `max_corruptions_per_prefix` variants for one prefix.
+
+    中文要点
+    --------
+    - 仅对当前前缀最后一个推理步施加局部扰动。
+    - 优先保持上下文不变，便于把分数差异归因到局部步骤变化。
+    """
     if prefix.num_reasoning_steps_seen <= 0:
         return []
 
@@ -163,6 +175,8 @@ def _build_corruptions_for_prefix(
     original_last = lines[-1].strip()
     candidates: list[tuple[str, str, str]] = []
 
+    # 当前只改“最后一个推理步”，保持其余上下文不变，
+    # 这样 clean/corrupt 的对比更聚焦于局部推理扰动。
     if config.enable_binary_flip:
         flipped = _flip_binary_token(original_last)
         if flipped is not None:
@@ -184,6 +198,7 @@ def _build_corruptions_for_prefix(
     artifacts: list[CorruptionArtifact] = []
     seen_payloads: set[tuple[str, str]] = set()
     for corruption_type, corrupted_last, before_text in candidates:
+        # 每个 clean prefix 最多保留 max_corruptions_per_prefix 个变体。
         if len(artifacts) >= config.max_corruptions_per_prefix:
             break
 

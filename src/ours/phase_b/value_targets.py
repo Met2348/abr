@@ -471,6 +471,12 @@ def build_step_sequence_from_phase_b_row(
     tuple[StepSequence, dict[str, Any]]
         The built sequence and a small metadata payload describing how the row
         was interpreted.
+
+    中文要点
+    --------
+    - 从 `target_text` 中先分离“推理段”和“最终答案段”。
+    - 前缀轨迹主要来自推理段，最终答案用于终态目标与一致性检查。
+    - 该函数是 Phase C 前缀构造的入口之一。
     """
     row.validate()
     cfg = step_config or StepBuildConfig()
@@ -478,6 +484,7 @@ def build_step_sequence_from_phase_b_row(
     cfg.validate()
     prefix_cfg.validate()
 
+    # 要点：先拆出“推理部分”和“最终答案行”，前缀轨迹来自推理部分。
     reasoning_text, answer_target_text, answer_signal_found = split_reasoning_and_answer(
         row.target_text
     )
@@ -544,6 +551,12 @@ def build_prefix_artifacts(
     - the optional question-only state,
     - each reasoning-step boundary,
     - but not the terminal answer step.
+
+    中文要点
+    --------
+    - 该函数把一条完整监督轨迹切成多条“可训练的前缀状态”。
+    - 每个 reasoning step 都会形成一个新的 prefix 样本。
+    - 终态答案步不作为前缀训练点，避免把结果泄漏为过程信号。
     """
     row.validate()
     step_sequence.validate()
@@ -601,6 +614,7 @@ def build_prefix_artifacts(
             )
         )
 
+    # 核心前缀轨迹构造逻辑：每读到一个 reasoning step，就产出一个 prefix。
     accumulated_reasoning: list[ReasoningStep] = []
     for reasoning_step in reasoning_steps:
         accumulated_reasoning.append(reasoning_step)

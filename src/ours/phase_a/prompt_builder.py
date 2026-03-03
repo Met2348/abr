@@ -316,6 +316,12 @@ def build_prepared_sample(
         template_version="1.0.0",
     )
     ```
+
+    中文要点
+    --------
+    - 本函数是 `Phase A -> Phase B/Phase C` 的监督桥梁。
+    - 产出的 `target_text` 会直接进入后续 SFT 与前缀价值学习流程。
+    - `target_style` 决定监督中是否包含显式推理轨迹。
     """
     sample.validate()
 
@@ -332,6 +338,8 @@ def build_prepared_sample(
         user_text=user_text,
     )
 
+    # 要点：target_text 是后续 Phase B/Phase C 的核心监督来源。
+    # answer_only 仅答案；cot_then_answer 包含推理与最终答案行。
     target_text = _build_target_text(
         answer=sample.answer,
         cot=sample.cot,
@@ -402,15 +410,22 @@ def _build_target_text(
         answer_prefix="Final answer: ",
     )
     ```
+
+    中文要点
+    --------
+    - `answer_only`：只监督最终答案，过程信息较少。
+    - `cot_then_answer`：监督“推理轨迹 + 最终答案”，更适合后续前缀级分析。
     """
     answer_clean = answer.strip()
     cot_clean = cot.strip() if cot is not None else ""
 
     if target_style == "answer_only":
+        # 仅监督最终答案，不注入显式推理轨迹。
         return f"{answer_prefix}{answer_clean}".strip()
 
     # target_style == "cot_then_answer"
     if cot_clean:
+        # 显式写入“推理轨迹 + 最终答案”，供后续前缀化与价值学习使用。
         return f"{cot_clean}\n{answer_prefix}{answer_clean}".strip()
     # Fallback: if CoT missing, still produce usable target.
     return f"{answer_prefix}{answer_clean}".strip()

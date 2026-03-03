@@ -1,6 +1,37 @@
 # OURS Reasoning Research Pipeline
 
-A research codebase for building and evaluating reasoning-faithfulness workflows (Phase A baseline completed, Phase B SFT/PEFT track in progress).
+A research codebase for building and evaluating reasoning-faithfulness workflows (Phase A/B baselines completed, Phase D external-PRM-supported track active).
+
+## Repository Logic (High-Level)
+
+This repository currently follows a staged pipeline:
+
+1. **Phase A (Data + Benchmark Contracts)**
+   - Load canonical samples from datasets.
+   - Build prepared artifacts with `prompt_text` and `target_text`.
+   - Run frozen benchmark-style generation/evaluation for reproducible baselines.
+
+2. **Phase B (SFT/PEFT Baselines)**
+   - Train instruction-tuned baselines from Phase A prepared JSONL.
+   - Evaluate answer quality and transfer behavior to establish strong references.
+
+3. **Phase C (Value-Head Bootstrapping on Prefixes)**
+   - Split `target_text` into reasoning trajectory and final answer signal.
+   - Build step prefixes (`question-only` + reasoning-step boundaries).
+   - Build minimally corrupted prefixes for clean-vs-corrupt comparisons.
+   - Run Monte Carlo rollouts per prefix to estimate prefix value targets
+     (`q_mean_smoothed`, uncertainty, reliability weights).
+   - Train/evaluate a frozen-backbone value head on those C1/C2 artifacts.
+
+4. **Phase D (External PRM Teacher Integration, Active)**
+   - Score existing C1 prefixes/corruptions with an external PRM teacher
+     (sidecar outputs first).
+   - Fuse teacher/MC supervision (`q_teacher`, `q_fused`) in C1.
+   - Re-run C2 target-source ablations (`mc`, `teacher`, `fused`) and promote
+     only if calibration + ranking + utility gates pass.
+
+Planned continuation (only after Phase D promotion):
+- restart BCR-lite, then ABR-lite routing.
 
 ## What This Repo Includes
 
@@ -20,8 +51,10 @@ A research codebase for building and evaluating reasoning-faithfulness workflows
 
 - Phase A infrastructure is stable and reproducible.
 - Batched inference path is enabled and validated.
-- Phase B B0 planning is complete; B1 training skeleton is implemented.
-- Phase B is now the official active development track.
+- Phase B SFT/PEFT baselines and diagnostics are complete enough to serve as references.
+- Phase C value-head infrastructure is implemented end-to-end (`C0/C1/C2` + `P(IK)` branch).
+- Phase D is now the official active development track: external PRM-supported value supervision.
+- Authoritative Phase D plan: `phase_D_plan.md`.
 
 ## Quick Start
 
@@ -204,6 +237,68 @@ Full lifecycle suite entrypoint:
 - `scripts/run_phase_c_value_suite.sh`
 - question-level P(IK) lifecycle: `scripts/run_phase_c_pik_suite.sh`
 
+### PRM Teacher Setup (Qwen2.5-Math-PRM-7B)
+
+For external teacher bootstrapping in Phase D, we currently recommend:
+- `Qwen2.5-Math-PRM-7B` as the primary teacher model.
+
+Download to the repo-local model directory:
+
+```bash
+huggingface-cli login
+huggingface-cli download Qwen/Qwen2.5-Math-PRM-7B \
+  --local-dir assets/models/Qwen2.5-Math-PRM-7B \
+  --local-dir-use-symlinks False
+```
+
+Quick local smoke test (step-level scores):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python - <<'PY'
+import torch
+import torch.nn.functional as F
+from transformers import AutoTokenizer, AutoModel
+
+model_name = "assets/models/Qwen2.5-Math-PRM-7B"
+tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+model = AutoModel.from_pretrained(
+    model_name,
+    dtype=torch.bfloat16,
+    device_map="auto",
+    trust_remote_code=True,
+).eval()
+
+messages = [
+    {"role": "system", "content": "Please reason step by step, and put your final answer within \\boxed{}."},
+    {"role": "user", "content": "If Tom has 3 apples and buys 2 more, how many apples does he have?"},
+    {"role": "assistant", "content": "Tom has 3 apples. <extra_0> He buys 2 apples. <extra_0> So he has 5 apples. <extra_0>"},
+]
+text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+input_ids = tokenizer.encode(text, return_tensors="pt").to(model.device)
+
+# Keep use_cache=False for compatibility with some transformers + remote-code combinations.
+with torch.no_grad():
+    logits = model(input_ids=input_ids, use_cache=False)[0]
+
+step_sep_id = tokenizer.encode("<extra_0>")[0]
+token_masks = (input_ids == step_sep_id)
+probs = F.softmax(logits, dim=-1)
+step_scores = probs[token_masks][:, 1].detach().float().cpu().tolist()
+
+print("num_steps =", len(step_scores))
+print("step_scores =", [round(x, 4) for x in step_scores])
+PY
+```
+
+How to read the smoke-test output:
+- `num_steps` is the number of `<extra_0>` step separators found in the assistant response.
+- `step_scores` are step-level positive probabilities in `[0, 1]` (higher means the teacher considers that step more reliable).
+
+Warning notes:
+- `torch_dtype is deprecated` is harmless; use `dtype=` (as shown above).
+- `lm_head.weight not used` is expected for process-reward model loading.
+- If you hit cache-API errors (for example around `DynamicCache`), keep `use_cache=False` in teacher-scoring scripts.
+
 Main entrypoint:
 
 ```bash
@@ -325,6 +420,32 @@ Supported lifecycle groups:
 13. `C2_STRATEGYQA_QUALITY_FIRST`
 14. `C2_STRATEGYQA_QUALITY_FIRST_FULL`
 
+## Phase D Public Direction
+
+Phase D focus:
+1. use external PRM teacher signals to improve value-label quality,
+2. fuse teacher and Monte Carlo supervision in C1,
+3. re-train C2 with target-source ablations (`mc`, `teacher`, `fused`),
+4. promote to ABR/BCR continuation only if calibration and corruption-ordering gates pass.
+
+Primary planning docs:
+- `phase_D_plan.md` (official active plan)
+- `phase_C_fix_value_head.md` (detailed diagnosis and external-help rationale)
+
+D1 teacher-sidecar entrypoint (implemented):
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_c_score_prm_teacher.py \
+  --phase-c-dir <phase_c_artifact_dir> \
+  --teacher-model-path assets/models/Qwen2.5-Math-PRM-7B \
+  --batch-size 256 \
+  --max-length 2048 \
+  --require-cuda
+```
+
+If a historical artifact directory is missing `manifest.json`, add:
+- `--allow-missing-manifest`
+
 Smoke training run:
 
 ```bash
@@ -372,6 +493,7 @@ For the new `B2_*` groups, this comparison is automated and written to:
 
 - `phase_A_report.md`: Phase A conclusions and outcomes
 - `phase_B_plan.md`: Phase B lifecycle and goals
+- `phase_D_plan.md`: Phase D lifecycle and external-PRM integration plan
 - `result_records.md`: experiment records and diagnosis history
 - `foundation_reliability_audit.md`: reliability risks and hardening notes
 
