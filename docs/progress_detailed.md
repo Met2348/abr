@@ -2,6 +2,25 @@
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
 
+## 2026-03-04 22:27:36 +08 (+0800)
+- Type: Docs / Operations
+- Summary: Refreshed `docs/readme_full.md` with a verified command set for cache infra healthcheck and stable Phase C/D execution.
+- Details:
+  - Added a new section: `2026-03-04 Ops Update (Verified Command Set)` in `docs/readme_full.md`.
+  - Included one-click feature-cache healthcheck commands (`fast` and `full` profiles).
+  - Added static integrity fallback commands (`py_compile` + `bash -n`) for cache-integrated scripts.
+  - Added Phase C value-suite and P(IK)-suite commands with safe cache defaults:
+    - `FEATURE_CACHE_ROOT`
+    - `FEATURE_CACHE_MODE`
+    - `FEATURE_CACHE_LOCK_TIMEOUT_SEC`
+  - Added robust D4 suite command using `D4_EVAL_POSTHOC_MODE=auto` to avoid missing-calibrator eval failures.
+  - Added concise cache-mode operational policy (`read_write` / `read` / `off` / `write`).
+- Files changed:
+  - `docs/readme_full.md`
+  - `docs/progress_detailed.md`
+- Breaking changes:
+  - None.
+
 ## 2026-03-03 17:10:00 +08 (+0800)
 - Type: Phase C C2 Top-3 Mitigation Implementation / CLI + Suite + Docs
 - Summary: Implemented three web-backed C2 interventions (BCE calibration path, post-hoc temperature scaling, adaptive loss balancing) with explicit toggles, manifests, and experiment groups.

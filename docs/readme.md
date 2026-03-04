@@ -1,11 +1,11 @@
 # BCR/ABR Research Pipeline (Condensed)
 
-本仓库用于推进“推理可靠性/一致性”研究，当前主线是：
+本仓库用于推进“推理可靠性/一致性/Faithfulness”研究，当前主线是：
 - 先用 Phase A/B 建立稳定基线与现象诊断，
 - 再在 Phase C/D 做 value supervision 与外部 PRM 支撑，
 - 最终服务后续 BCR/ABR 路由与训练策略。
 
-## 1. 当前仓库状态（给老师快速看）
+## 1. 当前仓库状态
 
 ### Phase A（已稳定）
 - 数据准备、生成评测、批量推理、truncation safeguard 已落地。
@@ -29,13 +29,13 @@
 - 已实现 teacher+MC 融合标签（D2）与目标源切换评估（D3）。
 - 当前重点：提高 pair 质量与监督可信度，验证是否能真正提升 C2 的可学习性。
 
-## 2. 近期关键实验结论（简版）
+## 2. 近期关键实验结论
 
 1. Phase A/B 的基线价值已足够：流程可复现，指标可稳定产出。
 2. Phase C 早期“value head 学不到”不是偶发 bug，而是监督信号弱、噪声高、pair 区分度不足。
 3. Phase D 的 teacher 信号已成功落地（可批量打分），但要转化为稳定增益，必须先解决样本质量与筛选策略。
 
-## 3. 一键运行入口（最常用）
+## 3. 运行入口
 
 ### Phase A
 ```bash
@@ -62,21 +62,21 @@ bash scripts/run_phase_c_pik_suite.sh
 bash scripts/run_phase_d_teacher_suite.sh
 ```
 
-## 4. 文档导航（按用途）
+## 4. 文档导航
 
-- 总体路线与状态：`docs/readme.md`（本文件）
+- 总体路线与状态：`docs/readme.md`
 - 完整技术手册：`docs/readme_full.md`
 - Phase B 结果总表：`docs/phase_B_report.md`
 - Phase C 方案与诊断：`docs/phase_C_plan.md`, `docs/phase_C_fix_value_head.md`
 - Phase D 正式计划：`docs/phase_D_plan.md`
 - 调试手册：`docs/phase_a_debug_playbook.md`, `docs/phase_b_debug_playbook.md`, `docs/phase_c_debug_playbook.md`
 
-## 5. 产物位置（老师常看）
+## 5. 输出位置
 
 - A/B/C/D 运行日志与摘要：`assets/artifacts/phase_*_logs/`
 - 运行产物：`assets/artifacts/phase_*_runs/`
 - C1/C2 相关数据：`assets/artifacts/phase_c_data/`, `assets/artifacts/phase_c_eval/`
-
+- 默认状态下仓库不含 `assets\external_datasets`, `assets\model`中各个`safetensors`文件(Model Shard)，以及部分缓存结果`assets\artifact`中的文件。 需要手动补齐这部分文件，代码才能够运行
 ---
 
 如需“从 0 到结果”的完整流程，请直接看：`docs/readme_full.md`。

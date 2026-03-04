@@ -2,35 +2,31 @@
 
 This repository is building an in-house reasoning-faithfulness pipeline from scratch.
 
-Current milestone status (2026-03-03):
-- Phase A is concluded.
-- Phase B B0 (scope freeze) is completed.
-- Phase B B1 code skeleton is implemented (smoke gate pending).
-- Project execution focus has moved past Phase B into Phase D.
-- Phase C planning is now frozen in `phase_C_plan.md`.
-- Phase C C0/C1 artifact-preparation code is implemented.
-- Phase C P(IK) diagnostic branch is implemented end-to-end:
-  - C1 question-level rollout artifacts (`scripts/phase_c_prepare_pik_data.py`),
-  - C2 question-level value-head training (`scripts/phase_c_train_pik.py`),
-  - standalone re-eval (`scripts/phase_c_eval_pik.py`),
-  - lifecycle suite (`scripts/run_phase_c_pik_suite.sh`).
-- Phase D is now the official active development track:
-  - external PRM-supported value supervision,
-  - teacher + MC fusion path,
-  - target-source ablation and promotion gates.
-- Phase A core conclusion:
-  - parse-error inflation was mostly protocol/extraction/free-form formatting related,
-  - after binary-choice decode, StrategyQA parse error reaches `0.0000`,
-  - remaining errors are model/prompt decision-quality gaps (not parser-only noise).
-- Current StrategyQA decision-quality baseline (`binary_choice`, n=193):
-  - `direct_binchoice`: `accuracy=0.6788`
-  - `cot_binchoice`: `accuracy=0.5803`
-- Batched freeform inference is now validated after padding fix:
-  - StrategyQA direct (`max_new_tokens=32`, n=193):
-  - `batch_size=1`: `accuracy=0.5492`, `parse_error_rate=0.1762`, `1.180 sample/s`
-  - `batch_size=4`: `accuracy=0.5596`, `parse_error_rate=0.1658`, `4.189 sample/s`
-- Phase D authoritative plan:
-  - `phase_D_plan.md`
+Current milestone status (2026-03-05):
+- Phase A is concluded and stable (full-dataset benchmark contracts are reproducible).
+- Phase B core diagnosis is concluded:
+  - StrategyQA can gain from PEFT under current pipeline,
+  - GSM8K still shows post-PEFT degradation under many settings.
+- Phase C infra is complete and runnable end-to-end:
+  - C0/C1/C2 value-head path,
+  - P(IK) branch (`scripts/phase_c_prepare_pik_data.py`, `scripts/phase_c_train_pik.py`, `scripts/phase_c_eval_pik.py`),
+  - CQR quality-first controls and two-stage rollout enrichment.
+- Phase D is the active execution track:
+  - D1 external PRM teacher scoring is implemented and validated,
+  - D2 teacher+MC target fusion is implemented in C1,
+  - D3 target-source ablation (`mc`, `teacher`, `fused`) is implemented in C2.
+- Latest empirical signal (important):
+  - D1 teacher on full StrategyQA C1 train artifact:
+    - `num_prefix_scores=7192`, `num_corruption_scores=6111`, `num_errors=0`,
+    - `mean_prefix_score=0.9138`, `mean_corrupt_score=0.8881`,
+    - clean>corrupt ratio from paired audit: `0.6649`.
+  - C2 CQR full control run is currently the strongest internal baseline:
+    - `brier=0.1968`, `posthoc_brier=0.1112`,
+    - `corr_pair_acc=0.5379`, `corr_auc=0.5141`.
+  - D4 smoke 3-way HQ currently does **not** beat MC target:
+    - `mc` better than `teacher/fused` on calibration metrics in latest smoke.
+  - Several D4 tuning runs failed at D2 eval due teacher-coverage gate
+    (`coverage < teacher_min_coverage`), so command-level coverage control is required.
 
 Primary roadmap:
 - `TODO_ours.md`
@@ -50,6 +46,127 @@ Context files:
 - `phase_D_plan.md` (Phase D external-PRM-supported execution plan)
 - `foundation_reliability_audit.md` (low-level risk scan + hardening plan before Phase B scale)
 
+## 2026-03-05 Reproducibility Command Bundles (Key)
+
+This section is a compact "runbook" of the most important command groups for
+reproducing the current project state.
+
+### Common prerequisite
+
+```bash
+cd /home/zling/y/bcr/ref
+export PYTHONPATH=$PWD/src
+```
+
+### Bundle A: Phase A whole-dataset baselines
+
+```bash
+# StrategyQA whole-corpus
+ACTIVE_PARAM_GROUP=A11 \
+RUN_PREFIX=strategyqa_whole_2290 \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_a_benchmark_suite.sh
+
+# GSM8K whole-corpus
+ACTIVE_PARAM_GROUP=A12 \
+RUN_PREFIX=gsm8k_whole_corpus \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_a_benchmark_suite.sh
+```
+
+### Bundle B: Phase B full PEFT baselines
+
+```bash
+# StrategyQA full PEFT + frozen-protocol eval
+ACTIVE_PHASE_B_GROUP=B2_STRATEGYQA_FULL \
+RUN_PREFIX=phase_b_strategyqa_full \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_b_training_suite.sh
+
+# GSM8K full PEFT + frozen-protocol eval
+ACTIVE_PHASE_B_GROUP=B2_GSM8K_FULL \
+RUN_PREFIX=phase_b_gsm8k_full \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_b_training_suite.sh
+```
+
+### Bundle C: Phase C value-head controls (smoke + full)
+
+```bash
+# Fast smoke (CQR quality controls enabled)
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_CQR_SMOKE \
+RUN_PREFIX=phase_c_cqr_smoke \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_c_value_suite.sh
+
+# Full-scale control run
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_CQR_FULL \
+RUN_PREFIX=phase_c_cqr_full \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_c_value_suite.sh
+```
+
+### Bundle C-PIK: Question-level P(IK) sanity track
+
+```bash
+ACTIVE_PHASE_C_PIK_GROUP=PIK_STRATEGYQA_SMOKE \
+RUN_PREFIX=phase_c_pik_smoke \
+CUDA_VISIBLE_DEVICES=3 \
+bash scripts/run_phase_c_pik_suite.sh
+```
+
+### Bundle D1: External PRM teacher scoring
+
+```bash
+# Score one C1 eval artifact with Qwen2.5-Math-PRM-7B
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_c_score_prm_teacher.py \
+  --phase-c-dir assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_c2_strategyqa_quality_first_c1_eval__f608255f810d \
+  --teacher-model-path assets/models/Qwen2.5-Math-PRM-7B \
+  --batch-size 192 \
+  --max-length 2048 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --require-cuda
+```
+
+### Bundle D2+D3: 3-way teacher/MC/fused ablation
+
+```bash
+ACTIVE_PHASE_D_GROUP=D4_STRATEGYQA_SMOKE_3WAY_HQ \
+RUN_PREFIX=phase_d_bundle_smoke_hq \
+CUDA_VISIBLE_DEVICES=0 \
+bash scripts/run_phase_d_teacher_suite.sh
+```
+
+If you hit teacher-coverage failure in D2 (`coverage < teacher_min_coverage`),
+first ensure teacher-score files match the current C1 artifact. For exploratory
+runs, you may lower the gate:
+
+```bash
+ACTIVE_PHASE_D_GROUP=D4_STRATEGYQA_SMOKE_3WAY \
+RUN_PREFIX=d4_low_cov_probe \
+TEACHER_MIN_COVERAGE=0.55 \
+CUDA_VISIBLE_DEVICES=0 \
+bash scripts/run_phase_d_teacher_suite.sh
+```
+
+### Bundle D4ABC: External pair bootstrap chain
+
+```bash
+ACTIVE_PHASE_D4_GROUP=D4ABC_STRATEGYQA_SMOKE \
+RUN_PREFIX=phase_d4abc_smoke \
+PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<your_train_c1_dir> \
+PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<your_eval_c1_dir> \
+CUDA_VISIBLE_DEVICES=0 \
+bash scripts/run_phase_d_external_pair_suite.sh
+```
+
+Notes:
+1. Current default `192` batch sizing in Phase C/P(IK)/D suites is intentional
+   (safer for multi-tenant GPUs while keeping throughput high).
+2. Read suite outcomes from `assets/artifacts/*_logs/<run_prefix>/final_summary.md`
+   first; then inspect `suite.log` only when diagnosing failures.
+
 ## Phase D Kickoff (Active Track)
 
 Phase D objective is to fix the remaining value-head learnability bottleneck by
@@ -64,6 +181,109 @@ Phase C closeout summary:
 
 Authoritative Phase D plan:
 - `phase_D_plan.md`
+
+## 2026-03-04 Ops Update (Verified Command Set)
+
+This section tracks the latest infrastructure commands that are useful, stable,
+and verified in this repository state.
+
+### Prerequisite (recommended for all commands below)
+
+```bash
+cd /home/zling/y/bcr/ref
+export PYTHONPATH=$PWD/src
+```
+
+### A. One-click feature-cache healthcheck (new, recommended)
+
+Fast profile (static checks + cache-module selftest):
+
+```bash
+RUN_PREFIX=cache_hc_fast \
+CHECK_PROFILE=fast \
+bash scripts/run_feature_cache_healthcheck.sh
+```
+
+Full profile (includes optional runtime smoke when artifacts/GPU are available):
+
+```bash
+RUN_PREFIX=cache_hc_full \
+CHECK_PROFILE=full \
+CUDA_VISIBLE_DEVICES=0 \
+bash scripts/run_feature_cache_healthcheck.sh
+```
+
+Where to read results:
+
+```bash
+cat assets/artifacts/healthcheck_logs/cache_hc_fast/final_summary.md
+cat assets/artifacts/healthcheck_logs/cache_hc_fast/suite.log
+```
+
+### B. Direct static integrity checks (manual fallback)
+
+```bash
+python -m py_compile \
+  src/ours/phase_b/feature_cache.py \
+  scripts/phase_b_train_value.py \
+  scripts/phase_b_eval_faithfulness.py \
+  scripts/phase_c_train_pik.py \
+  scripts/phase_c_eval_pik.py
+
+bash -n \
+  scripts/run_phase_c_value_suite.sh \
+  scripts/run_phase_c_pik_suite.sh \
+  scripts/run_phase_d_external_pair_suite.sh
+```
+
+### C. Phase C value suite with safe cache defaults
+
+```bash
+ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_SMOKE \
+RUN_PREFIX=phase_c_cache_smoke \
+FEATURE_CACHE_ROOT=assets/artifacts/phase_c_feature_cache \
+FEATURE_CACHE_MODE=read_write \
+FEATURE_CACHE_LOCK_TIMEOUT_SEC=600 \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_c_value_suite.sh
+```
+
+### D. Phase C P(IK) suite with safe cache defaults
+
+```bash
+ACTIVE_PHASE_C_PIK_GROUP=PIK_STRATEGYQA_SMOKE \
+RUN_PREFIX=phase_c_pik_cache_smoke \
+FEATURE_CACHE_ROOT=assets/artifacts/phase_c_feature_cache \
+FEATURE_CACHE_MODE=read_write \
+FEATURE_CACHE_LOCK_TIMEOUT_SEC=600 \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_c_pik_suite.sh
+```
+
+### E. D4 suite with robust eval-posthoc fallback
+
+Use `D4_EVAL_POSTHOC_MODE=auto` to avoid failure when the run has no saved
+post-hoc calibrator payload.
+
+```bash
+ACTIVE_PHASE_D4_GROUP=D4A_STRATEGYQA_SMOKE \
+RUN_PREFIX=phase_d4a_safe_eval \
+PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<c1_train_dir> \
+PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<c1_eval_dir> \
+FEATURE_CACHE_ROOT=assets/artifacts/phase_c_feature_cache \
+FEATURE_CACHE_MODE=read_write \
+FEATURE_CACHE_LOCK_TIMEOUT_SEC=600 \
+D4_EVAL_POSTHOC_MODE=auto \
+CUDA_VISIBLE_DEVICES=3 \
+bash scripts/run_phase_d_external_pair_suite.sh
+```
+
+### F. Cache-mode quick policy (operational)
+
+1. `read_write`: default for normal experiments.
+2. `read`: strict reproducibility mode (no new cache writes).
+3. `off`: debugging mode when suspecting cache mismatch.
+4. `write`: warm-up mode to prebuild caches intentionally.
 
 ## Phase C Entry Points (Current Implemented Scope)
 
