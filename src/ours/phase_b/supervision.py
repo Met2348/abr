@@ -26,7 +26,7 @@ What this file does
 Interaction with other files
 ----------------------------
 - `scripts/phase_b_train_sft.py` uses these helpers before tokenization.
-- `phase_B_report.md` and other diagnostics rely on the transform names being
+- `docs/phase_B_report.md` and other diagnostics rely on the transform names being
   stable and human-readable.
 
 Example

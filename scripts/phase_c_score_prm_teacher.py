@@ -9,7 +9,7 @@ that can score already-built C1 artifacts:
 - `prefixes.jsonl`
 - `corruptions.jsonl` (optional)
 
-This script is that sidecar tool (`D1` in `phase_D_plan.md`).
+This script is that sidecar tool (`D1` in `docs/phase_D_plan.md`).
 
 What this file does
 -------------------
