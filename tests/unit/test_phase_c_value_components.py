@@ -277,6 +277,135 @@ def test_primary_corruption_selection_prefers_pair_quality(tmp_path: Path) -> No
     assert example.primary_pair_weight == pytest.approx(0.9)
 
 
+def test_load_value_supervision_examples_supports_topk_corruptions(tmp_path: Path) -> None:
+    run_dir = tmp_path / "phase_c_topk"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(run_dir / "manifest.json", _phase_c_manifest())
+    _write_jsonl(
+        run_dir / "prefixes.jsonl",
+        [
+            {
+                "prefix_id": "p1",
+                "sample_id": "s1",
+                "dataset": "strategyqa",
+                "split": "train",
+                "question": "Q1",
+                "prompt_text": "Question: Q1\nAnswer:",
+                "prefix_target_text": "Reasoning step\n",
+                "current_step_role": "reasoning",
+                "current_step_id": "r1",
+                "prefix_step_index": 1,
+                "num_reasoning_steps_seen": 1,
+                "num_reasoning_steps_total": 2,
+                "metadata": {},
+            },
+        ],
+    )
+    _write_jsonl(
+        run_dir / "rollout_targets.jsonl",
+        [
+            {
+                "prefix_id": "p1",
+                "success_rate": 0.7,
+                "q_mean_smoothed": 0.7,
+                "q_std_error": 0.1,
+                "q_ci_width": 0.2,
+                "q_weight": 0.8,
+                "parseable_rate": 1.0,
+                "k_rollouts": 8,
+                "mean_generated_char_count": 120.0,
+                "metadata": {},
+            }
+        ],
+    )
+    _write_jsonl(
+        run_dir / "corruptions.jsonl",
+        [
+            {
+                "corruption_id": "c_bad",
+                "clean_prefix_id": "p1",
+                "sample_id": "s1",
+                "dataset": "strategyqa",
+                "split": "train",
+                "corruption_type": "step_drop",
+                "corrupted_prefix_text": "Bad corruption\n",
+                "original_step_text": "Reasoning step",
+                "corrupted_step_text": "Bad corruption",
+                "corruption_step_index": 1,
+                "metadata": {},
+            },
+            {
+                "corruption_id": "c_good",
+                "clean_prefix_id": "p1",
+                "sample_id": "s1",
+                "dataset": "strategyqa",
+                "split": "train",
+                "corruption_type": "numeric_perturb",
+                "corrupted_prefix_text": "Good corruption\n",
+                "original_step_text": "Reasoning step",
+                "corrupted_step_text": "Good corruption",
+                "corruption_step_index": 1,
+                "metadata": {},
+            },
+        ],
+    )
+    _write_jsonl(
+        run_dir / "pair_quality.jsonl",
+        [
+            {
+                "pair_id": "pair_bad",
+                "clean_prefix_id": "p1",
+                "corruption_id": "c_bad",
+                "sample_id": "s1",
+                "dataset": "strategyqa",
+                "split": "train",
+                "corruption_type": "step_drop",
+                "corruption_step_index": 1,
+                "q_clean": 0.7,
+                "q_corrupt": 0.65,
+                "delta_q": 0.05,
+                "se_clean": 0.1,
+                "se_corrupt": 0.1,
+                "se_delta": 0.14,
+                "z_delta": 0.35,
+                "pair_weight": 0.2,
+                "metadata": {"pair_pass_gate": False},
+            },
+            {
+                "pair_id": "pair_good",
+                "clean_prefix_id": "p1",
+                "corruption_id": "c_good",
+                "sample_id": "s1",
+                "dataset": "strategyqa",
+                "split": "train",
+                "corruption_type": "numeric_perturb",
+                "corruption_step_index": 1,
+                "q_clean": 0.7,
+                "q_corrupt": 0.2,
+                "delta_q": 0.5,
+                "se_clean": 0.1,
+                "se_corrupt": 0.1,
+                "se_delta": 0.14,
+                "z_delta": 3.5,
+                "pair_weight": 0.95,
+                "metadata": {"pair_pass_gate": True},
+            },
+        ],
+    )
+
+    examples, _ = load_value_supervision_examples(
+        run_dir,
+        require_corruptions=True,
+        max_primary_corruptions=2,
+    )
+    assert len(examples) == 1
+    example = examples[0]
+    assert len(example.corruption_candidates) == 2
+    assert example.corruption_candidates[0]["corruption_id"] == "c_good"
+    assert example.corruption_candidates[1]["corruption_id"] == "c_bad"
+    assert example.primary_corruption_text == "Good corruption\n"
+
+
 def test_phase_c_compatibility_check_rejects_rollout_mismatch(tmp_path: Path) -> None:
     left = _phase_c_manifest(model_path="base-a")
     right = _phase_c_manifest(model_path="base-b")

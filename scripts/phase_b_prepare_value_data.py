@@ -158,6 +158,43 @@ class TargetQualityConfig:
         return asdict(self)
 
 
+@dataclass(slots=True)
+class PairConsensusConfig:
+    """Configuration for pair-level teacher-consensus gating.
+
+    This config is optional and only affects label-side pair quality records.
+    When enabled, each clean-corrupt pair can be audited against teacher-side
+    pair margins (`delta_q_teacher`) before entering contrastive training.
+    """
+
+    enabled: bool
+    require_sign_agreement: bool
+    teacher_delta_q_min: float
+    require_teacher_coverage: bool
+    consensus_weight_boost: float
+    consensus_fail_weight_scale: float
+
+    def validate(self) -> None:
+        """Validate pair-consensus controls."""
+        if not isinstance(self.enabled, bool):
+            raise TypeError("`enabled` must be bool")
+        if not isinstance(self.require_sign_agreement, bool):
+            raise TypeError("`require_sign_agreement` must be bool")
+        if not isinstance(self.require_teacher_coverage, bool):
+            raise TypeError("`require_teacher_coverage` must be bool")
+        if self.teacher_delta_q_min < 0.0:
+            raise ValueError("`teacher_delta_q_min` must be >= 0")
+        if self.consensus_weight_boost <= 0.0:
+            raise ValueError("`consensus_weight_boost` must be > 0")
+        if not (0.0 <= self.consensus_fail_weight_scale <= 1.0):
+            raise ValueError("`consensus_fail_weight_scale` must be in [0, 1]")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable payload for manifests."""
+        self.validate()
+        return asdict(self)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Construct the CLI parser for Phase C C0/C1 artifact preparation."""
     parser = argparse.ArgumentParser(
@@ -524,6 +561,66 @@ def _build_parser() -> argparse.ArgumentParser:
             "Useful for promotion-grade runs."
         ),
     )
+    parser.add_argument(
+        "--teacher-corruption-scores-jsonl",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to D1 output `teacher_corruption_scores.jsonl`. "
+            "Used by pair-consensus gating to audit clean-vs-corrupt teacher deltas."
+        ),
+    )
+    parser.add_argument(
+        "--pair-consensus-enable",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Enable pair-level teacher consensus checks. "
+            "Requires teacher prefix/corruption score sidecars for strongest behavior."
+        ),
+    )
+    parser.add_argument(
+        "--pair-consensus-require-sign-agreement",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "When pair consensus is enabled, require sign(delta_q_mc) and "
+            "sign(delta_q_teacher) to match."
+        ),
+    )
+    parser.add_argument(
+        "--pair-consensus-teacher-delta-q-min",
+        type=float,
+        default=0.05,
+        help="Minimum teacher-side delta_q for pair-consensus pass.",
+    )
+    parser.add_argument(
+        "--pair-consensus-require-teacher-coverage",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "When enabled, pairs lacking teacher clean/corrupt scores fail "
+            "the pair-consensus gate."
+        ),
+    )
+    parser.add_argument(
+        "--pair-consensus-weight-boost",
+        type=float,
+        default=1.2,
+        help=(
+            "Weight multiplier applied to pair_weight when consensus gate passes "
+            "(clamped to [0,1])."
+        ),
+    )
+    parser.add_argument(
+        "--pair-consensus-fail-weight-scale",
+        type=float,
+        default=0.25,
+        help=(
+            "Weight multiplier applied to pair_weight when consensus gate fails "
+            "under `--pair-consensus-enable`."
+        ),
+    )
     return parser
 
 
@@ -585,6 +682,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--teacher-disagree-threshold must be in [0, 1]")
     if not (0.0 <= args.teacher_min_coverage <= 1.0):
         raise ValueError("--teacher-min-coverage must be in [0, 1]")
+    if args.pair_consensus_teacher_delta_q_min < 0.0:
+        raise ValueError("--pair-consensus-teacher-delta-q-min must be >= 0")
+    if args.pair_consensus_weight_boost <= 0.0:
+        raise ValueError("--pair-consensus-weight-boost must be > 0")
+    if not (0.0 <= args.pair_consensus_fail_weight_scale <= 1.0):
+        raise ValueError("--pair-consensus-fail-weight-scale must be in [0, 1]")
     if args.teacher_fuse_mode != "none" and args.teacher_prefix_scores_jsonl is None:
         raise ValueError(
             "--teacher-fuse-mode requires --teacher-prefix-scores-jsonl "
@@ -594,6 +697,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError(
             "--teacher-prefix-scores-jsonl requires --build-rollouts because "
             "teacher fusion is written into rollout_targets.jsonl"
+        )
+    if args.pair_consensus_enable and not args.build_pair_quality:
+        raise ValueError("--pair-consensus-enable requires --build-pair-quality")
+    if args.pair_consensus_enable and args.teacher_prefix_scores_jsonl is None:
+        raise ValueError(
+            "--pair-consensus-enable requires --teacher-prefix-scores-jsonl "
+            "(clean teacher scores are needed for pair-level consensus)"
+        )
+    if (
+        args.pair_consensus_enable
+        and args.pair_consensus_require_teacher_coverage
+        and args.teacher_corruption_scores_jsonl is None
+    ):
+        raise ValueError(
+            "--pair-consensus-require-teacher-coverage requires "
+            "--teacher-corruption-scores-jsonl"
         )
     if args.build_pair_quality and not args.build_rollouts:
         raise ValueError("--build-pair-quality requires --build-rollouts")
@@ -638,10 +757,19 @@ def main(argv: list[str] | None = None) -> int:
         pair_delta_q_min=float(args.pair_delta_q_min),
         pair_z_min=float(args.pair_z_min),
     )
+    pair_consensus_config = PairConsensusConfig(
+        enabled=bool(args.pair_consensus_enable),
+        require_sign_agreement=bool(args.pair_consensus_require_sign_agreement),
+        teacher_delta_q_min=float(args.pair_consensus_teacher_delta_q_min),
+        require_teacher_coverage=bool(args.pair_consensus_require_teacher_coverage),
+        consensus_weight_boost=float(args.pair_consensus_weight_boost),
+        consensus_fail_weight_scale=float(args.pair_consensus_fail_weight_scale),
+    )
     step_config.validate()
     prefix_config.validate()
     corruption_config.validate()
     target_quality_config.validate()
+    pair_consensus_config.validate()
 
     rows = load_phase_b_rows(args.input_jsonl, max_samples=args.max_samples)
     row_summary = summarize_rows(rows)
@@ -649,6 +777,11 @@ def main(argv: list[str] | None = None) -> int:
     teacher_scores_sha256 = (
         _sha256_file(args.teacher_prefix_scores_jsonl)
         if args.teacher_prefix_scores_jsonl is not None
+        else None
+    )
+    teacher_corruption_scores_sha256 = (
+        _sha256_file(args.teacher_corruption_scores_jsonl)
+        if args.teacher_corruption_scores_jsonl is not None
         else None
     )
     datasets = sorted({row.dataset for row in rows}) or ["unknown"]
@@ -706,11 +839,18 @@ def main(argv: list[str] | None = None) -> int:
             else None
         ),
         "teacher_prefix_scores_sha256": teacher_scores_sha256,
+        "teacher_corruption_scores_jsonl": (
+            str(args.teacher_corruption_scores_jsonl)
+            if args.teacher_corruption_scores_jsonl is not None
+            else None
+        ),
+        "teacher_corruption_scores_sha256": teacher_corruption_scores_sha256,
         "teacher_fuse_mode": str(args.teacher_fuse_mode),
         "teacher_fusion_lambda": float(args.teacher_fusion_lambda),
         "teacher_confidence_ci_ref": float(args.teacher_confidence_ci_ref),
         "teacher_disagree_threshold": float(args.teacher_disagree_threshold),
         "teacher_min_coverage": float(args.teacher_min_coverage),
+        "pair_consensus_config": pair_consensus_config.to_dict(),
     }
     run_fingerprint = _stable_hash_json(run_spec)
     run_dir = args.output_root / dataset_tag / f"{args.run_name}__{run_fingerprint}"
@@ -766,8 +906,21 @@ def main(argv: list[str] | None = None) -> int:
         f"min_cov={float(args.teacher_min_coverage):.3f}"
     )
     print(
+        "pair_consensus : "
+        f"enabled={pair_consensus_config.enabled} "
+        f"sign={pair_consensus_config.require_sign_agreement} "
+        f"delta_t>={pair_consensus_config.teacher_delta_q_min:.3f} "
+        f"req_cov={pair_consensus_config.require_teacher_coverage} "
+        f"boost={pair_consensus_config.consensus_weight_boost:.3f} "
+        f"fail_scale={pair_consensus_config.consensus_fail_weight_scale:.3f}"
+    )
+    print(
         "teacher_scores  : "
         f"{str(args.teacher_prefix_scores_jsonl) if args.teacher_prefix_scores_jsonl is not None else '<none>'}"
+    )
+    print(
+        "teacher_corr_sc : "
+        f"{str(args.teacher_corruption_scores_jsonl) if args.teacher_corruption_scores_jsonl is not None else '<none>'}"
     )
     if rollout_config is not None:
         print(
@@ -833,6 +986,7 @@ def main(argv: list[str] | None = None) -> int:
     corruption_rollout_targets: list[CorruptionRolloutTargetRecord] = []
     pair_quality_records: list[PairQualityRecord] = []
     teacher_fusion_summary: dict[str, Any] | None = None
+    teacher_pair_summary: dict[str, Any] | None = None
     rollout_runtime: dict[str, Any] | None = None
     if args.build_rollouts:
         can_reuse_clean_rollouts = (
@@ -872,6 +1026,32 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.build_pair_quality:
             if corruption_artifacts:
+                teacher_prefix_scores_by_prefix: dict[str, dict[str, Any]] | None = None
+                teacher_corruption_scores_by_id: dict[str, dict[str, Any]] | None = None
+                if pair_consensus_config.enabled:
+                    (
+                        teacher_prefix_scores_by_prefix,
+                        dup_prefix_ids,
+                        _,
+                    ) = _load_teacher_prefix_scores(Path(args.teacher_prefix_scores_jsonl))
+                    if dup_prefix_ids > 0:
+                        raise ValueError(
+                            "Duplicate prefix_id detected in teacher prefix score file: "
+                            f"{dup_prefix_ids} duplicates in {args.teacher_prefix_scores_jsonl}"
+                        )
+                    if args.teacher_corruption_scores_jsonl is not None:
+                        (
+                            teacher_corruption_scores_by_id,
+                            dup_corruption_ids,
+                            _,
+                        ) = _load_teacher_corruption_scores(
+                            Path(args.teacher_corruption_scores_jsonl)
+                        )
+                        if dup_corruption_ids > 0:
+                            raise ValueError(
+                                "Duplicate corruption_id detected in teacher corruption score file: "
+                                f"{dup_corruption_ids} duplicates in {args.teacher_corruption_scores_jsonl}"
+                            )
                 (
                     corruption_rollout_targets,
                     pair_quality_records,
@@ -886,7 +1066,14 @@ def main(argv: list[str] | None = None) -> int:
                         else int(rollout_config.rollout_count)
                     ),
                     target_quality_config=target_quality_config,
+                    pair_consensus_config=pair_consensus_config,
+                    teacher_prefix_scores_by_prefix=teacher_prefix_scores_by_prefix,
+                    teacher_corruption_scores_by_id=teacher_corruption_scores_by_id,
                 )
+                if pair_consensus_config.enabled:
+                    teacher_pair_summary = _summarize_teacher_pair_consensus(
+                        pairs=pair_quality_records
+                    )
             _write_jsonl(
                 corruption_rollout_target_path,
                 (record.to_dict() for record in corruption_rollout_targets),
@@ -936,6 +1123,7 @@ def main(argv: list[str] | None = None) -> int:
         "input_jsonl": str(args.input_jsonl),
         "input_sha256": input_sha256,
         "teacher_prefix_scores_sha256": teacher_scores_sha256,
+        "teacher_corruption_scores_sha256": teacher_corruption_scores_sha256,
         "num_rows_input": row_summary["num_rows"],
         "num_rows_failed": len(error_records),
         "num_step_sequences": len(step_sequences),
@@ -947,6 +1135,7 @@ def main(argv: list[str] | None = None) -> int:
         "corruption_rollout_summary": corruption_rollout_summary,
         "pair_quality_summary": pair_quality_summary,
         "teacher_fusion_summary": teacher_fusion_summary,
+        "teacher_pair_summary": teacher_pair_summary,
         "rollout_runtime": rollout_runtime,
     }
     summary_path.write_text(
@@ -963,6 +1152,7 @@ def main(argv: list[str] | None = None) -> int:
         "input_jsonl": str(args.input_jsonl),
         "input_sha256": input_sha256,
         "teacher_prefix_scores_sha256": teacher_scores_sha256,
+        "teacher_corruption_scores_sha256": teacher_corruption_scores_sha256,
         "row_summary": row_summary,
         "step_config": step_config.to_dict(),
         "step_config_signature": step_config.stable_signature(),
@@ -973,10 +1163,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
         "rollout_config": (rollout_config.to_dict() if rollout_config is not None else None),
         "target_quality_config": target_quality_config.to_dict(),
+        "pair_consensus_config": pair_consensus_config.to_dict(),
         "teacher_fusion_config": {
             "teacher_prefix_scores_jsonl": (
                 str(args.teacher_prefix_scores_jsonl)
                 if args.teacher_prefix_scores_jsonl is not None
+                else None
+            ),
+            "teacher_corruption_scores_jsonl": (
+                str(args.teacher_corruption_scores_jsonl)
+                if args.teacher_corruption_scores_jsonl is not None
                 else None
             ),
             "fuse_mode": str(args.teacher_fuse_mode),
@@ -1038,6 +1234,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.build_pair_quality:
             print(f"num_corr_targets   : {len(corruption_rollout_targets)}")
             print(f"num_pair_quality   : {len(pair_quality_records)}")
+            if teacher_pair_summary is not None:
+                print(
+                    "pair_cons_pass    : "
+                    f"{float(teacher_pair_summary.get('pair_consensus_pass_ratio', 0.0)):.4f}"
+                )
+                print(
+                    "pair_teacher_cov  : "
+                    f"{float(teacher_pair_summary.get('teacher_pair_available_ratio', 0.0)):.4f}"
+                )
         if rollout_runtime is not None:
             print(
                 "rollout_runtime   : "
@@ -1587,6 +1792,77 @@ def _load_teacher_prefix_scores(
     return by_prefix, duplicates, model_ids
 
 
+def _load_teacher_corruption_scores(
+    path: Path,
+) -> tuple[dict[str, dict[str, Any]], int, set[str]]:
+    """Load D1 teacher corruption scores keyed by corruption_id."""
+    rows = _read_jsonl(path)
+    by_corruption: dict[str, dict[str, Any]] = {}
+    duplicates = 0
+    model_ids: set[str] = set()
+    for row in rows:
+        corruption_id = str(row.get("corruption_id", "")).strip()
+        if corruption_id == "":
+            continue
+        if corruption_id in by_corruption:
+            duplicates += 1
+            continue
+        if "teacher_score_mean" not in row:
+            continue
+        model_id = str(row.get("teacher_model_id", "")).strip()
+        if model_id:
+            model_ids.add(model_id)
+        by_corruption[corruption_id] = row
+    return by_corruption, duplicates, model_ids
+
+
+def _summarize_teacher_pair_consensus(
+    *,
+    pairs: list[PairQualityRecord],
+) -> dict[str, Any]:
+    """Aggregate teacher-pair consensus diagnostics from pair-quality records."""
+    if not pairs:
+        return {
+            "num_pairs": 0,
+            "teacher_pair_available_ratio": 0.0,
+            "pair_consensus_pass_ratio": 0.0,
+            "pair_pass_gate_ratio": 0.0,
+            "pair_pass_gate_mc_ratio": 0.0,
+            "teacher_sign_agree_ratio": 0.0,
+            "teacher_margin_pass_ratio": 0.0,
+        }
+    n = float(len(pairs))
+    teacher_available = 0
+    consensus_pass = 0
+    pair_pass = 0
+    pair_pass_mc = 0
+    teacher_sign_agree = 0
+    teacher_margin_pass = 0
+    for pair in pairs:
+        meta = pair.metadata or {}
+        if bool(meta.get("teacher_pair_available", False)):
+            teacher_available += 1
+        if bool(meta.get("pair_consensus_pass", False)):
+            consensus_pass += 1
+        if bool(meta.get("pair_pass_gate", False)):
+            pair_pass += 1
+        if bool(meta.get("pair_pass_gate_mc", False)):
+            pair_pass_mc += 1
+        if bool(meta.get("teacher_sign_agree", False)):
+            teacher_sign_agree += 1
+        if bool(meta.get("teacher_margin_pass", False)):
+            teacher_margin_pass += 1
+    return {
+        "num_pairs": int(n),
+        "teacher_pair_available_ratio": float(teacher_available / n),
+        "pair_consensus_pass_ratio": float(consensus_pass / n),
+        "pair_pass_gate_ratio": float(pair_pass / n),
+        "pair_pass_gate_mc_ratio": float(pair_pass_mc / n),
+        "teacher_sign_agree_ratio": float(teacher_sign_agree / n),
+        "teacher_margin_pass_ratio": float(teacher_margin_pass / n),
+    }
+
+
 def _build_corruption_rollout_targets_and_pair_quality(
     *,
     corruption_artifacts: list[CorruptionArtifact],
@@ -1595,6 +1871,9 @@ def _build_corruption_rollout_targets_and_pair_quality(
     config: RolloutConfig,
     pair_rollout_count: int,
     target_quality_config: TargetQualityConfig,
+    pair_consensus_config: PairConsensusConfig,
+    teacher_prefix_scores_by_prefix: dict[str, dict[str, Any]] | None = None,
+    teacher_corruption_scores_by_id: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[CorruptionRolloutTargetRecord], list[PairQualityRecord]]:
     """Build corruption-side rollout targets and clean-vs-corrupt pair quality.
 
@@ -1606,6 +1885,7 @@ def _build_corruption_rollout_targets_and_pair_quality(
     中文要点
     --------
     - 先估计 corruption 前缀的经验 Q 值，再与 clean 前缀做配对比较。
+    - 可选接入 teacher pair 共识门控，降低弱/反向 pair 噪声。
     - 输出 `pair_quality`，为后续对比学习过滤低质量 pair 提供依据。
     """
     if not corruption_artifacts:
@@ -1791,10 +2071,52 @@ def _build_corruption_rollout_targets_and_pair_quality(
         )
         z_delta = float(delta_q / max(se_delta, 1e-8))
         # 门控条件：只有当差值幅度和统计显著性都达标，pair 才算高质量。
-        pair_pass = (
+        pair_pass_mc = (
             delta_q >= float(target_quality_config.pair_delta_q_min)
             and z_delta >= float(target_quality_config.pair_z_min)
         )
+        pair_pass = bool(pair_pass_mc)
+        teacher_pair_available = False
+        q_teacher_clean: float | None = None
+        q_teacher_corrupt: float | None = None
+        delta_q_teacher: float | None = None
+        teacher_margin_pass: bool | None = None
+        teacher_sign_agree: bool | None = None
+        pair_consensus_pass: bool | None = None
+
+        if pair_consensus_config.enabled:
+            clean_teacher_row = (
+                teacher_prefix_scores_by_prefix.get(clean_target.prefix_id)
+                if teacher_prefix_scores_by_prefix is not None
+                else None
+            )
+            corrupt_teacher_row = (
+                teacher_corruption_scores_by_id.get(corr_target.corruption_id)
+                if teacher_corruption_scores_by_id is not None
+                else None
+            )
+            if clean_teacher_row is not None and corrupt_teacher_row is not None:
+                teacher_pair_available = True
+                q_teacher_clean = float(clean_teacher_row["teacher_score_mean"])
+                q_teacher_corrupt = float(corrupt_teacher_row["teacher_score_mean"])
+                delta_q_teacher = float(q_teacher_clean - q_teacher_corrupt)
+                teacher_margin_pass = (
+                    float(delta_q_teacher)
+                    >= float(pair_consensus_config.teacher_delta_q_min)
+                )
+                if pair_consensus_config.require_sign_agreement:
+                    teacher_sign_agree = ((delta_q >= 0.0) == (delta_q_teacher >= 0.0))
+                else:
+                    teacher_sign_agree = True
+                pair_consensus_pass = bool(
+                    pair_pass_mc and bool(teacher_margin_pass) and bool(teacher_sign_agree)
+                )
+                pair_pass = bool(pair_consensus_pass)
+            else:
+                if pair_consensus_config.require_teacher_coverage:
+                    pair_pass = False
+                pair_consensus_pass = bool(pair_pass) if not pair_consensus_config.require_teacher_coverage else False
+
         # CQR-3: downweight uncertain pairs using both clean/corrupt reliability.
         # `q_weight` is already uncertainty-aware (derived from CI width), so this
         # factor suppresses high-noise pairs before C2 sees them.
@@ -1808,7 +2130,13 @@ def _build_corruption_rollout_targets_and_pair_quality(
         # - z_norm 反映差值显著性
         # - uncertainty_weight 惩罚 clean/corrupt 任一侧不稳定
         pair_weight = (0.5 * delta_norm + 0.5 * z_norm) * uncertainty_weight
-        if not pair_pass:
+        if pair_consensus_config.enabled:
+            if bool(pair_pass):
+                pair_weight *= float(pair_consensus_config.consensus_weight_boost)
+            else:
+                # 不通过共识 gate 的 pair 仍可保留，但显式降权。
+                pair_weight *= float(pair_consensus_config.consensus_fail_weight_scale)
+        elif not pair_pass:
             # 不通过 gate 的 pair 仍可保留，但显式降权。
             pair_weight *= 0.5
         pair = PairQualityRecord(
@@ -1834,6 +2162,33 @@ def _build_corruption_rollout_targets_and_pair_quality(
             pair_weight=float(min(max(pair_weight, 0.0), 1.0)),
             metadata={
                 "pair_pass_gate": bool(pair_pass),
+                "pair_pass_gate_mc": bool(pair_pass_mc),
+                "pair_consensus_enabled": bool(pair_consensus_config.enabled),
+                "pair_consensus_pass": (
+                    bool(pair_consensus_pass)
+                    if pair_consensus_pass is not None
+                    else None
+                ),
+                "teacher_pair_available": bool(teacher_pair_available),
+                "q_teacher_clean": (
+                    float(q_teacher_clean) if q_teacher_clean is not None else None
+                ),
+                "q_teacher_corrupt": (
+                    float(q_teacher_corrupt) if q_teacher_corrupt is not None else None
+                ),
+                "delta_q_teacher": (
+                    float(delta_q_teacher) if delta_q_teacher is not None else None
+                ),
+                "teacher_margin_pass": (
+                    bool(teacher_margin_pass)
+                    if teacher_margin_pass is not None
+                    else None
+                ),
+                "teacher_sign_agree": (
+                    bool(teacher_sign_agree)
+                    if teacher_sign_agree is not None
+                    else None
+                ),
                 "delta_q_min": float(target_quality_config.pair_delta_q_min),
                 "z_min": float(target_quality_config.pair_z_min),
                 "clean_success_rate": float(clean_target.success_rate),
@@ -2263,6 +2618,21 @@ def _render_summary_markdown(summary: dict[str, Any], manifest: dict[str, Any]) 
                 f"- positive_delta_ratio: `{summary['pair_quality_summary']['positive_delta_ratio']:.4f}`",
                 f"- mean_delta_q: `{summary['pair_quality_summary']['mean_delta_q']:.4f}`",
                 f"- mean_pair_weight: `{summary['pair_quality_summary']['mean_pair_weight']:.4f}`",
+            ]
+        )
+    if summary.get("teacher_pair_summary") is not None:
+        pair_teacher = summary["teacher_pair_summary"]
+        lines.extend(
+            [
+                "",
+                "## Teacher Pair Consensus Summary",
+                "",
+                f"- teacher_pair_available_ratio: `{pair_teacher['teacher_pair_available_ratio']:.4f}`",
+                f"- pair_consensus_pass_ratio: `{pair_teacher['pair_consensus_pass_ratio']:.4f}`",
+                f"- pair_pass_gate_ratio: `{pair_teacher['pair_pass_gate_ratio']:.4f}`",
+                f"- pair_pass_gate_mc_ratio: `{pair_teacher['pair_pass_gate_mc_ratio']:.4f}`",
+                f"- teacher_sign_agree_ratio: `{pair_teacher['teacher_sign_agree_ratio']:.4f}`",
+                f"- teacher_margin_pass_ratio: `{pair_teacher['teacher_margin_pass_ratio']:.4f}`",
             ]
         )
     if summary.get("teacher_fusion_summary") is not None:

@@ -271,6 +271,9 @@ C1_TRAIN_RUN_NAME="${RUN_NAME}_c1_train"
 C1_EVAL_RUN_NAME="${RUN_NAME}_c1_eval"
 C2_TRAIN_RUN_NAME="${RUN_NAME}_c2"
 C2_STANDALONE_EVAL_RUN_NAME="${RUN_NAME}_c2_eval"
+FEATURE_CACHE_ROOT="${FEATURE_CACHE_ROOT:-assets/artifacts/phase_c_feature_cache}"
+FEATURE_CACHE_MODE="${FEATURE_CACHE_MODE:-read_write}"
+FEATURE_CACHE_LOCK_TIMEOUT_SEC="${FEATURE_CACHE_LOCK_TIMEOUT_SEC:-600}"
 # 中文：目录解析依赖这套命名后缀，改名规则会影响后续自动查找。
 
 {
@@ -293,6 +296,9 @@ C2_STANDALONE_EVAL_RUN_NAME="${RUN_NAME}_c2_eval"
   log_line "C2 eval batch  : $C2_EVAL_BATCH_SIZE"
   log_line "C2 LR          : $C2_LR"
   log_line "C2 epochs      : $C2_EPOCHS"
+  log_line "Feature cache root : $FEATURE_CACHE_ROOT"
+  log_line "Feature cache mode : $FEATURE_CACHE_MODE"
+  log_line "Feature cache lock : $FEATURE_CACHE_LOCK_TIMEOUT_SEC"
   log_line "C2 default train extra: ${C2_TRAIN_EXTRA_ARGS_DEFAULT:-<none>}"
   log_line "C2 default eval extra : ${C2_EVAL_EXTRA_ARGS_DEFAULT:-<none>}"
   log_line "User train extra args : ${PHASE_C_PIK_TRAIN_EXTRA_ARGS:-<none>}"
@@ -327,6 +333,9 @@ c2_train_cmd=(
   --per-device-eval-batch-size "$C2_EVAL_BATCH_SIZE"
   --learning-rate "$C2_LR"
   --num-train-epochs "$C2_EPOCHS"
+  --feature-cache-root "$FEATURE_CACHE_ROOT"
+  --feature-cache-mode "$FEATURE_CACHE_MODE"
+  --feature-cache-lock-timeout-sec "$FEATURE_CACHE_LOCK_TIMEOUT_SEC"
 )
 append_extra_args c2_train_cmd "${C2_TRAIN_EXTRA_ARGS_DEFAULT:-}"
 append_extra_args c2_train_cmd "${PHASE_C_PIK_TRAIN_EXTRA_ARGS:-}"
@@ -348,6 +357,9 @@ c2_eval_cmd=(
   --eval-dir "$C1_EVAL_DIR"
   --checkpoint-name best
   --run-name "$C2_STANDALONE_EVAL_RUN_NAME"
+  --feature-cache-root "$FEATURE_CACHE_ROOT"
+  --feature-cache-mode "$FEATURE_CACHE_MODE"
+  --feature-cache-lock-timeout-sec "$FEATURE_CACHE_LOCK_TIMEOUT_SEC"
 )
 append_extra_args c2_eval_cmd "${C2_EVAL_EXTRA_ARGS_DEFAULT:-}"
 append_extra_args c2_eval_cmd "${PHASE_C_PIK_EVAL_EXTRA_ARGS:-}"
@@ -397,6 +409,9 @@ cat > "$SUMMARY_FILE" <<EOF
 - c2_eval_batch_size: $C2_EVAL_BATCH_SIZE
 - c2_learning_rate: $C2_LR
 - c2_num_train_epochs: $C2_EPOCHS
+- feature_cache_root: $FEATURE_CACHE_ROOT
+- feature_cache_mode: $FEATURE_CACHE_MODE
+- feature_cache_lock_timeout_sec: $FEATURE_CACHE_LOCK_TIMEOUT_SEC
 
 ## Resolved Artifact Dirs
 

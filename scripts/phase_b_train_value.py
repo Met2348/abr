@@ -71,6 +71,20 @@ from ours.phase_b.faithfulness_eval import (  # noqa: E402
     compute_corruption_summary,
     render_faithfulness_summary_markdown,
 )
+from ours.phase_b.feature_cache import (  # noqa: E402
+    build_backbone_signature,
+    build_cache_key,
+    feature_cache_can_read,
+    feature_cache_can_write,
+    hash_float_list,
+    hash_int_list,
+    hash_jsonable,
+    hash_text_list,
+    move_tensors_to_device,
+    save_feature_cache,
+    try_load_feature_cache,
+    validate_feature_cache_mode,
+)
 from ours.phase_b.posthoc_calibration import (  # noqa: E402
     IsotonicCalibrationConfig,
     TemperatureCalibrationConfig,
@@ -102,6 +116,10 @@ from ours.phase_b.value_losses import (  # noqa: E402
     mean_squared_calibration_loss,
     mixed_calibration_loss,
 )
+from ours.phase_d.external_pairs import (  # noqa: E402
+    ExternalPairRecord,
+    load_external_pair_jsonl,
+)
 
 
 @dataclass(slots=True)
@@ -109,6 +127,16 @@ class TrainConfig:
     """Compact snapshot of C2 hyperparameters persisted in the manifest."""
 
     max_length: int
+    train_mode: str
+    two_stage_ranking_ratio: float
+    contrastive_max_corruptions_per_prefix: int
+    external_pair_jsonl: str | None
+    external_pair_weight: float
+    external_pair_max_train_samples: int | None
+    external_pair_source_balance: str
+    external_pair_domain_filter: str | None
+    external_pair_min_confidence: float
+    external_pair_use_confidence_weights: bool
     target_source: str
     target_source_missing_policy: str
     learning_rate: float
@@ -158,6 +186,9 @@ class TrainConfig:
     device_map: str
     require_cuda: bool
     logging_steps: int
+    feature_cache_root: str
+    feature_cache_mode: str
+    feature_cache_lock_timeout_sec: float
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable config payload."""
@@ -183,6 +214,116 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-eval-samples", type=int, default=None)
     parser.add_argument("--max-corruption-variants-eval", type=int, default=None)
     parser.add_argument("--max-length", type=int, default=1024)
+    parser.add_argument(
+        "--feature-cache-root",
+        type=Path,
+        default=Path("assets/artifacts/phase_c_feature_cache"),
+        help=(
+            "Persistent on-disk cache root for frozen-backbone encoded features. "
+            "Shared safely across reruns when signatures match."
+        ),
+    )
+    parser.add_argument(
+        "--feature-cache-mode",
+        choices=["off", "read", "write", "read_write"],
+        default="read_write",
+        help=(
+            "Feature-cache behavior: "
+            "`off` disables cache; "
+            "`read` only reuse existing cache; "
+            "`write` only write new cache; "
+            "`read_write` reuse and populate."
+        ),
+    )
+    parser.add_argument(
+        "--feature-cache-lock-timeout-sec",
+        type=float,
+        default=600.0,
+        help="Lock wait timeout for safe concurrent cache writes.",
+    )
+    parser.add_argument(
+        "--train-mode",
+        choices=["joint", "ranking_only", "calibration_only", "two_stage"],
+        default="joint",
+        help=(
+            "C2 optimization mode. "
+            "`joint` keeps legacy mixed training; "
+            "`ranking_only` trains contrastive branch only; "
+            "`calibration_only` disables contrastive updates; "
+            "`two_stage` runs ranking first, then calibration."
+        ),
+    )
+    parser.add_argument(
+        "--two-stage-ranking-ratio",
+        type=float,
+        default=0.5,
+        help=(
+            "When --train-mode=two_stage, fraction of optimizer steps spent in "
+            "ranking-only stage before switching to calibration-only."
+        ),
+    )
+    parser.add_argument(
+        "--contrastive-max-corruptions-per-prefix",
+        type=int,
+        default=1,
+        help=(
+            "Maximum number of ranked corruption candidates per clean prefix "
+            "loaded into contrastive training. 1 preserves historical behavior."
+        ),
+    )
+    parser.add_argument(
+        "--external-pair-jsonl",
+        type=Path,
+        default=None,
+        help=(
+            "Optional Phase D external-pair artifact file "
+            "(train_pairs.jsonl) used as additional ranking supervision."
+        ),
+    )
+    parser.add_argument(
+        "--external-pair-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight for external pair ranking loss branch. "
+            "0 disables external pair training."
+        ),
+    )
+    parser.add_argument(
+        "--external-pair-max-train-samples",
+        type=int,
+        default=None,
+        help="Optional max number of external pairs loaded for training.",
+    )
+    parser.add_argument(
+        "--external-pair-source-balance",
+        choices=["none", "uniform"],
+        default="none",
+        help=(
+            "Sampling policy for external pairs. "
+            "`uniform` does round-robin across source_tag buckets."
+        ),
+    )
+    parser.add_argument(
+        "--external-pair-domain-filter",
+        default="",
+        help=(
+            "Comma-separated domain_tag allow-list for external pairs. "
+            "Empty means keep all domains."
+        ),
+    )
+    parser.add_argument(
+        "--external-pair-min-confidence",
+        type=float,
+        default=0.0,
+        help="Drop external pairs with confidence lower than this threshold.",
+    )
+    parser.add_argument(
+        "--external-pair-use-confidence-weights",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use pair_confidence as per-pair sample weights in external ranking loss.",
+    )
     parser.add_argument(
         "--target-source",
         choices=["q_mean_smoothed", "q_teacher", "q_fused"],
@@ -498,6 +639,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("the following arguments are required: --train-dir, --eval-dir")
     if args.max_length <= 8:
         raise ValueError("--max-length must be > 8")
+    if float(args.feature_cache_lock_timeout_sec) <= 0.0:
+        raise ValueError("--feature-cache-lock-timeout-sec must be > 0")
+    args.feature_cache_mode = validate_feature_cache_mode(str(args.feature_cache_mode))
+    if not (0.0 < args.two_stage_ranking_ratio < 1.0):
+        raise ValueError("--two-stage-ranking-ratio must be in (0, 1)")
+    if args.contrastive_max_corruptions_per_prefix <= 0:
+        raise ValueError("--contrastive-max-corruptions-per-prefix must be > 0")
+    if args.external_pair_max_train_samples is not None and args.external_pair_max_train_samples <= 0:
+        raise ValueError("--external-pair-max-train-samples must be > 0")
+    if args.external_pair_weight < 0.0:
+        raise ValueError("--external-pair-weight must be >= 0")
+    if not (0.0 <= args.external_pair_min_confidence <= 1.0):
+        raise ValueError("--external-pair-min-confidence must be in [0, 1]")
+    if args.external_pair_weight > 0.0 and args.external_pair_jsonl is None:
+        raise ValueError("--external-pair-weight > 0 requires --external-pair-jsonl")
+    if args.external_pair_jsonl is not None and not Path(args.external_pair_jsonl).exists():
+        raise FileNotFoundError(f"External pair JSONL not found: {args.external_pair_jsonl}")
     if args.target_source not in {"q_mean_smoothed", "q_teacher", "q_fused"}:
         raise ValueError("--target-source has an unsupported value")
     if args.per_device_train_batch_size <= 0 or args.per_device_eval_batch_size <= 0:
@@ -550,6 +708,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("bce_mse requires at least one non-zero calibration component weight")
     if args.adaptive_loss_balancing != "none" and not args.use_contrastive_loss:
         raise ValueError("--adaptive-loss-balancing requires --use-contrastive-loss")
+    if args.train_mode != "joint" and args.adaptive_loss_balancing != "none":
+        raise ValueError(
+            "--adaptive-loss-balancing currently supports --train-mode=joint only"
+        )
+    if args.train_mode == "ranking_only" and not args.use_contrastive_loss:
+        raise ValueError("--train-mode=ranking_only requires --use-contrastive-loss")
+    if args.train_mode == "two_stage" and not args.use_contrastive_loss:
+        raise ValueError("--train-mode=two_stage requires --use-contrastive-loss")
     if args.checkpoint_selection_metric == "posthoc_brier" and args.posthoc_calibration == "none":
         raise ValueError(
             "--checkpoint-selection-metric=posthoc_brier requires post-hoc calibration (temperature or isotonic)"
@@ -578,11 +744,13 @@ def main(argv: list[str] | None = None) -> int:
         args.train_dir,
         max_samples=args.max_train_samples,
         require_corruptions=bool(args.use_contrastive_loss),
+        max_primary_corruptions=int(args.contrastive_max_corruptions_per_prefix),
     )
     eval_examples, eval_manifest = load_value_supervision_examples(
         args.eval_dir,
         max_samples=args.max_eval_samples,
         require_corruptions=False,
+        max_primary_corruptions=1,
     )
     eval_corruptions, _ = load_corruption_variants(
         args.eval_dir,
@@ -604,6 +772,20 @@ def main(argv: list[str] | None = None) -> int:
         missing_policy=str(args.target_source_missing_policy),
         split_label="eval",
     )
+    external_pairs: list[ExternalPairRecord] = []
+    external_pair_stats: dict[str, Any] | None = None
+    external_domain_filter = _parse_csv_allow_list(str(args.external_pair_domain_filter))
+    if args.external_pair_jsonl is not None:
+        external_pairs, external_pair_stats = load_external_pair_jsonl(
+            Path(args.external_pair_jsonl),
+            max_samples=args.external_pair_max_train_samples,
+            min_confidence=float(args.external_pair_min_confidence),
+            allowed_domains=external_domain_filter,
+        )
+        if args.external_pair_weight > 0.0 and not external_pairs:
+            raise ValueError(
+                "External pair branch was enabled, but no external pairs survived filtering"
+            )
 
     rollout_config = dict(train_manifest["rollout_config"])
     model_path = str(rollout_config["model_path"])
@@ -620,6 +802,24 @@ def main(argv: list[str] | None = None) -> int:
 
     train_cfg = TrainConfig(
         max_length=int(args.max_length),
+        train_mode=str(args.train_mode),
+        two_stage_ranking_ratio=float(args.two_stage_ranking_ratio),
+        contrastive_max_corruptions_per_prefix=int(args.contrastive_max_corruptions_per_prefix),
+        external_pair_jsonl=(
+            str(args.external_pair_jsonl) if args.external_pair_jsonl is not None else None
+        ),
+        external_pair_weight=float(args.external_pair_weight),
+        external_pair_max_train_samples=(
+            int(args.external_pair_max_train_samples)
+            if args.external_pair_max_train_samples is not None
+            else None
+        ),
+        external_pair_source_balance=str(args.external_pair_source_balance),
+        external_pair_domain_filter=(
+            ",".join(sorted(external_domain_filter)) if external_domain_filter else None
+        ),
+        external_pair_min_confidence=float(args.external_pair_min_confidence),
+        external_pair_use_confidence_weights=bool(args.external_pair_use_confidence_weights),
         target_source=str(args.target_source),
         target_source_missing_policy=str(args.target_source_missing_policy),
         learning_rate=float(args.learning_rate),
@@ -671,6 +871,9 @@ def main(argv: list[str] | None = None) -> int:
         device_map=str(args.device_map),
         require_cuda=bool(args.require_cuda),
         logging_steps=int(args.logging_steps),
+        feature_cache_root=str(args.feature_cache_root),
+        feature_cache_mode=str(args.feature_cache_mode),
+        feature_cache_lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
     )
 
     run_dir = args.output_root / f"{args.run_name}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
@@ -697,6 +900,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"run_dir           : {run_dir}")
     print(f"model_path        : {model_path}")
     print(f"adapter_path      : {adapter_path if adapter_path is not None else '<none>'}")
+    print(f"train_mode        : {args.train_mode}")
+    print(f"stage_ratio       : {args.two_stage_ranking_ratio}")
     print(f"target_source     : {args.target_source}")
     print(f"target_missing    : {args.target_source_missing_policy}")
     print(f"target_cov_train  : {train_target_source_stats['coverage_ratio']:.4f}")
@@ -726,12 +931,29 @@ def main(argv: list[str] | None = None) -> int:
     print(f"pair_stratified   : {args.contrastive_stratified_sampling}")
     print(f"pair_step_bucket  : {args.contrastive_stratify_step_bucket_size}")
     print(f"pair_include_noc  : {args.contrastive_stratify_include_no_corruption}")
+    print(f"pair_k_per_prefix : {args.contrastive_max_corruptions_per_prefix}")
+    print(f"external_pair_file: {args.external_pair_jsonl if args.external_pair_jsonl is not None else '<none>'}")
+    print(f"external_pair_w   : {args.external_pair_weight}")
+    print(f"external_pair_bal : {args.external_pair_source_balance}")
+    print(f"external_pair_dom : {args.external_pair_domain_filter if args.external_pair_domain_filter else '<all>'}")
+    print(f"external_pair_minc: {args.external_pair_min_confidence}")
+    print(f"external_pair_conf: {args.external_pair_use_confidence_weights}")
+    print(f"external_num_pairs: {len(external_pairs)}")
     print(f"posthoc_calib     : {args.posthoc_calibration}")
     print(f"ckpt_metric       : {args.checkpoint_selection_metric}")
     print(f"batch_train       : {args.per_device_train_batch_size}")
     print(f"batch_eval        : {args.per_device_eval_batch_size}")
     print(f"max_length        : {args.max_length}")
+    print(f"feat_cache_mode   : {args.feature_cache_mode}")
+    print(f"feat_cache_root   : {args.feature_cache_root}")
     print(f"seed              : {args.seed}")
+    if external_pair_stats is not None:
+        print(
+            "external_sources : "
+            + ", ".join(
+                f"{k}:{v}" for k, v in sorted(external_pair_stats.get("by_source", {}).items())
+            )
+        )
     print("=" * 88)
 
     # Stage 2: 冻结 backbone 并一次性缓存特征；后续仅训练小 value head。
@@ -766,40 +988,312 @@ def main(argv: list[str] | None = None) -> int:
     model_load_elapsed = time.perf_counter() - model_load_start
 
     feature_cache_start = time.perf_counter()
-    train_cache = _encode_example_cache(
+    feature_cache_stats: dict[str, Any] = {
+        "mode": str(args.feature_cache_mode),
+        "root": str(args.feature_cache_root),
+        "hits": 0,
+        "misses": 0,
+        "writes": 0,
+        "entries": {},
+    }
+    feature_cache_root = Path(args.feature_cache_root)
+    backbone_signature = build_backbone_signature(
+        model_path=str(model_path),
+        adapter_path=(str(adapter_path) if adapter_path is not None else None),
+        tokenizer_path=str(tokenizer_path),
+        dtype=str(args.dtype),
+        max_length=int(args.max_length),
+    )
+
+    train_cache_signature = _build_value_example_cache_signature_payload(
         examples=train_examples,
         target_values=train_target_values,
-        backbone=backbone,
-        tokenizer=tokenizer,
-        torch_module=torch,
-        max_length=args.max_length,
-        batch_size=args.per_device_eval_batch_size,
-        use_primary_corruption=args.use_contrastive_loss,
-        calibration_sample_weighting=args.calibration_sample_weighting,
-        calibration_weight_floor=args.calibration_weight_floor,
-        calibration_weight_gamma=args.calibration_weight_gamma,
+        use_primary_corruption=bool(args.use_contrastive_loss),
+        contrastive_max_corruptions_per_prefix=int(args.contrastive_max_corruptions_per_prefix),
+        calibration_sample_weighting=str(args.calibration_sample_weighting),
+        calibration_weight_floor=float(args.calibration_weight_floor),
+        calibration_weight_gamma=float(args.calibration_weight_gamma),
+        max_length=int(args.max_length),
+        backbone_signature=backbone_signature,
     )
-    eval_cache = _encode_example_cache(
+    train_cache_key, train_signature_hash = build_cache_key(
+        "phase_b_value_train_cache",
+        train_cache_signature,
+    )
+    train_cache = None
+    if feature_cache_can_read(str(args.feature_cache_mode)):
+        cached_payload, _, _ = try_load_feature_cache(
+            cache_root=feature_cache_root,
+            cache_key=train_cache_key,
+            expected_signature_hash=train_signature_hash,
+            torch_module=torch,
+        )
+        if cached_payload is not None:
+            try:
+                _validate_cached_example_cache_payload(
+                    cache=cached_payload,
+                    expected_num_examples=len(train_examples),
+                    torch_module=torch,
+                )
+                train_cache = move_tensors_to_device(cached_payload, value_device, torch)
+                feature_cache_stats["hits"] += 1
+                feature_cache_stats["entries"]["train_cache"] = {
+                    "status": "hit",
+                    "cache_key": train_cache_key,
+                }
+                print(f"feature_cache    : train_cache hit ({train_cache_key})", flush=True)
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"feature_cache    : train_cache invalid payload, fallback to re-encode ({exc})",
+                    flush=True,
+                )
+    if train_cache is None:
+        feature_cache_stats["misses"] += 1
+        feature_cache_stats["entries"]["train_cache"] = {
+            "status": "miss",
+            "cache_key": train_cache_key,
+        }
+        print(f"feature_cache    : train_cache miss ({train_cache_key})", flush=True)
+        train_cache = _encode_example_cache(
+            examples=train_examples,
+            target_values=train_target_values,
+            backbone=backbone,
+            tokenizer=tokenizer,
+            torch_module=torch,
+            max_length=args.max_length,
+            batch_size=args.per_device_eval_batch_size,
+            use_primary_corruption=args.use_contrastive_loss,
+            contrastive_max_corruptions_per_prefix=int(args.contrastive_max_corruptions_per_prefix),
+            calibration_sample_weighting=args.calibration_sample_weighting,
+            calibration_weight_floor=args.calibration_weight_floor,
+            calibration_weight_gamma=args.calibration_weight_gamma,
+        )
+        if feature_cache_can_write(str(args.feature_cache_mode)):
+            save_feature_cache(
+                cache_root=feature_cache_root,
+                cache_key=train_cache_key,
+                signature_hash=train_signature_hash,
+                payload=train_cache,
+                torch_module=torch,
+                producer="scripts/phase_b_train_value.py:train_cache",
+                lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
+                extra_metadata={"num_examples": int(len(train_examples))},
+            )
+            feature_cache_stats["writes"] += 1
+            feature_cache_stats["entries"]["train_cache"]["write"] = True
+
+    eval_cache_signature = _build_value_example_cache_signature_payload(
         examples=eval_examples,
         target_values=eval_target_values,
-        backbone=backbone,
-        tokenizer=tokenizer,
-        torch_module=torch,
-        max_length=args.max_length,
-        batch_size=args.per_device_eval_batch_size,
         use_primary_corruption=False,
+        contrastive_max_corruptions_per_prefix=1,
         calibration_sample_weighting="none",
         calibration_weight_floor=0.0,
         calibration_weight_gamma=1.0,
+        max_length=int(args.max_length),
+        backbone_signature=backbone_signature,
     )
-    eval_corruption_cache = _encode_corruption_variant_cache(
+    eval_cache_key, eval_signature_hash = build_cache_key(
+        "phase_b_value_eval_cache",
+        eval_cache_signature,
+    )
+    eval_cache = None
+    if feature_cache_can_read(str(args.feature_cache_mode)):
+        cached_payload, _, _ = try_load_feature_cache(
+            cache_root=feature_cache_root,
+            cache_key=eval_cache_key,
+            expected_signature_hash=eval_signature_hash,
+            torch_module=torch,
+        )
+        if cached_payload is not None:
+            try:
+                _validate_cached_example_cache_payload(
+                    cache=cached_payload,
+                    expected_num_examples=len(eval_examples),
+                    torch_module=torch,
+                )
+                eval_cache = move_tensors_to_device(cached_payload, value_device, torch)
+                feature_cache_stats["hits"] += 1
+                feature_cache_stats["entries"]["eval_cache"] = {
+                    "status": "hit",
+                    "cache_key": eval_cache_key,
+                }
+                print(f"feature_cache    : eval_cache hit ({eval_cache_key})", flush=True)
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"feature_cache    : eval_cache invalid payload, fallback to re-encode ({exc})",
+                    flush=True,
+                )
+    if eval_cache is None:
+        feature_cache_stats["misses"] += 1
+        feature_cache_stats["entries"]["eval_cache"] = {
+            "status": "miss",
+            "cache_key": eval_cache_key,
+        }
+        print(f"feature_cache    : eval_cache miss ({eval_cache_key})", flush=True)
+        eval_cache = _encode_example_cache(
+            examples=eval_examples,
+            target_values=eval_target_values,
+            backbone=backbone,
+            tokenizer=tokenizer,
+            torch_module=torch,
+            max_length=args.max_length,
+            batch_size=args.per_device_eval_batch_size,
+            use_primary_corruption=False,
+            contrastive_max_corruptions_per_prefix=1,
+            calibration_sample_weighting="none",
+            calibration_weight_floor=0.0,
+            calibration_weight_gamma=1.0,
+        )
+        if feature_cache_can_write(str(args.feature_cache_mode)):
+            save_feature_cache(
+                cache_root=feature_cache_root,
+                cache_key=eval_cache_key,
+                signature_hash=eval_signature_hash,
+                payload=eval_cache,
+                torch_module=torch,
+                producer="scripts/phase_b_train_value.py:eval_cache",
+                lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
+                extra_metadata={"num_examples": int(len(eval_examples))},
+            )
+            feature_cache_stats["writes"] += 1
+            feature_cache_stats["entries"]["eval_cache"]["write"] = True
+
+    eval_corruption_signature = _build_corruption_variant_cache_signature_payload(
         variants=eval_corruptions,
-        backbone=backbone,
-        tokenizer=tokenizer,
-        torch_module=torch,
-        max_length=args.max_length,
-        batch_size=args.per_device_eval_batch_size,
+        max_length=int(args.max_length),
+        backbone_signature=backbone_signature,
     )
+    eval_corruption_key, eval_corruption_hash = build_cache_key(
+        "phase_b_value_eval_corruption_cache",
+        eval_corruption_signature,
+    )
+    eval_corruption_cache = None
+    if feature_cache_can_read(str(args.feature_cache_mode)):
+        cached_payload, _, _ = try_load_feature_cache(
+            cache_root=feature_cache_root,
+            cache_key=eval_corruption_key,
+            expected_signature_hash=eval_corruption_hash,
+            torch_module=torch,
+        )
+        if cached_payload is not None:
+            try:
+                _validate_cached_corruption_cache_payload(
+                    cache=cached_payload,
+                    expected_num_variants=len(eval_corruptions),
+                    torch_module=torch,
+                )
+                eval_corruption_cache = move_tensors_to_device(cached_payload, value_device, torch)
+                feature_cache_stats["hits"] += 1
+                feature_cache_stats["entries"]["eval_corruption_cache"] = {
+                    "status": "hit",
+                    "cache_key": eval_corruption_key,
+                }
+                print(f"feature_cache    : eval_corruption_cache hit ({eval_corruption_key})", flush=True)
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    "feature_cache    : eval_corruption_cache invalid payload, "
+                    f"fallback to re-encode ({exc})",
+                    flush=True,
+                )
+    if eval_corruption_cache is None:
+        feature_cache_stats["misses"] += 1
+        feature_cache_stats["entries"]["eval_corruption_cache"] = {
+            "status": "miss",
+            "cache_key": eval_corruption_key,
+        }
+        print(f"feature_cache    : eval_corruption_cache miss ({eval_corruption_key})", flush=True)
+        eval_corruption_cache = _encode_corruption_variant_cache(
+            variants=eval_corruptions,
+            backbone=backbone,
+            tokenizer=tokenizer,
+            torch_module=torch,
+            max_length=args.max_length,
+            batch_size=args.per_device_eval_batch_size,
+        )
+        if feature_cache_can_write(str(args.feature_cache_mode)):
+            save_feature_cache(
+                cache_root=feature_cache_root,
+                cache_key=eval_corruption_key,
+                signature_hash=eval_corruption_hash,
+                payload=eval_corruption_cache,
+                torch_module=torch,
+                producer="scripts/phase_b_train_value.py:eval_corruption_cache",
+                lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
+                extra_metadata={"num_variants": int(len(eval_corruptions))},
+            )
+            feature_cache_stats["writes"] += 1
+            feature_cache_stats["entries"]["eval_corruption_cache"]["write"] = True
+
+    external_pair_cache = None
+    if external_pairs:
+        external_signature = _build_external_pair_cache_signature_payload(
+            pairs=external_pairs,
+            use_confidence_weights=bool(args.external_pair_use_confidence_weights),
+            max_length=int(args.max_length),
+            backbone_signature=backbone_signature,
+        )
+        external_key, external_hash = build_cache_key(
+            "phase_b_value_external_pair_cache",
+            external_signature,
+        )
+        if feature_cache_can_read(str(args.feature_cache_mode)):
+            cached_payload, _, _ = try_load_feature_cache(
+                cache_root=feature_cache_root,
+                cache_key=external_key,
+                expected_signature_hash=external_hash,
+                torch_module=torch,
+            )
+            if cached_payload is not None:
+                try:
+                    _validate_cached_external_pair_cache_payload(
+                        cache=cached_payload,
+                        expected_num_pairs=len(external_pairs),
+                        torch_module=torch,
+                    )
+                    external_pair_cache = move_tensors_to_device(cached_payload, value_device, torch)
+                    feature_cache_stats["hits"] += 1
+                    feature_cache_stats["entries"]["external_pair_cache"] = {
+                        "status": "hit",
+                        "cache_key": external_key,
+                    }
+                    print(f"feature_cache    : external_pair_cache hit ({external_key})", flush=True)
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        "feature_cache    : external_pair_cache invalid payload, "
+                        f"fallback to re-encode ({exc})",
+                        flush=True,
+                    )
+        if external_pair_cache is None:
+            feature_cache_stats["misses"] += 1
+            feature_cache_stats["entries"]["external_pair_cache"] = {
+                "status": "miss",
+                "cache_key": external_key,
+            }
+            print(f"feature_cache    : external_pair_cache miss ({external_key})", flush=True)
+            external_pair_cache = _encode_external_pair_cache(
+                pairs=external_pairs,
+                backbone=backbone,
+                tokenizer=tokenizer,
+                torch_module=torch,
+                max_length=args.max_length,
+                batch_size=args.per_device_eval_batch_size,
+                use_confidence_weights=bool(args.external_pair_use_confidence_weights),
+            )
+            if feature_cache_can_write(str(args.feature_cache_mode)):
+                save_feature_cache(
+                    cache_root=feature_cache_root,
+                    cache_key=external_key,
+                    signature_hash=external_hash,
+                    payload=external_pair_cache,
+                    torch_module=torch,
+                    producer="scripts/phase_b_train_value.py:external_pair_cache",
+                    lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
+                    extra_metadata={"num_pairs": int(len(external_pairs))},
+                )
+                feature_cache_stats["writes"] += 1
+                feature_cache_stats["entries"]["external_pair_cache"]["write"] = True
+
     feature_cache_elapsed = time.perf_counter() - feature_cache_start
     if bool(args.contrastive_stratified_sampling):
         strata_summary = _summarize_strata_for_logging(
@@ -883,6 +1377,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # 用 optimizer steps 驱动而不是整 epoch，保证小数 epoch 语义准确。
     while global_step < total_steps:
+        stage_name, stage_calibration_enabled, stage_contrastive_enabled = _resolve_training_stage(
+            train_mode=str(args.train_mode),
+            global_step=int(global_step),
+            total_steps=int(total_steps),
+            two_stage_ranking_ratio=float(args.two_stage_ranking_ratio),
+            use_contrastive_loss=bool(args.use_contrastive_loss),
+        )
         epoch_stats = _run_one_train_epoch(
             value_head=value_head,
             train_cache=train_cache,
@@ -914,14 +1415,25 @@ def main(argv: list[str] | None = None) -> int:
             contrastive_stratify_include_no_corruption=args.contrastive_stratify_include_no_corruption,
             adaptive_loss_balancing=args.adaptive_loss_balancing,
             adaptive_loss_state=adaptive_loss_state,
+            external_pair_cache=external_pair_cache,
+            external_pair_weight=float(args.external_pair_weight),
+            external_pair_source_balance=str(args.external_pair_source_balance),
             logging_steps=args.logging_steps,
             global_step_offset=global_step,
             max_steps=(args.max_steps if args.max_steps > 0 else None),
+            calibration_enabled=bool(stage_calibration_enabled),
+            contrastive_enabled=bool(stage_contrastive_enabled),
         )
         global_step = int(epoch_stats["global_step"])
         epoch_idx += 1
         if int(epoch_stats["num_batches"]) <= 0:
             raise RuntimeError("C2 training made zero progress in one epoch pass")
+        if int(epoch_stats.get("optimizer_steps", 0)) <= 0:
+            raise RuntimeError(
+                "C2 training produced zero optimizer steps in one epoch pass. "
+                "Likely all contrastive pairs were filtered out; relax pair gates "
+                "or switch training mode."
+            )
 
         eval_metrics, eval_prefix_scores, eval_corruption_scores = _evaluate_value_head(
             value_head=value_head,
@@ -939,6 +1451,7 @@ def main(argv: list[str] | None = None) -> int:
         curve_row = {
             "epoch": epoch_idx,
             "global_step": global_step,
+            "train_stage": str(stage_name),
             "train": epoch_stats,
             "eval": eval_metrics,
         }
@@ -1012,12 +1525,17 @@ def main(argv: list[str] | None = None) -> int:
     train_metrics = {
         "model_load_seconds": float(model_load_elapsed),
         "feature_cache_seconds": float(feature_cache_elapsed),
+        "feature_cache": feature_cache_stats,
         "train_elapsed_seconds": float(train_elapsed),
         "global_step": int(global_step),
         "train_curve": train_curve,
         "train_target_mean": float(train_target_mean),
         "target_source": str(args.target_source),
         "target_source_missing_policy": str(args.target_source_missing_policy),
+        "external_pair_stats": external_pair_stats,
+        "external_pair_weight": float(args.external_pair_weight),
+        "external_pair_source_balance": str(args.external_pair_source_balance),
+        "feature_cache": feature_cache_stats,
         "target_source_stats": {
             "train": train_target_source_stats,
             "eval": eval_target_source_stats,
@@ -1063,8 +1581,12 @@ def main(argv: list[str] | None = None) -> int:
         "num_train_examples": len(train_examples),
         "num_eval_examples": len(eval_examples),
         "num_eval_corruptions": len(eval_corruptions),
+        "num_external_pairs": len(external_pairs),
         "target_source": str(args.target_source),
         "target_source_missing_policy": str(args.target_source_missing_policy),
+        "external_pair_stats": external_pair_stats,
+        "external_pair_weight": float(args.external_pair_weight),
+        "external_pair_source_balance": str(args.external_pair_source_balance),
         "teacher_coverage_ratio_train": float(train_target_source_stats["teacher_available_ratio"]),
         "teacher_coverage_ratio_eval": float(eval_target_source_stats["teacher_available_ratio"]),
         "teacher_disagreement_ratio_train": float(train_target_source_stats["teacher_disagree_ratio"]),
@@ -1093,6 +1615,7 @@ def main(argv: list[str] | None = None) -> int:
             "global_step": int(global_step),
             "train_elapsed_seconds": float(train_elapsed),
             "feature_cache_seconds": float(feature_cache_elapsed),
+            "feature_cache": feature_cache_stats,
             "model_load_seconds": float(model_load_elapsed),
             "train_target_mean": float(train_target_mean),
             "target_source": str(args.target_source),
@@ -1123,6 +1646,9 @@ def main(argv: list[str] | None = None) -> int:
                 "train_examples": len(train_examples),
                 "eval_examples": len(eval_examples),
                 "eval_corruptions": len(eval_corruptions),
+                "external_pairs": len(external_pairs),
+                "external_pair_weight": float(args.external_pair_weight),
+                "external_pair_source_balance": str(args.external_pair_source_balance),
             },
         ),
         encoding="utf-8",
@@ -1132,6 +1658,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"global_step       : {global_step}")
     print(f"train_elapsed_sec : {train_elapsed:.2f}")
     print(f"feature_cache_sec : {feature_cache_elapsed:.2f}")
+    print(
+        "feature_cache_use : "
+        f"hits={int(feature_cache_stats['hits'])} "
+        f"misses={int(feature_cache_stats['misses'])} "
+        f"writes={int(feature_cache_stats['writes'])}"
+    )
     print(f"selected_raw_brier: {selected_eval_metrics['calibration']['brier_score']:.6f}")
     if selected_eval_metrics.get("calibration_posthoc") is not None:
         print(f"selected_post_bri : {selected_eval_metrics['calibration_posthoc']['brier_score']:.6f}")
@@ -1162,6 +1694,8 @@ def main(argv: list[str] | None = None) -> int:
     if selected_eval_metrics.get("corruption") is not None:
         print(f"corr_pair_acc     : {selected_eval_metrics['corruption']['pair_accuracy']:.6f}")
         print(f"corr_auc          : {selected_eval_metrics['corruption']['auc_clean_vs_corrupt']:.6f}")
+    print(f"external_pairs    : {len(external_pairs)}")
+    print(f"external_pair_w   : {float(args.external_pair_weight):.4f}")
     print(f"train_metrics     : {train_metrics_path}")
     print(f"eval_metrics      : {eval_metrics_path}")
     print(f"manifest          : {manifest_path}")
@@ -1291,6 +1825,98 @@ def _summarize_strata_for_logging(
     }
 
 
+def _build_external_pair_permutation(
+    *,
+    external_pair_cache: dict[str, Any],
+    torch_module: Any,
+    source_balance: str,
+) -> Any:
+    """Build external-pair permutation with optional source balancing."""
+    num_pairs = int(external_pair_cache["num_pairs"])
+    device = external_pair_cache["chosen_features"].device
+    if num_pairs <= 1:
+        return torch_module.arange(num_pairs, device=device)
+    if source_balance == "none":
+        return torch_module.randperm(num_pairs, device=device)
+    if source_balance != "uniform":
+        raise ValueError(f"Unsupported external pair source balance mode: {source_balance!r}")
+
+    source_tags = list(external_pair_cache["source_tags"])
+    buckets: dict[str, list[int]] = {}
+    for idx, tag in enumerate(source_tags):
+        buckets.setdefault(str(tag), []).append(int(idx))
+    for key in list(buckets.keys()):
+        values = buckets[key]
+        if len(values) <= 1:
+            continue
+        order = torch_module.randperm(len(values)).tolist()
+        buckets[key] = [values[pos] for pos in order]
+
+    pointers: dict[str, int] = {key: 0 for key in buckets}
+    ordered: list[int] = []
+    while True:
+        active = [key for key, values in buckets.items() if pointers[key] < len(values)]
+        if not active:
+            break
+        if len(active) > 1:
+            shuffle_order = torch_module.randperm(len(active)).tolist()
+            active = [active[pos] for pos in shuffle_order]
+        for key in active:
+            pos = pointers[key]
+            ordered.append(buckets[key][pos])
+            pointers[key] = pos + 1
+    if len(ordered) != num_pairs:
+        return torch_module.randperm(num_pairs, device=device)
+    return torch_module.tensor(ordered, dtype=torch_module.long, device=device)
+
+
+def _next_external_pair_batch(
+    *,
+    external_pair_cache: dict[str, Any],
+    torch_module: Any,
+    permutation: Any,
+    cursor: int,
+    batch_size: int,
+    source_balance: str,
+) -> tuple[Any, int, Any]:
+    """Return one external-pair mini-batch with wrap-around sampling."""
+    num_pairs = int(external_pair_cache["num_pairs"])
+    device = external_pair_cache["chosen_features"].device
+    if batch_size <= 0 or num_pairs <= 0:
+        empty = torch_module.zeros((0,), dtype=torch_module.long, device=device)
+        return empty, 0, permutation
+    if permutation is None or int(permutation.shape[0]) != num_pairs:
+        permutation = _build_external_pair_permutation(
+            external_pair_cache=external_pair_cache,
+            torch_module=torch_module,
+            source_balance=source_balance,
+        )
+        cursor = 0
+
+    if cursor + batch_size <= num_pairs:
+        indices = permutation[cursor : cursor + batch_size]
+        cursor += batch_size
+        if cursor >= num_pairs:
+            permutation = _build_external_pair_permutation(
+                external_pair_cache=external_pair_cache,
+                torch_module=torch_module,
+                source_balance=source_balance,
+            )
+            cursor = 0
+        return indices, cursor, permutation
+
+    first = permutation[cursor:]
+    needed = batch_size - int(first.shape[0])
+    permutation = _build_external_pair_permutation(
+        external_pair_cache=external_pair_cache,
+        torch_module=torch_module,
+        source_balance=source_balance,
+    )
+    second = permutation[:needed]
+    cursor = needed
+    return torch_module.cat([first, second], dim=0), cursor, permutation
+
+
 def _run_one_train_epoch(
     *,
     value_head: Any,
@@ -1323,9 +1949,14 @@ def _run_one_train_epoch(
     contrastive_stratify_include_no_corruption: bool,
     adaptive_loss_balancing: str,
     adaptive_loss_state: dict[str, Any] | None,
+    external_pair_cache: dict[str, Any] | None,
+    external_pair_weight: float,
+    external_pair_source_balance: str,
     logging_steps: int,
     global_step_offset: int,
     max_steps: int | None,
+    calibration_enabled: bool = True,
+    contrastive_enabled: bool = True,
 ) -> dict[str, Any]:
     """Train the head for one epoch over cached feature tensors."""
     value_head.train()
@@ -1343,9 +1974,25 @@ def _run_one_train_epoch(
     running_total = 0.0
     running_cal = 0.0
     running_ctr = 0.0
+    running_ctr_external = 0.0
     running_effective_ctr_weight = 0.0
     batches = 0
     optimizer_steps = 0
+    external_pairs_seen = 0
+
+    external_enabled = (
+        external_pair_cache is not None
+        and float(external_pair_weight) > 0.0
+        and int(external_pair_cache["num_pairs"]) > 0
+    )
+    external_cursor = 0
+    external_perm = None
+    if external_enabled:
+        external_perm = _build_external_pair_permutation(
+            external_pair_cache=external_pair_cache,
+            torch_module=torch_module,
+            source_balance=str(external_pair_source_balance),
+        )
 
     for batch_start in range(0, num_examples, batch_size):
         if max_steps is not None and global_step_offset + optimizer_steps >= max_steps:
@@ -1359,24 +2006,28 @@ def _run_one_train_epoch(
         )
         sample_weights = train_cache["calibration_weights"][batch_indices]
         head_outputs = value_head(clean_features)
-        loss_cal = _compute_calibration_loss(
-            calibration_loss=calibration_loss,
-            head_outputs=head_outputs,
-            targets=targets,
-            sample_weights=sample_weights,
-            calibration_mse_weight=calibration_mse_weight,
-            calibration_bce_weight=calibration_bce_weight,
-            calibration_bce_pos_weight=calibration_bce_pos_weight,
-            torch_module=torch_module,
-        )
+        if calibration_enabled:
+            loss_cal = _compute_calibration_loss(
+                calibration_loss=calibration_loss,
+                head_outputs=head_outputs,
+                targets=targets,
+                sample_weights=sample_weights,
+                calibration_mse_weight=calibration_mse_weight,
+                calibration_bce_weight=calibration_bce_weight,
+                calibration_bce_pos_weight=calibration_bce_pos_weight,
+                torch_module=torch_module,
+            )
+        else:
+            loss_cal = torch_module.zeros((), device=clean_features.device)
         loss_ctr = torch_module.zeros((), device=clean_features.device)
+        loss_ctr_external = torch_module.zeros((), device=clean_features.device)
         used_ctr_pairs = False
-        if lambda_contrastive > 0.0:
+        if contrastive_enabled and lambda_contrastive > 0.0:
             # 对比分支先过 pair filter，再算 margin loss，尽量抑制噪声 pair。
-            corruption_mask = train_cache["has_primary_corruption"][batch_indices]
-            corruption_mask = _apply_contrastive_pair_filter(
+            sample_mask = train_cache["has_primary_corruption"][batch_indices]
+            sample_mask = _apply_contrastive_pair_filter(
                 batch_indices=batch_indices,
-                base_mask=corruption_mask,
+                base_mask=sample_mask,
                 train_cache=train_cache,
                 pair_filter=contrastive_pair_filter,
                 confidence_threshold=float(contrastive_confidence_threshold),
@@ -1387,13 +2038,31 @@ def _run_one_train_epoch(
                 require_pair_pass_gate=bool(contrastive_require_pair_pass_gate),
                 torch_module=torch_module,
             )
-            if bool(corruption_mask.any().item()):
-                corrupt_features = train_cache["primary_corruption_features"][batch_indices][corruption_mask]
-                clean_scores_for_pairs = head_outputs["scores"][corruption_mask]
+            candidate_mask = train_cache["contrastive_candidate_mask"][batch_indices].clone()
+            if candidate_mask.ndim == 1:
+                candidate_mask = candidate_mask.unsqueeze(-1)
+            candidate_mask = candidate_mask & sample_mask.unsqueeze(1)
+            candidate_mask = _apply_contrastive_candidate_quality_filter(
+                candidate_mask=candidate_mask,
+                candidate_delta_q=train_cache["contrastive_candidate_delta_q"][batch_indices],
+                candidate_z_delta=train_cache["contrastive_candidate_z_delta"][batch_indices],
+                candidate_pair_weight=train_cache["contrastive_candidate_pair_weight"][batch_indices],
+                candidate_pass_gate=train_cache["contrastive_candidate_pass_gate"][batch_indices],
+                label_delta_q_min=float(contrastive_label_delta_q_min),
+                label_z_min=float(contrastive_label_z_min),
+                label_pair_weight_min=float(contrastive_label_pair_weight_min),
+                require_pair_pass_gate=bool(contrastive_require_pair_pass_gate),
+            )
+            if bool(candidate_mask.any().item()):
+                corrupt_features = train_cache["contrastive_corruption_features"][batch_indices][candidate_mask]
+                expanded_clean_scores = head_outputs["scores"].unsqueeze(1).expand_as(
+                    train_cache["contrastive_candidate_pair_weight"][batch_indices]
+                )
+                clean_scores_for_pairs = expanded_clean_scores[candidate_mask]
                 corrupt_scores = value_head(corrupt_features)["scores"]
                 pair_weights = None
                 if bool(contrastive_use_pair_weights):
-                    pair_weights = train_cache["primary_pair_weight"][batch_indices][corruption_mask]
+                    pair_weights = train_cache["contrastive_candidate_pair_weight"][batch_indices][candidate_mask]
                 clean_scores_for_pairs, corrupt_scores, pair_weights = _apply_contrastive_score_gap_filter(
                     clean_scores_for_pairs=clean_scores_for_pairs,
                     corrupt_scores=corrupt_scores,
@@ -1412,6 +2081,33 @@ def _run_one_train_epoch(
                     )
                     used_ctr_pairs = True
 
+        if contrastive_enabled and external_enabled:
+            ext_count = int(batch_indices.shape[0])
+            ext_indices, external_cursor, external_perm = _next_external_pair_batch(
+                external_pair_cache=external_pair_cache,
+                torch_module=torch_module,
+                permutation=external_perm,
+                cursor=external_cursor,
+                batch_size=ext_count,
+                source_balance=str(external_pair_source_balance),
+            )
+            if ext_indices.numel() > 0:
+                chosen_features = external_pair_cache["chosen_features"][ext_indices]
+                rejected_features = external_pair_cache["rejected_features"][ext_indices]
+                chosen_scores = value_head(chosen_features)["scores"]
+                rejected_scores = value_head(rejected_features)["scores"]
+                ext_weights = external_pair_cache["pair_weights"][ext_indices]
+                loss_ctr_external = contrastive_margin_loss(
+                    chosen_scores,
+                    rejected_scores,
+                    margin=contrastive_margin,
+                    torch_module=torch_module,
+                    sample_weights=ext_weights,
+                )
+                external_pairs_seen += int(ext_indices.shape[0])
+                loss_ctr = loss_ctr + (float(external_pair_weight) * loss_ctr_external)
+                used_ctr_pairs = True
+
         loss, effective_ctr_weight = _compose_total_loss(
             loss_cal=loss_cal,
             loss_ctr=loss_ctr,
@@ -1421,6 +2117,15 @@ def _run_one_train_epoch(
             used_ctr_pairs=used_ctr_pairs,
             torch_module=torch_module,
         )
+        if not bool(getattr(loss, "requires_grad", False)):
+            # Ranking-only stage may hit batches with no surviving pairs after
+            # filtering. Skip these batches to avoid backward on constants.
+            running_total += float(loss.item())
+            running_cal += float(loss_cal.item())
+            running_ctr += float(loss_ctr.item())
+            running_effective_ctr_weight += float(effective_ctr_weight)
+            batches += 1
+            continue
         (loss / grad_accum_steps).backward()
 
         if ((batches + 1) % grad_accum_steps == 0) or (batch_start + batch_size >= num_examples):
@@ -1446,6 +2151,7 @@ def _run_one_train_epoch(
                     f"loss={float(loss.item()):.6f} "
                     f"cal={float(loss_cal.item()):.6f} "
                     f"ctr={float(loss_ctr.item()):.6f} "
+                    f"ctr_ext={float(loss_ctr_external.item()):.6f} "
                     f"ctr_w={float(effective_ctr_weight):.4f}",
                     flush=True,
                 )
@@ -1453,6 +2159,7 @@ def _run_one_train_epoch(
         running_total += float(loss.item())
         running_cal += float(loss_cal.item())
         running_ctr += float(loss_ctr.item())
+        running_ctr_external += float(loss_ctr_external.item())
         running_effective_ctr_weight += float(effective_ctr_weight)
         batches += 1
 
@@ -1460,8 +2167,11 @@ def _run_one_train_epoch(
         "avg_total_loss": float(running_total / max(batches, 1)),
         "avg_calibration_loss": float(running_cal / max(batches, 1)),
         "avg_contrastive_loss": float(running_ctr / max(batches, 1)),
+        "avg_external_contrastive_loss": float(running_ctr_external / max(batches, 1)),
         "avg_effective_contrastive_weight": float(running_effective_ctr_weight / max(batches, 1)),
         "num_batches": int(batches),
+        "optimizer_steps": int(optimizer_steps),
+        "external_pairs_seen": int(external_pairs_seen),
         "global_step": int(global_step_offset + optimizer_steps),
     }
 
@@ -1830,6 +2540,29 @@ def _resolve_checkpoint_brier(
     raise ValueError(f"Unsupported checkpoint_selection_metric: {checkpoint_selection_metric!r}")
 
 
+def _resolve_training_stage(
+    *,
+    train_mode: str,
+    global_step: int,
+    total_steps: int,
+    two_stage_ranking_ratio: float,
+    use_contrastive_loss: bool,
+) -> tuple[str, bool, bool]:
+    """Resolve stage-specific optimization flags for one training pass."""
+    if train_mode == "joint":
+        return "joint", True, bool(use_contrastive_loss)
+    if train_mode == "ranking_only":
+        return "ranking_only", False, bool(use_contrastive_loss)
+    if train_mode == "calibration_only":
+        return "calibration_only", True, False
+    if train_mode == "two_stage":
+        switch_step = max(1, int(total_steps * float(two_stage_ranking_ratio)))
+        if global_step < switch_step:
+            return "two_stage_ranking", False, bool(use_contrastive_loss)
+        return "two_stage_calibration", True, False
+    raise ValueError(f"Unsupported train_mode: {train_mode!r}")
+
+
 def _write_posthoc_calibration_payload(path: Path, payload: dict[str, Any] | None) -> None:
     """Persist one post-hoc calibration payload if available."""
     if payload is None:
@@ -1979,6 +2712,28 @@ def _apply_contrastive_pair_filter(
     return base_mask & extra_mask
 
 
+def _apply_contrastive_candidate_quality_filter(
+    *,
+    candidate_mask: Any,
+    candidate_delta_q: Any,
+    candidate_z_delta: Any,
+    candidate_pair_weight: Any,
+    candidate_pass_gate: Any,
+    label_delta_q_min: float,
+    label_z_min: float,
+    label_pair_weight_min: float,
+    require_pair_pass_gate: bool,
+) -> Any:
+    """Filter top-k corruption candidates using candidate-level label quality."""
+    keep_mask = candidate_mask
+    keep_mask = keep_mask & (candidate_delta_q >= float(label_delta_q_min))
+    keep_mask = keep_mask & (candidate_z_delta >= float(label_z_min))
+    keep_mask = keep_mask & (candidate_pair_weight >= float(label_pair_weight_min))
+    if require_pair_pass_gate:
+        keep_mask = keep_mask & candidate_pass_gate
+    return keep_mask
+
+
 def _apply_target_smoothing(targets: Any, *, epsilon: float) -> Any:
     """Apply optional label smoothing to rollout targets.
 
@@ -2029,6 +2784,7 @@ def _encode_example_cache(
     max_length: int,
     batch_size: int,
     use_primary_corruption: bool,
+    contrastive_max_corruptions_per_prefix: int,
     calibration_sample_weighting: str,
     calibration_weight_floor: float,
     calibration_weight_gamma: float,
@@ -2075,23 +2831,71 @@ def _encode_example_cache(
         gamma=float(calibration_weight_gamma),
         torch_module=torch_module,
     )
+    max_candidates = (
+        int(contrastive_max_corruptions_per_prefix)
+        if use_primary_corruption
+        else 1
+    )
+    candidate_lists: list[list[dict[str, Any]]] = []
+    for example in examples:
+        if use_primary_corruption:
+            candidate_lists.append(
+                _extract_contrastive_candidates(
+                    example=example,
+                    max_items=max_candidates,
+                )
+            )
+        else:
+            candidate_lists.append([])
+
+    has_primary_corruption = torch_module.tensor(
+        [bool(candidates) for candidates in candidate_lists],
+        dtype=torch_module.bool,
+        device=device,
+    )
+    primary_corruption_type = [
+        str(candidates[0].get("corruption_type", "__none__"))
+        if candidates
+        else "__none__"
+        for candidates in candidate_lists
+    ]
     primary_pair_delta_q = torch_module.tensor(
-        [float(example.primary_pair_delta_q or 0.0) for example in examples],
+        [
+            float(candidates[0].get("pair_delta_q", 0.0) or 0.0)
+            if candidates
+            else 0.0
+            for candidates in candidate_lists
+        ],
         dtype=torch_module.float32,
         device=device,
     )
     primary_pair_z_delta = torch_module.tensor(
-        [float(example.primary_pair_z_delta or 0.0) for example in examples],
+        [
+            float(candidates[0].get("pair_z_delta", 0.0) or 0.0)
+            if candidates
+            else 0.0
+            for candidates in candidate_lists
+        ],
         dtype=torch_module.float32,
         device=device,
     )
     primary_pair_weight = torch_module.tensor(
-        [float(example.primary_pair_weight or 0.0) for example in examples],
+        [
+            float(candidates[0].get("pair_weight", 0.0) or 0.0)
+            if candidates
+            else 0.0
+            for candidates in candidate_lists
+        ],
         dtype=torch_module.float32,
         device=device,
     )
     primary_pair_pass_gate = torch_module.tensor(
-        [bool(example.primary_pair_pass_gate) for example in examples],
+        [
+            bool(candidates[0].get("pair_pass_gate", False))
+            if candidates
+            else False
+            for candidates in candidate_lists
+        ],
         dtype=torch_module.bool,
         device=device,
     )
@@ -2100,21 +2904,67 @@ def _encode_example_cache(
         dtype=torch_module.long,
         device=device,
     )
-    has_primary_corruption = torch_module.tensor(
-        [example.has_primary_corruption() if use_primary_corruption else False for example in examples],
+
+    max_candidates_in_batch = max((len(candidates) for candidates in candidate_lists), default=0)
+    if max_candidates_in_batch <= 0:
+        max_candidates_in_batch = 1
+    hidden_size = int(clean_features.shape[1])
+    corruption_features_bank = torch_module.zeros(
+        (len(examples), max_candidates_in_batch, hidden_size),
+        dtype=torch_module.float32,
+        device=device,
+    )
+    corruption_candidate_mask = torch_module.zeros(
+        (len(examples), max_candidates_in_batch),
         dtype=torch_module.bool,
         device=device,
     )
-    primary_corruption_type = [
-        str(example.primary_corruption_type or "__none__")
-        for example in examples
-    ]
-    corruption_features = torch_module.zeros_like(clean_features)
-    if use_primary_corruption and bool(has_primary_corruption.any().item()):
-        corruption_indices = [idx for idx, example in enumerate(examples) if example.has_primary_corruption()]
-        corruption_texts = [examples[idx].primary_corruption_input_text() for idx in corruption_indices]
+    corruption_candidate_pair_weight = torch_module.zeros(
+        (len(examples), max_candidates_in_batch),
+        dtype=torch_module.float32,
+        device=device,
+    )
+    corruption_candidate_delta_q = torch_module.zeros(
+        (len(examples), max_candidates_in_batch),
+        dtype=torch_module.float32,
+        device=device,
+    )
+    corruption_candidate_z_delta = torch_module.zeros(
+        (len(examples), max_candidates_in_batch),
+        dtype=torch_module.float32,
+        device=device,
+    )
+    corruption_candidate_pass_gate = torch_module.zeros(
+        (len(examples), max_candidates_in_batch),
+        dtype=torch_module.bool,
+        device=device,
+    )
+    flat_corruption_texts: list[str] = []
+    flat_corruption_positions: list[tuple[int, int]] = []
+    for example_idx, candidates in enumerate(candidate_lists):
+        for candidate_idx, candidate in enumerate(candidates):
+            if candidate_idx >= max_candidates_in_batch:
+                break
+            corruption_candidate_mask[example_idx, candidate_idx] = True
+            corruption_candidate_pair_weight[example_idx, candidate_idx] = float(
+                candidate.get("pair_weight", 0.0) or 0.0
+            )
+            corruption_candidate_delta_q[example_idx, candidate_idx] = float(
+                candidate.get("pair_delta_q", 0.0) or 0.0
+            )
+            corruption_candidate_z_delta[example_idx, candidate_idx] = float(
+                candidate.get("pair_z_delta", 0.0) or 0.0
+            )
+            corruption_candidate_pass_gate[example_idx, candidate_idx] = bool(
+                candidate.get("pair_pass_gate", False)
+            )
+            flat_corruption_texts.append(
+                f"{examples[example_idx].prompt_text}{candidate['corrupted_prefix_text']}"
+            )
+            flat_corruption_positions.append((example_idx, candidate_idx))
+    if flat_corruption_texts:
         encoded_corrupt = _encode_text_list_in_batches(
-            texts=corruption_texts,
+            texts=flat_corruption_texts,
             backbone=backbone,
             tokenizer=tokenizer,
             torch_module=torch_module,
@@ -2123,8 +2973,9 @@ def _encode_example_cache(
             progress_label="cache_train_primary_corrupt",
             progress_every_batches=32,
         )
-        for local_idx, global_idx in enumerate(corruption_indices):
-            corruption_features[global_idx] = encoded_corrupt[local_idx]
+        for encoded_idx, (example_idx, candidate_idx) in enumerate(flat_corruption_positions):
+            corruption_features_bank[example_idx, candidate_idx] = encoded_corrupt[encoded_idx]
+    corruption_features = corruption_features_bank[:, 0, :]
 
     return {
         "clean_features": clean_features,
@@ -2141,7 +2992,69 @@ def _encode_example_cache(
         "has_primary_corruption": has_primary_corruption,
         "primary_corruption_type": primary_corruption_type,
         "primary_corruption_features": corruption_features,
+        "contrastive_corruption_features": corruption_features_bank,
+        "contrastive_candidate_mask": corruption_candidate_mask,
+        "contrastive_candidate_pair_weight": corruption_candidate_pair_weight,
+        "contrastive_candidate_delta_q": corruption_candidate_delta_q,
+        "contrastive_candidate_z_delta": corruption_candidate_z_delta,
+        "contrastive_candidate_pass_gate": corruption_candidate_pass_gate,
     }
+
+
+def _extract_contrastive_candidates(
+    *,
+    example: ValueSupervisionExample,
+    max_items: int,
+) -> list[dict[str, Any]]:
+    """Resolve ranked corruption candidates for one clean example.
+
+    Notes
+    -----
+    - Prefer `example.corruption_candidates` (top-k prepared in C1 loader).
+    - Fall back to legacy primary-corruption fields for backward compatibility.
+    """
+    if max_items <= 0:
+        raise ValueError("`max_items` must be > 0")
+    candidates: list[dict[str, Any]] = []
+    if example.corruption_candidates:
+        for item in example.corruption_candidates:
+            if len(candidates) >= max_items:
+                break
+            text = item.get("corrupted_prefix_text")
+            ctype = item.get("corruption_type")
+            cidx = item.get("corruption_step_index")
+            if not isinstance(text, str) or text.strip() == "":
+                continue
+            if not isinstance(ctype, str) or ctype.strip() == "":
+                continue
+            if not isinstance(cidx, int) or cidx < 0:
+                continue
+            candidates.append(
+                {
+                    "corrupted_prefix_text": text,
+                    "corruption_type": ctype,
+                    "corruption_step_index": int(cidx),
+                    "pair_delta_q": float(item.get("pair_delta_q", 0.0) or 0.0),
+                    "pair_z_delta": float(item.get("pair_z_delta", 0.0) or 0.0),
+                    "pair_weight": float(item.get("pair_weight", 0.0) or 0.0),
+                    "pair_pass_gate": bool(item.get("pair_pass_gate", False)),
+                }
+            )
+        return candidates
+    if example.primary_corruption_text is None:
+        return candidates
+    candidates.append(
+        {
+            "corrupted_prefix_text": str(example.primary_corruption_text),
+            "corruption_type": str(example.primary_corruption_type or "__unknown__"),
+            "corruption_step_index": int(example.primary_corruption_step_index or 0),
+            "pair_delta_q": float(example.primary_pair_delta_q or 0.0),
+            "pair_z_delta": float(example.primary_pair_z_delta or 0.0),
+            "pair_weight": float(example.primary_pair_weight or 0.0),
+            "pair_pass_gate": bool(example.primary_pair_pass_gate),
+        }
+    )
+    return candidates
 
 
 def _encode_corruption_variant_cache(
@@ -2169,6 +3082,286 @@ def _encode_corruption_variant_cache(
         progress_every_batches=32,
     )
     return {"corruption_features": corruption_features}
+
+
+def _encode_external_pair_cache(
+    *,
+    pairs: list[ExternalPairRecord],
+    backbone: Any,
+    tokenizer: Any,
+    torch_module: Any,
+    max_length: int,
+    batch_size: int,
+    use_confidence_weights: bool,
+) -> dict[str, Any]:
+    """Encode external chosen/rejected pair texts into cached tensors."""
+    if not pairs:
+        hidden_size = infer_backbone_hidden_size(backbone)
+        device = _resolve_value_device(backbone, torch_module)
+        empty_features = torch_module.zeros((0, hidden_size), dtype=torch_module.float32, device=device)
+        empty_weights = torch_module.zeros((0,), dtype=torch_module.float32, device=device)
+        return {
+            "num_pairs": 0,
+            "chosen_features": empty_features,
+            "rejected_features": empty_features.clone(),
+            "pair_weights": empty_weights,
+            "source_tags": [],
+            "domain_tags": [],
+        }
+    chosen_features = _encode_text_list_in_batches(
+        texts=[pair.chosen_input_text() for pair in pairs],
+        backbone=backbone,
+        tokenizer=tokenizer,
+        torch_module=torch_module,
+        max_length=max_length,
+        batch_size=batch_size,
+        progress_label="cache_ext_chosen",
+        progress_every_batches=32,
+    )
+    rejected_features = _encode_text_list_in_batches(
+        texts=[pair.rejected_input_text() for pair in pairs],
+        backbone=backbone,
+        tokenizer=tokenizer,
+        torch_module=torch_module,
+        max_length=max_length,
+        batch_size=batch_size,
+        progress_label="cache_ext_rejected",
+        progress_every_batches=32,
+    )
+    device = chosen_features.device
+    pair_weights = torch_module.tensor(
+        [
+            (float(pair.pair_confidence) if use_confidence_weights else 1.0)
+            for pair in pairs
+        ],
+        dtype=torch_module.float32,
+        device=device,
+    )
+    return {
+        "num_pairs": int(len(pairs)),
+        "chosen_features": chosen_features,
+        "rejected_features": rejected_features,
+        "pair_weights": pair_weights,
+        "source_tags": [str(pair.source_tag) for pair in pairs],
+        "domain_tags": [str(pair.domain_tag) for pair in pairs],
+    }
+
+
+def _build_value_example_cache_signature_payload(
+    *,
+    examples: list[ValueSupervisionExample],
+    target_values: list[float],
+    use_primary_corruption: bool,
+    contrastive_max_corruptions_per_prefix: int,
+    calibration_sample_weighting: str,
+    calibration_weight_floor: float,
+    calibration_weight_gamma: float,
+    max_length: int,
+    backbone_signature: dict[str, Any],
+) -> dict[str, Any]:
+    """Build conservative signature payload for one example-cache artifact."""
+    if len(examples) != len(target_values):
+        raise ValueError(
+            "Signature build expects target_values length == examples length: "
+            f"{len(target_values)} vs {len(examples)}"
+        )
+    clean_texts = [example.clean_input_text() for example in examples]
+    selected_candidates: list[list[dict[str, Any]]] = []
+    max_items = int(contrastive_max_corruptions_per_prefix if use_primary_corruption else 1)
+    for example in examples:
+        candidates = (
+            _extract_contrastive_candidates(example=example, max_items=max_items)
+            if use_primary_corruption
+            else []
+        )
+        selected_candidates.append(
+            [
+                {
+                    "corrupted_prefix_text": str(item.get("corrupted_prefix_text", "")),
+                    "corruption_type": str(item.get("corruption_type", "")),
+                    "corruption_step_index": int(item.get("corruption_step_index", 0)),
+                    "pair_delta_q": float(item.get("pair_delta_q", 0.0) or 0.0),
+                    "pair_z_delta": float(item.get("pair_z_delta", 0.0) or 0.0),
+                    "pair_weight": float(item.get("pair_weight", 0.0) or 0.0),
+                    "pair_pass_gate": bool(item.get("pair_pass_gate", False)),
+                }
+                for item in candidates
+            ]
+        )
+    return {
+        "cache_kind": "value_example_cache",
+        "backbone_signature": backbone_signature,
+        "max_length": int(max_length),
+        "num_examples": int(len(examples)),
+        "use_primary_corruption": bool(use_primary_corruption),
+        "contrastive_max_corruptions_per_prefix": int(contrastive_max_corruptions_per_prefix),
+        "calibration_sample_weighting": str(calibration_sample_weighting),
+        "calibration_weight_floor": float(calibration_weight_floor),
+        "calibration_weight_gamma": float(calibration_weight_gamma),
+        "prefix_id_hash": hash_text_list([example.prefix_id for example in examples]),
+        "clean_text_hash": hash_text_list(clean_texts),
+        "target_value_hash": hash_float_list([float(v) for v in target_values]),
+        "target_q_weight_hash": hash_float_list([float(example.target_q_weight) for example in examples]),
+        "target_parseable_hash": hash_float_list([float(example.target_parseable_rate) for example in examples]),
+        "prefix_step_index_hash": hash_int_list([int(example.prefix_step_index) for example in examples]),
+        "candidate_hash": hash_jsonable(selected_candidates),
+    }
+
+
+def _build_corruption_variant_cache_signature_payload(
+    *,
+    variants: list[CorruptionVariant],
+    max_length: int,
+    backbone_signature: dict[str, Any],
+) -> dict[str, Any]:
+    """Build conservative signature payload for eval corruption-variant cache."""
+    return {
+        "cache_kind": "value_eval_corruption_cache",
+        "backbone_signature": backbone_signature,
+        "max_length": int(max_length),
+        "num_variants": int(len(variants)),
+        "corruption_id_hash": hash_text_list([variant.corruption_id for variant in variants]),
+        "clean_prefix_id_hash": hash_text_list([variant.clean_prefix_id for variant in variants]),
+        "corruption_text_hash": hash_text_list(
+            [variant.corrupted_input_text() for variant in variants]
+        ),
+        "corruption_type_hash": hash_text_list([variant.corruption_type for variant in variants]),
+        "corruption_step_hash": hash_int_list([int(variant.corruption_step_index) for variant in variants]),
+    }
+
+
+def _build_external_pair_cache_signature_payload(
+    *,
+    pairs: list[ExternalPairRecord],
+    use_confidence_weights: bool,
+    max_length: int,
+    backbone_signature: dict[str, Any],
+) -> dict[str, Any]:
+    """Build conservative signature payload for external-pair cache."""
+    return {
+        "cache_kind": "value_external_pair_cache",
+        "backbone_signature": backbone_signature,
+        "max_length": int(max_length),
+        "num_pairs": int(len(pairs)),
+        "use_confidence_weights": bool(use_confidence_weights),
+        "pair_id_hash": hash_text_list([pair.pair_id for pair in pairs]),
+        "source_hash": hash_text_list([pair.source_tag for pair in pairs]),
+        "domain_hash": hash_text_list([pair.domain_tag for pair in pairs]),
+        "chosen_text_hash": hash_text_list([pair.chosen_input_text() for pair in pairs]),
+        "rejected_text_hash": hash_text_list([pair.rejected_input_text() for pair in pairs]),
+        "pair_confidence_hash": hash_float_list([float(pair.pair_confidence) for pair in pairs]),
+    }
+
+
+def _validate_cached_example_cache_payload(
+    *,
+    cache: Any,
+    expected_num_examples: int,
+    torch_module: Any,
+) -> None:
+    """Validate loaded example-cache payload shape contract before reuse."""
+    if not isinstance(cache, dict):
+        raise TypeError("Example cache payload must be dict")
+    required_keys = {
+        "clean_features",
+        "targets",
+        "target_q_weight",
+        "target_parseable",
+        "target_confidence",
+        "calibration_weights",
+        "has_primary_corruption",
+        "primary_corruption_type",
+        "primary_corruption_features",
+        "contrastive_corruption_features",
+        "contrastive_candidate_mask",
+        "contrastive_candidate_pair_weight",
+        "contrastive_candidate_delta_q",
+        "contrastive_candidate_z_delta",
+        "contrastive_candidate_pass_gate",
+    }
+    missing = sorted(required_keys - set(cache.keys()))
+    if missing:
+        raise KeyError(f"Example cache payload missing keys: {missing}")
+    clean = cache["clean_features"]
+    if not torch_module.is_tensor(clean) or clean.ndim != 2:
+        raise TypeError("Example cache `clean_features` must be tensor[batch, hidden]")
+    if int(clean.shape[0]) != int(expected_num_examples):
+        raise ValueError(
+            "Example cache batch mismatch: "
+            f"expected {expected_num_examples}, got {int(clean.shape[0])}"
+        )
+    for name in ("targets", "target_q_weight", "target_parseable", "target_confidence", "calibration_weights"):
+        tensor = cache[name]
+        if not torch_module.is_tensor(tensor) or tensor.ndim != 1:
+            raise TypeError(f"Example cache `{name}` must be tensor[batch]")
+        if int(tensor.shape[0]) != int(expected_num_examples):
+            raise ValueError(
+                f"Example cache `{name}` batch mismatch: expected {expected_num_examples}, got {int(tensor.shape[0])}"
+            )
+
+
+def _validate_cached_corruption_cache_payload(
+    *,
+    cache: Any,
+    expected_num_variants: int,
+    torch_module: Any,
+) -> None:
+    """Validate loaded corruption-cache payload shape contract before reuse."""
+    if not isinstance(cache, dict):
+        raise TypeError("Corruption cache payload must be dict")
+    if "corruption_features" not in cache:
+        raise KeyError("Corruption cache payload missing key `corruption_features`")
+    feats = cache["corruption_features"]
+    if not torch_module.is_tensor(feats) or feats.ndim != 2:
+        raise TypeError("Corruption cache `corruption_features` must be tensor[batch, hidden]")
+    if int(feats.shape[0]) != int(expected_num_variants):
+        raise ValueError(
+            "Corruption cache batch mismatch: "
+            f"expected {expected_num_variants}, got {int(feats.shape[0])}"
+        )
+
+
+def _validate_cached_external_pair_cache_payload(
+    *,
+    cache: Any,
+    expected_num_pairs: int,
+    torch_module: Any,
+) -> None:
+    """Validate loaded external-pair cache payload contract before reuse."""
+    if not isinstance(cache, dict):
+        raise TypeError("External pair cache payload must be dict")
+    required_keys = {
+        "num_pairs",
+        "chosen_features",
+        "rejected_features",
+        "pair_weights",
+        "source_tags",
+        "domain_tags",
+    }
+    missing = sorted(required_keys - set(cache.keys()))
+    if missing:
+        raise KeyError(f"External pair cache payload missing keys: {missing}")
+    num_pairs = int(cache["num_pairs"])
+    if num_pairs != int(expected_num_pairs):
+        raise ValueError(
+            f"External pair cache count mismatch: expected {expected_num_pairs}, got {num_pairs}"
+        )
+    for name in ("chosen_features", "rejected_features"):
+        tensor = cache[name]
+        if not torch_module.is_tensor(tensor) or tensor.ndim != 2:
+            raise TypeError(f"External pair cache `{name}` must be tensor[batch, hidden]")
+        if int(tensor.shape[0]) != int(expected_num_pairs):
+            raise ValueError(
+                f"External pair cache `{name}` batch mismatch: expected {expected_num_pairs}, got {int(tensor.shape[0])}"
+            )
+    weights = cache["pair_weights"]
+    if not torch_module.is_tensor(weights) or weights.ndim != 1:
+        raise TypeError("External pair cache `pair_weights` must be tensor[batch]")
+    if int(weights.shape[0]) != int(expected_num_pairs):
+        raise ValueError(
+            "External pair cache `pair_weights` batch mismatch: "
+            f"expected {expected_num_pairs}, got {int(weights.shape[0])}"
+        )
 
 
 def _encode_text_list_in_batches(
@@ -2301,6 +3494,14 @@ def _load_config_defaults(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise TypeError(f"Config JSON {path} must contain an object at the top level")
     return payload
+
+
+def _parse_csv_allow_list(text: str) -> set[str] | None:
+    """Parse comma-separated allow-list; return None when empty."""
+    cleaned = [item.strip() for item in str(text).split(",") if item.strip() != ""]
+    if not cleaned:
+        return None
+    return set(cleaned)
 
 
 def _resolve_tokenizer_load_path(model_path: str, adapter_path: Path | None) -> str:

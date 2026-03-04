@@ -42,6 +42,17 @@ from ours.phase_b.faithfulness_eval import (  # noqa: E402
     compute_corruption_summary,
     render_faithfulness_summary_markdown,
 )
+from ours.phase_b.feature_cache import (  # noqa: E402
+    build_backbone_signature,
+    build_cache_key,
+    feature_cache_can_read,
+    feature_cache_can_write,
+    hash_text_list,
+    move_tensors_to_device,
+    save_feature_cache,
+    try_load_feature_cache,
+    validate_feature_cache_mode,
+)
 from ours.phase_b.posthoc_calibration import (  # noqa: E402
     IsotonicCalibrationConfig,
     TemperatureCalibrationConfig,
@@ -59,6 +70,7 @@ from ours.phase_b.value_head import (  # noqa: E402
     encode_text_features,
     freeze_backbone,
     load_value_head_checkpoint,
+    resolve_model_input_device,
 )
 
 
@@ -84,6 +96,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-eval-samples", type=int, default=None)
     parser.add_argument("--max-corruption-variants", type=int, default=None)
     parser.add_argument("--max-length", type=int, default=None)
+    parser.add_argument(
+        "--feature-cache-root",
+        type=Path,
+        default=Path("assets/artifacts/phase_c_feature_cache"),
+        help="Persistent on-disk cache root for standalone eval feature encoding.",
+    )
+    parser.add_argument(
+        "--feature-cache-mode",
+        choices=["off", "read", "write", "read_write"],
+        default="read_write",
+        help="Feature-cache behavior for standalone eval.",
+    )
+    parser.add_argument(
+        "--feature-cache-lock-timeout-sec",
+        type=float,
+        default=600.0,
+        help="Lock wait timeout for safe concurrent cache writes.",
+    )
     parser.add_argument(
         "--target-source",
         choices=["from_run", "q_mean_smoothed", "q_teacher", "q_fused"],
@@ -122,6 +152,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     """Run the standalone C2 evaluation path."""
     args = parse_args(argv)
+    args.feature_cache_mode = validate_feature_cache_mode(str(args.feature_cache_mode))
     if args.posthoc_temperature_lr <= 0.0:
         raise ValueError("--posthoc-temperature-lr must be > 0")
     if args.posthoc_temperature_max_iters <= 0:
@@ -132,6 +163,8 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--posthoc-temperature-max must be > --posthoc-temperature-min")
     if args.posthoc_isotonic_min_points <= 0:
         raise ValueError("--posthoc-isotonic-min-points must be > 0")
+    if float(args.feature_cache_lock_timeout_sec) <= 0.0:
+        raise ValueError("--feature-cache-lock-timeout-sec must be > 0")
     # 先校验训练 run 和 eval 数据目录的契约一致性，再做任何推理。
     manifest_path = args.value_run_dir / "manifest.json"
     if not manifest_path.exists():
@@ -212,23 +245,163 @@ def main(argv: list[str] | None = None) -> int:
         backbone = _attach_peft_adapter_for_inference(backbone, Path(adapter_path))
     freeze_backbone(backbone)
 
-    # 重新编码 eval features，避免复用训练时缓存带来的隐性状态污染。
-    clean_features = _encode_text_list(
-        texts=[f"{example.prompt_text}{example.prefix_target_text}" for example in eval_examples],
-        backbone=backbone,
-        tokenizer=tokenizer,
-        torch_module=torch,
-        max_length=max_length,
-        batch_size=int(value_manifest["train_config"]["per_device_eval_batch_size"]),
+    feature_cache_stats: dict[str, Any] = {
+        "mode": str(args.feature_cache_mode),
+        "root": str(args.feature_cache_root),
+        "hits": 0,
+        "misses": 0,
+        "writes": 0,
+        "entries": {},
+    }
+    feature_cache_root = Path(args.feature_cache_root)
+    backbone_signature = build_backbone_signature(
+        model_path=str(resolved["model_path"]),
+        adapter_path=(str(resolved["adapter_path"]) if resolved.get("adapter_path") else None),
+        tokenizer_path=str(tokenizer_path),
+        dtype=str(resolved["dtype"]),
+        max_length=int(max_length),
     )
-    corrupt_features = _encode_text_list(
-        texts=[f"{variant.prompt_text}{variant.corrupted_prefix_text}" for variant in eval_corruptions],
-        backbone=backbone,
-        tokenizer=tokenizer,
-        torch_module=torch,
-        max_length=max_length,
-        batch_size=int(value_manifest["train_config"]["per_device_eval_batch_size"]),
-    ) if eval_corruptions else None
+    eval_batch_size = int(value_manifest["train_config"]["per_device_eval_batch_size"])
+
+    clean_texts = [f"{example.prompt_text}{example.prefix_target_text}" for example in eval_examples]
+    clean_signature_payload = _build_eval_text_cache_signature_payload(
+        cache_kind="standalone_eval_clean",
+        texts=clean_texts,
+        ids=[example.prefix_id for example in eval_examples],
+        max_length=int(max_length),
+        backbone_signature=backbone_signature,
+    )
+    clean_cache_key, clean_signature_hash = build_cache_key(
+        "phase_b_eval_faithfulness_clean",
+        clean_signature_payload,
+    )
+    clean_features = None
+    if feature_cache_can_read(str(args.feature_cache_mode)):
+        cached_payload, _, _ = try_load_feature_cache(
+            cache_root=feature_cache_root,
+            cache_key=clean_cache_key,
+            expected_signature_hash=clean_signature_hash,
+            torch_module=torch,
+        )
+        if cached_payload is not None:
+            try:
+                _validate_cached_feature_tensor_payload(
+                    payload=cached_payload,
+                    expected_rows=len(clean_texts),
+                    torch_module=torch,
+                )
+                clean_features = move_tensors_to_device(cached_payload, resolve_model_input_device(backbone), torch)
+                feature_cache_stats["hits"] += 1
+                feature_cache_stats["entries"]["clean_features"] = {
+                    "status": "hit",
+                    "cache_key": clean_cache_key,
+                }
+                print(f"feature_cache    : clean_features hit ({clean_cache_key})", flush=True)
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"feature_cache    : clean_features invalid payload, fallback to re-encode ({exc})",
+                    flush=True,
+                )
+    if clean_features is None:
+        feature_cache_stats["misses"] += 1
+        feature_cache_stats["entries"]["clean_features"] = {
+            "status": "miss",
+            "cache_key": clean_cache_key,
+        }
+        print(f"feature_cache    : clean_features miss ({clean_cache_key})", flush=True)
+        clean_features = _encode_text_list(
+            texts=clean_texts,
+            backbone=backbone,
+            tokenizer=tokenizer,
+            torch_module=torch,
+            max_length=max_length,
+            batch_size=eval_batch_size,
+        )
+        if feature_cache_can_write(str(args.feature_cache_mode)):
+            save_feature_cache(
+                cache_root=feature_cache_root,
+                cache_key=clean_cache_key,
+                signature_hash=clean_signature_hash,
+                payload=clean_features,
+                torch_module=torch,
+                producer="scripts/phase_b_eval_faithfulness.py:clean_features",
+                lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
+                extra_metadata={"num_rows": int(len(clean_texts))},
+            )
+            feature_cache_stats["writes"] += 1
+            feature_cache_stats["entries"]["clean_features"]["write"] = True
+
+    corrupt_features = None
+    if eval_corruptions:
+        corrupt_texts = [
+            f"{variant.prompt_text}{variant.corrupted_prefix_text}"
+            for variant in eval_corruptions
+        ]
+        corrupt_signature_payload = _build_eval_text_cache_signature_payload(
+            cache_kind="standalone_eval_corrupt",
+            texts=corrupt_texts,
+            ids=[variant.corruption_id for variant in eval_corruptions],
+            max_length=int(max_length),
+            backbone_signature=backbone_signature,
+        )
+        corrupt_cache_key, corrupt_signature_hash = build_cache_key(
+            "phase_b_eval_faithfulness_corrupt",
+            corrupt_signature_payload,
+        )
+        if feature_cache_can_read(str(args.feature_cache_mode)):
+            cached_payload, _, _ = try_load_feature_cache(
+                cache_root=feature_cache_root,
+                cache_key=corrupt_cache_key,
+                expected_signature_hash=corrupt_signature_hash,
+                torch_module=torch,
+            )
+            if cached_payload is not None:
+                try:
+                    _validate_cached_feature_tensor_payload(
+                        payload=cached_payload,
+                        expected_rows=len(corrupt_texts),
+                        torch_module=torch,
+                    )
+                    corrupt_features = move_tensors_to_device(cached_payload, resolve_model_input_device(backbone), torch)
+                    feature_cache_stats["hits"] += 1
+                    feature_cache_stats["entries"]["corrupt_features"] = {
+                        "status": "hit",
+                        "cache_key": corrupt_cache_key,
+                    }
+                    print(f"feature_cache    : corrupt_features hit ({corrupt_cache_key})", flush=True)
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"feature_cache    : corrupt_features invalid payload, fallback to re-encode ({exc})",
+                        flush=True,
+                    )
+        if corrupt_features is None:
+            feature_cache_stats["misses"] += 1
+            feature_cache_stats["entries"]["corrupt_features"] = {
+                "status": "miss",
+                "cache_key": corrupt_cache_key,
+            }
+            print(f"feature_cache    : corrupt_features miss ({corrupt_cache_key})", flush=True)
+            corrupt_features = _encode_text_list(
+                texts=corrupt_texts,
+                backbone=backbone,
+                tokenizer=tokenizer,
+                torch_module=torch,
+                max_length=max_length,
+                batch_size=eval_batch_size,
+            )
+            if feature_cache_can_write(str(args.feature_cache_mode)):
+                save_feature_cache(
+                    cache_root=feature_cache_root,
+                    cache_key=corrupt_cache_key,
+                    signature_hash=corrupt_signature_hash,
+                    payload=corrupt_features,
+                    torch_module=torch,
+                    producer="scripts/phase_b_eval_faithfulness.py:corrupt_features",
+                    lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
+                    extra_metadata={"num_rows": int(len(corrupt_texts))},
+                )
+                feature_cache_stats["writes"] += 1
+                feature_cache_stats["entries"]["corrupt_features"]["write"] = True
 
     value_head.to(clean_features.device)
     value_head.eval()
@@ -346,6 +519,7 @@ def main(argv: list[str] | None = None) -> int:
         "target_source": str(resolved_target_source),
         "target_source_missing_policy": str(resolved_missing_policy),
         "target_source_stats": target_source_stats,
+        "feature_cache": feature_cache_stats,
         "calibration": calibration_raw,
         "calibration_posthoc": calibration_posthoc,
         "posthoc_calibration": posthoc_payload,
@@ -362,6 +536,8 @@ def main(argv: list[str] | None = None) -> int:
                 "eval_dir": args.eval_dir,
                 "checkpoint_path": checkpoint_path,
                 "posthoc_calibration": args.posthoc_calibration,
+                "feature_cache_root": str(args.feature_cache_root),
+                "feature_cache_mode": str(args.feature_cache_mode),
                 "target_source": resolved_target_source,
                 "target_source_missing_policy": resolved_missing_policy,
             },
@@ -377,6 +553,8 @@ def main(argv: list[str] | None = None) -> int:
                 "eval_dir": str(args.eval_dir),
                 "checkpoint_path": str(checkpoint_path),
                 "posthoc_calibration": str(args.posthoc_calibration),
+                "feature_cache_root": str(args.feature_cache_root),
+                "feature_cache_mode": str(args.feature_cache_mode),
                 "target_source": str(resolved_target_source),
                 "target_source_missing_policy": str(resolved_missing_policy),
                 "output_files": {
@@ -402,6 +580,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"target_missing    : {resolved_missing_policy}")
     print(f"target_cov_eval   : {target_source_stats['coverage_ratio']:.6f}")
     print(f"teacher_dis_eval  : {target_source_stats['teacher_disagree_ratio']:.6f}")
+    print(f"feature_cache_mode: {args.feature_cache_mode}")
+    print(f"feature_cache_root: {args.feature_cache_root}")
+    print(
+        "feature_cache_use : "
+        f"hits={int(feature_cache_stats['hits'])} "
+        f"misses={int(feature_cache_stats['misses'])} "
+        f"writes={int(feature_cache_stats['writes'])}"
+    )
     print(f"brier_score       : {calibration_raw['brier_score']:.6f}")
     print(f"pearson           : {calibration_raw['pearson']:.6f}")
     if calibration_posthoc is not None:
@@ -650,6 +836,44 @@ def _encode_text_list(
             )
     print("cache_eval_texts  : done", flush=True)
     return torch_module.cat(chunks, dim=0).to(dtype=torch_module.float32)
+
+
+def _build_eval_text_cache_signature_payload(
+    *,
+    cache_kind: str,
+    texts: list[str],
+    ids: list[str],
+    max_length: int,
+    backbone_signature: dict[str, Any],
+) -> dict[str, Any]:
+    """Build conservative signature payload for standalone-eval text features."""
+    return {
+        "cache_kind": str(cache_kind),
+        "backbone_signature": backbone_signature,
+        "max_length": int(max_length),
+        "num_rows": int(len(texts)),
+        "id_hash": hash_text_list([str(value) for value in ids]),
+        "text_hash": hash_text_list(texts),
+    }
+
+
+def _validate_cached_feature_tensor_payload(
+    *,
+    payload: Any,
+    expected_rows: int,
+    torch_module: Any,
+) -> None:
+    """Validate one cached tensor payload before reusing in eval."""
+    if not torch_module.is_tensor(payload):
+        raise TypeError("Cached eval feature payload must be one tensor")
+    if payload.ndim != 2:
+        raise ValueError(
+            f"Cached eval feature tensor must have shape [batch, hidden], got {tuple(payload.shape)!r}"
+        )
+    if int(payload.shape[0]) != int(expected_rows):
+        raise ValueError(
+            f"Cached eval feature row mismatch: expected {expected_rows}, got {int(payload.shape[0])}"
+        )
 
 
 def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:

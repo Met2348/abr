@@ -976,15 +976,18 @@ Contract notes:
 
 Join/fusion controls:
 1. `--teacher-prefix-scores-jsonl`
-2. `--teacher-fuse-mode {none,fixed,confidence}`
-3. `--teacher-fusion-lambda`
-4. `--teacher-confidence-ci-ref`
-5. `--teacher-disagree-threshold`
-6. `--teacher-min-coverage`
+2. `--teacher-corruption-scores-jsonl`
+3. `--teacher-fuse-mode {none,fixed,confidence}`
+4. `--teacher-fusion-lambda`
+5. `--teacher-confidence-ci-ref`
+6. `--teacher-disagree-threshold`
+7. `--teacher-min-coverage`
+8. `--pair-consensus-enable` and `--pair-consensus-*` thresholds
 
 Hard checks in D2 join:
 1. duplicate `prefix_id` in teacher score file -> fail,
 2. coverage below `--teacher-min-coverage` -> fail.
+3. duplicate `corruption_id` in teacher corruption sidecar -> fail (when provided).
 
 Example (fixed fusion):
 
@@ -1002,9 +1005,12 @@ CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_b_prepare_value_data.py \
   --device-map auto \
   --require-cuda \
   --teacher-prefix-scores-jsonl assets/artifacts/phase_c_data/strategyqa/<c1_train_dir>/teacher_prefix_scores.jsonl \
+  --teacher-corruption-scores-jsonl assets/artifacts/phase_c_data/strategyqa/<c1_train_dir>/teacher_corruption_scores.jsonl \
   --teacher-fuse-mode fixed \
   --teacher-fusion-lambda 0.5 \
-  --teacher-min-coverage 0.98
+  --teacher-min-coverage 0.98 \
+  --build-pair-quality \
+  --pair-consensus-enable
 ```
 
 Example (confidence fusion):
@@ -1023,10 +1029,13 @@ CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_b_prepare_value_data.py \
   --device-map auto \
   --require-cuda \
   --teacher-prefix-scores-jsonl assets/artifacts/phase_c_data/strategyqa/<c1_eval_dir>/teacher_prefix_scores.jsonl \
+  --teacher-corruption-scores-jsonl assets/artifacts/phase_c_data/strategyqa/<c1_eval_dir>/teacher_corruption_scores.jsonl \
   --teacher-fuse-mode confidence \
   --teacher-confidence-ci-ref 0.30 \
   --teacher-disagree-threshold 0.25 \
-  --teacher-min-coverage 0.98
+  --teacher-min-coverage 0.98 \
+  --build-pair-quality \
+  --pair-consensus-enable
 ```
 
 ### D3: C2 Target-Source Switch (Now Implemented)
@@ -1034,6 +1043,9 @@ CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_b_prepare_value_data.py \
 `scripts/phase_b_train_value.py` now supports:
 1. `--target-source {q_mean_smoothed,q_teacher,q_fused}`
 2. `--target-source-missing-policy {fail,fallback_mc}`
+3. `--contrastive-max-corruptions-per-prefix`
+4. `--train-mode {joint,ranking_only,calibration_only,two_stage}`
+5. `--two-stage-ranking-ratio`
 
 `scripts/phase_b_eval_faithfulness.py` now supports:
 1. `--target-source {from_run,q_mean_smoothed,q_teacher,q_fused}`
@@ -1104,16 +1116,34 @@ Why use it:
    - `q_fused` (label `fused`)
 3. Writes one consolidated markdown table for fast comparison.
 
-Exact reproducible command (current private setup):
+Recommended smoke command (HQ policy enabled):
 
 ```bash
-ACTIVE_PHASE_D_GROUP=D4_STRATEGYQA_SMOKE_3WAY \
-RUN_PREFIX=phase_d_bundle_smoke \
-TRAIN_INPUT_JSONL=assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl \
-EVAL_INPUT_JSONL=assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/validation.jsonl \
-TEACHER_TRAIN_SCORES=assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_full_mcorr4_c2_strategyqa_quality_first_full_c1_train__b7a8789f1974/teacher_prefix_scores.jsonl \
-TEACHER_EVAL_SCORES=assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_c2_strategyqa_quality_first_c1_eval__f608255f810d/teacher_prefix_scores.jsonl \
+ACTIVE_PHASE_D_GROUP=D4_STRATEGYQA_SMOKE_3WAY_HQ \
+RUN_PREFIX=phase_d_bundle_smoke_hq \
 CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_d_teacher_suite.sh
+```
+
+Promotion-oriented full run:
+
+```bash
+ACTIVE_PHASE_D_GROUP=D4_STRATEGYQA_FULL_3WAY_HQ \
+RUN_PREFIX=phase_d_bundle_full_hq \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_d_teacher_suite.sh
+```
+
+Teacher sidecar overrides (if you scored new artifacts):
+
+```bash
+TEACHER_TRAIN_SCORES=<.../teacher_prefix_scores.jsonl> \
+TEACHER_TRAIN_CORR_SCORES=<.../teacher_corruption_scores.jsonl> \
+TEACHER_EVAL_SCORES=<.../teacher_prefix_scores.jsonl> \
+TEACHER_EVAL_CORR_SCORES=<.../teacher_corruption_scores.jsonl> \
+ACTIVE_PHASE_D_GROUP=D4_STRATEGYQA_SMOKE_3WAY_HQ \
+RUN_PREFIX=phase_d_bundle_smoke_hq_custom \
+CUDA_VISIBLE_DEVICES=3 \
 bash scripts/run_phase_d_teacher_suite.sh
 ```
 

@@ -84,6 +84,7 @@ class ValueSupervisionExample:
     target_k_rollouts: int
     mean_generated_char_count: float
     metadata: dict[str, Any] = field(default_factory=dict)
+    corruption_candidates: list[dict[str, Any]] = field(default_factory=list)
     primary_corruption_text: str | None = None
     primary_corruption_type: str | None = None
     primary_corruption_step_index: int | None = None
@@ -156,6 +157,28 @@ class ValueSupervisionExample:
             raise ValueError("`mean_generated_char_count` must be non-negative")
         if not isinstance(self.metadata, dict):
             raise TypeError("`metadata` must be dict[str, Any]")
+        if not isinstance(self.corruption_candidates, list):
+            raise TypeError("`corruption_candidates` must be list[dict[str, Any]]")
+        for idx, candidate in enumerate(self.corruption_candidates):
+            if not isinstance(candidate, dict):
+                raise TypeError(
+                    f"`corruption_candidates[{idx}]` must be dict[str, Any]"
+                )
+            text = candidate.get("corrupted_prefix_text")
+            if not isinstance(text, str) or text.strip() == "":
+                raise ValueError(
+                    "`corruption_candidates[i].corrupted_prefix_text` must be a non-empty string"
+                )
+            ctype = candidate.get("corruption_type")
+            if not isinstance(ctype, str) or ctype.strip() == "":
+                raise ValueError(
+                    "`corruption_candidates[i].corruption_type` must be a non-empty string"
+                )
+            step_index = candidate.get("corruption_step_index")
+            if not isinstance(step_index, int) or step_index < 0:
+                raise ValueError(
+                    "`corruption_candidates[i].corruption_step_index` must be a non-negative int"
+                )
         if self.primary_corruption_text is not None and not isinstance(self.primary_corruption_text, str):
             raise TypeError("`primary_corruption_text` must be str or None")
         if self.primary_corruption_type is not None and not isinstance(self.primary_corruption_type, str):
@@ -192,7 +215,7 @@ class ValueSupervisionExample:
 
     def has_primary_corruption(self) -> bool:
         """Return whether this example carries one deterministic corruption."""
-        return self.primary_corruption_text is not None
+        return (self.primary_corruption_text is not None) or bool(self.corruption_candidates)
 
     def primary_corruption_input_text(self) -> str:
         """Return full prompt text for the stored primary corruption.
@@ -203,6 +226,8 @@ class ValueSupervisionExample:
             If the example does not carry a primary corruption.
         """
         if self.primary_corruption_text is None:
+            if self.corruption_candidates:
+                return f"{self.prompt_text}{self.corruption_candidates[0]['corrupted_prefix_text']}"
             raise ValueError(f"Example {self.prefix_id!r} does not have a primary corruption")
         return f"{self.prompt_text}{self.primary_corruption_text}"
 
@@ -320,6 +345,7 @@ def load_value_supervision_examples(
     *,
     max_samples: int | None = None,
     require_corruptions: bool = False,
+    max_primary_corruptions: int = 1,
 ) -> tuple[list[ValueSupervisionExample], dict[str, Any]]:
     """Load clean prefix examples joined with rollout targets.
 
@@ -338,6 +364,8 @@ def load_value_supervision_examples(
     tuple[list[ValueSupervisionExample], dict[str, Any]]
         Joined training/eval examples and the loaded manifest.
     """
+    if max_primary_corruptions <= 0:
+        raise ValueError("`max_primary_corruptions` must be > 0")
     manifest = load_phase_c_manifest(run_dir)
     prefix_path = run_dir / "prefixes.jsonl"
     rollout_target_path = run_dir / "rollout_targets.jsonl"
@@ -362,10 +390,11 @@ def load_value_supervision_examples(
         if pair_quality_path.exists()
         else ({}, {})
     )
-    primary_corruptions = (
-        _build_primary_corruption_map(
+    ranked_corruptions = (
+        _build_ranked_corruption_map(
             _read_jsonl(corruption_path),
             pair_quality_by_corruption=pair_quality_by_corruption,
+            max_items=max_primary_corruptions,
         )
         if corruption_path.exists()
         else {}
@@ -377,13 +406,56 @@ def load_value_supervision_examples(
         target = rollout_targets[prefix_id]
         if prefix is None:
             raise KeyError(f"Missing prefix record for rollout target prefix_id={prefix_id!r}")
-        corruption = primary_corruptions.get(prefix_id)
+        corruption_candidates = ranked_corruptions.get(prefix_id, [])
+        primary_corruption = corruption_candidates[0] if corruption_candidates else None
         pair_quality = None
-        if corruption is not None:
-            pair_quality = pair_quality_by_corruption.get(str(corruption["corruption_id"]))
-        # 若 corruption 没有直接 pair_quality，回退到 prefix 级“最佳”pair_quality。
+        if primary_corruption is not None:
+            pair_quality = pair_quality_by_corruption.get(
+                str(primary_corruption["corruption_id"])
+            )
+        # 若 primary corruption 没有直接 pair_quality，回退到 prefix 级“最佳”pair_quality。
         if pair_quality is None:
             pair_quality = pair_quality_by_prefix.get(str(prefix_id))
+
+        candidate_payloads: list[dict[str, Any]] = []
+        for candidate in corruption_candidates:
+            candidate_id = str(candidate["corruption_id"])
+            candidate_pair_quality = pair_quality_by_corruption.get(candidate_id)
+            if candidate_pair_quality is None:
+                candidate_pair_quality = pair_quality_by_prefix.get(str(prefix_id))
+            candidate_payloads.append(
+                {
+                    "corruption_id": candidate_id,
+                    "corrupted_prefix_text": str(candidate["corrupted_prefix_text"]),
+                    "corruption_type": str(candidate["corruption_type"]),
+                    "corruption_step_index": int(candidate["corruption_step_index"]),
+                    "pair_delta_q": (
+                        float(candidate_pair_quality["delta_q"])
+                        if candidate_pair_quality is not None
+                        else None
+                    ),
+                    "pair_z_delta": (
+                        float(candidate_pair_quality["z_delta"])
+                        if candidate_pair_quality is not None
+                        else None
+                    ),
+                    "pair_weight": (
+                        float(candidate_pair_quality["pair_weight"])
+                        if candidate_pair_quality is not None
+                        else None
+                    ),
+                    "pair_pass_gate": (
+                        bool(candidate_pair_quality.get("metadata", {}).get("pair_pass_gate"))
+                        if candidate_pair_quality is not None
+                        else None
+                    ),
+                    "pair_consensus_pass": (
+                        bool(candidate_pair_quality.get("metadata", {}).get("pair_consensus_pass"))
+                        if candidate_pair_quality is not None
+                        else None
+                    ),
+                }
+            )
 
         target_success_rate = float(target["success_rate"])
         target_q_mean_smoothed = float(target.get("q_mean_smoothed", target_success_rate))
@@ -445,11 +517,25 @@ def load_value_supervision_examples(
                 "prefix_metadata": dict(prefix.get("metadata", {})),
                 "target_metadata": dict(target.get("metadata", {})),
                 "has_pair_quality": bool(pair_quality is not None),
+                "num_corruption_candidates": int(len(candidate_payloads)),
                 "target_teacher_available": bool(target_teacher_available),
             },
-            primary_corruption_text=(str(corruption["corrupted_prefix_text"]) if corruption is not None else None),
-            primary_corruption_type=(str(corruption["corruption_type"]) if corruption is not None else None),
-            primary_corruption_step_index=(int(corruption["corruption_step_index"]) if corruption is not None else None),
+            corruption_candidates=candidate_payloads,
+            primary_corruption_text=(
+                str(primary_corruption["corrupted_prefix_text"])
+                if primary_corruption is not None
+                else None
+            ),
+            primary_corruption_type=(
+                str(primary_corruption["corruption_type"])
+                if primary_corruption is not None
+                else None
+            ),
+            primary_corruption_step_index=(
+                int(primary_corruption["corruption_step_index"])
+                if primary_corruption is not None
+                else None
+            ),
             primary_pair_delta_q=(
                 float(pair_quality["delta_q"]) if pair_quality is not None else None
             ),
@@ -566,6 +652,42 @@ def _build_primary_corruption_map(
                 variants, key=lambda item: str(item["corruption_id"])
             )[0]
     return resolved
+
+
+def _build_ranked_corruption_map(
+    rows: list[dict[str, Any]],
+    *,
+    pair_quality_by_corruption: dict[str, dict[str, Any]] | None = None,
+    max_items: int = 1,
+) -> dict[str, list[dict[str, Any]]]:
+    """Return deterministic top-k corruption candidates per clean prefix.
+
+    Notes
+    -----
+    - When pair-quality artifacts exist, ranking is quality-aware and stable.
+    - When pair-quality artifacts are absent, ranking falls back to corruption_id.
+    - `max_items=1` is backward compatible with historical single-primary behavior.
+    """
+    if max_items <= 0:
+        raise ValueError("`max_items` must be > 0")
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["clean_prefix_id"]), []).append(row)
+    ranked_map: dict[str, list[dict[str, Any]]] = {}
+    pair_quality_by_corruption = pair_quality_by_corruption or {}
+    for prefix_id, variants in grouped.items():
+        if pair_quality_by_corruption:
+            ranked = sorted(
+                variants,
+                key=lambda item: _primary_corruption_sort_key(
+                    item=item,
+                    pair_quality_by_corruption=pair_quality_by_corruption,
+                ),
+            )
+        else:
+            ranked = sorted(variants, key=lambda item: str(item["corruption_id"]))
+        ranked_map[prefix_id] = ranked[:max_items]
+    return ranked_map
 
 
 def _primary_corruption_sort_key(

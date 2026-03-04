@@ -75,6 +75,18 @@ from ours.phase_b.faithfulness_eval import (  # noqa: E402
     compute_calibration_summary,
     render_faithfulness_summary_markdown,
 )
+from ours.phase_b.feature_cache import (  # noqa: E402
+    build_backbone_signature,
+    build_cache_key,
+    feature_cache_can_read,
+    feature_cache_can_write,
+    hash_float_list,
+    hash_text_list,
+    move_tensors_to_device,
+    save_feature_cache,
+    try_load_feature_cache,
+    validate_feature_cache_mode,
+)
 from ours.phase_b.pik_data import (  # noqa: E402
     PIKSupervisionExample,
     assert_phase_c_pik_compatibility,
@@ -136,6 +148,9 @@ class TrainConfig:
     device_map: str
     require_cuda: bool
     logging_steps: int
+    feature_cache_root: str
+    feature_cache_mode: str
+    feature_cache_lock_timeout_sec: float
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable dictionary."""
@@ -160,6 +175,24 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument("--max-eval-samples", type=int, default=None)
     parser.add_argument("--max-length", type=int, default=1024)
+    parser.add_argument(
+        "--feature-cache-root",
+        type=Path,
+        default=Path("assets/artifacts/phase_c_feature_cache"),
+        help="Persistent feature-cache root for frozen P(IK) question encoding.",
+    )
+    parser.add_argument(
+        "--feature-cache-mode",
+        choices=["off", "read", "write", "read_write"],
+        default="read_write",
+        help="Feature-cache behavior for P(IK) C2.",
+    )
+    parser.add_argument(
+        "--feature-cache-lock-timeout-sec",
+        type=float,
+        default=600.0,
+        help="Lock wait timeout for safe concurrent cache writes.",
+    )
 
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.0)
@@ -285,6 +318,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--posthoc-temperature-max must be > --posthoc-temperature-min")
     if args.posthoc_isotonic_min_points <= 0:
         raise ValueError("--posthoc-isotonic-min-points must be > 0")
+    args.feature_cache_mode = validate_feature_cache_mode(str(args.feature_cache_mode))
+    if float(args.feature_cache_lock_timeout_sec) <= 0.0:
+        raise ValueError("--feature-cache-lock-timeout-sec must be > 0")
     if not (0.0 <= args.dropout_prob < 1.0):
         raise ValueError("--dropout-prob must be in [0, 1)")
     return args
@@ -344,6 +380,9 @@ def main(argv: list[str] | None = None) -> int:
         device_map=str(args.device_map),
         require_cuda=bool(args.require_cuda),
         logging_steps=int(args.logging_steps),
+        feature_cache_root=str(args.feature_cache_root),
+        feature_cache_mode=str(args.feature_cache_mode),
+        feature_cache_lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
     )
 
     run_dir = args.output_root / f"{args.run_name}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
@@ -378,6 +417,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"batch_train       : {args.per_device_train_batch_size}")
     print(f"batch_eval        : {args.per_device_eval_batch_size}")
     print(f"max_length        : {args.max_length}")
+    print(f"feat_cache_mode   : {args.feature_cache_mode}")
+    print(f"feat_cache_root   : {args.feature_cache_root}")
     print(f"seed              : {args.seed}")
     print("=" * 88)
 
@@ -414,24 +455,164 @@ def main(argv: list[str] | None = None) -> int:
     model_load_elapsed = time.perf_counter() - model_load_start
 
     feature_cache_start = time.perf_counter()
-    train_cache = _encode_example_cache(
+    feature_cache_stats: dict[str, Any] = {
+        "mode": str(args.feature_cache_mode),
+        "root": str(args.feature_cache_root),
+        "hits": 0,
+        "misses": 0,
+        "writes": 0,
+        "entries": {},
+    }
+    feature_cache_root = Path(args.feature_cache_root)
+    model_input_device = _resolve_value_device(backbone, torch)
+    backbone_signature = build_backbone_signature(
+        model_path=str(model_path),
+        adapter_path=(str(adapter_path) if adapter_path is not None else None),
+        tokenizer_path=str(tokenizer_path),
+        dtype=str(args.dtype),
+        max_length=int(args.max_length),
+    )
+    train_texts = [example.model_input_text() for example in train_examples]
+    eval_texts = [example.model_input_text() for example in eval_examples]
+
+    train_cache_signature = _build_pik_example_cache_signature_payload(
+        cache_kind="phase_c_pik_train_cache",
         examples=train_examples,
-        backbone=backbone,
-        tokenizer=tokenizer,
-        torch_module=torch,
-        max_length=args.max_length,
-        batch_size=args.per_device_eval_batch_size,
-        progress_label="cache_train_questions",
+        texts=train_texts,
+        max_length=int(args.max_length),
+        backbone_signature=backbone_signature,
     )
-    eval_cache = _encode_example_cache(
+    train_cache_key, train_signature_hash = build_cache_key(
+        "phase_c_pik_train_cache",
+        train_cache_signature,
+    )
+    train_cache = None
+    if feature_cache_can_read(str(args.feature_cache_mode)):
+        cached_payload, _, _ = try_load_feature_cache(
+            cache_root=feature_cache_root,
+            cache_key=train_cache_key,
+            expected_signature_hash=train_signature_hash,
+            torch_module=torch,
+        )
+        if cached_payload is not None:
+            try:
+                _validate_cached_pik_example_cache_payload(
+                    cache=cached_payload,
+                    expected_num_examples=len(train_examples),
+                    torch_module=torch,
+                )
+                train_cache = move_tensors_to_device(cached_payload, model_input_device, torch)
+                feature_cache_stats["hits"] += 1
+                feature_cache_stats["entries"]["train_cache"] = {
+                    "status": "hit",
+                    "cache_key": train_cache_key,
+                }
+                print(f"feature_cache    : train_cache hit ({train_cache_key})", flush=True)
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"feature_cache    : train_cache invalid payload, fallback to re-encode ({exc})",
+                    flush=True,
+                )
+    if train_cache is None:
+        feature_cache_stats["misses"] += 1
+        feature_cache_stats["entries"]["train_cache"] = {
+            "status": "miss",
+            "cache_key": train_cache_key,
+        }
+        print(f"feature_cache    : train_cache miss ({train_cache_key})", flush=True)
+        train_cache = _encode_example_cache(
+            examples=train_examples,
+            texts=train_texts,
+            backbone=backbone,
+            tokenizer=tokenizer,
+            torch_module=torch,
+            max_length=args.max_length,
+            batch_size=args.per_device_eval_batch_size,
+            progress_label="cache_train_questions",
+        )
+        if feature_cache_can_write(str(args.feature_cache_mode)):
+            save_feature_cache(
+                cache_root=feature_cache_root,
+                cache_key=train_cache_key,
+                signature_hash=train_signature_hash,
+                payload=train_cache,
+                torch_module=torch,
+                producer="scripts/phase_c_train_pik.py:train_cache",
+                lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
+                extra_metadata={"num_examples": int(len(train_examples))},
+            )
+            feature_cache_stats["writes"] += 1
+            feature_cache_stats["entries"]["train_cache"]["write"] = True
+
+    eval_cache_signature = _build_pik_example_cache_signature_payload(
+        cache_kind="phase_c_pik_eval_cache",
         examples=eval_examples,
-        backbone=backbone,
-        tokenizer=tokenizer,
-        torch_module=torch,
-        max_length=args.max_length,
-        batch_size=args.per_device_eval_batch_size,
-        progress_label="cache_eval_questions",
+        texts=eval_texts,
+        max_length=int(args.max_length),
+        backbone_signature=backbone_signature,
     )
+    eval_cache_key, eval_signature_hash = build_cache_key(
+        "phase_c_pik_eval_cache",
+        eval_cache_signature,
+    )
+    eval_cache = None
+    if feature_cache_can_read(str(args.feature_cache_mode)):
+        cached_payload, _, _ = try_load_feature_cache(
+            cache_root=feature_cache_root,
+            cache_key=eval_cache_key,
+            expected_signature_hash=eval_signature_hash,
+            torch_module=torch,
+        )
+        if cached_payload is not None:
+            try:
+                _validate_cached_pik_example_cache_payload(
+                    cache=cached_payload,
+                    expected_num_examples=len(eval_examples),
+                    torch_module=torch,
+                )
+                eval_cache = move_tensors_to_device(cached_payload, model_input_device, torch)
+                feature_cache_stats["hits"] += 1
+                feature_cache_stats["entries"]["eval_cache"] = {
+                    "status": "hit",
+                    "cache_key": eval_cache_key,
+                }
+                print(f"feature_cache    : eval_cache hit ({eval_cache_key})", flush=True)
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"feature_cache    : eval_cache invalid payload, fallback to re-encode ({exc})",
+                    flush=True,
+                )
+    if eval_cache is None:
+        feature_cache_stats["misses"] += 1
+        feature_cache_stats["entries"]["eval_cache"] = {
+            "status": "miss",
+            "cache_key": eval_cache_key,
+        }
+        print(f"feature_cache    : eval_cache miss ({eval_cache_key})", flush=True)
+        eval_cache = _encode_example_cache(
+            examples=eval_examples,
+            texts=eval_texts,
+            backbone=backbone,
+            tokenizer=tokenizer,
+            torch_module=torch,
+            max_length=args.max_length,
+            batch_size=args.per_device_eval_batch_size,
+            progress_label="cache_eval_questions",
+        )
+        if feature_cache_can_write(str(args.feature_cache_mode)):
+            save_feature_cache(
+                cache_root=feature_cache_root,
+                cache_key=eval_cache_key,
+                signature_hash=eval_signature_hash,
+                payload=eval_cache,
+                torch_module=torch,
+                producer="scripts/phase_c_train_pik.py:eval_cache",
+                lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
+                extra_metadata={"num_examples": int(len(eval_examples))},
+            )
+            feature_cache_stats["writes"] += 1
+            feature_cache_stats["entries"]["eval_cache"]["write"] = True
+
     feature_cache_elapsed = time.perf_counter() - feature_cache_start
 
     # Stage 3: 仅训练小 value head，并按 eval 指标保存 best checkpoint。
@@ -571,6 +752,7 @@ def main(argv: list[str] | None = None) -> int:
     train_metrics = {
         "model_load_seconds": float(model_load_elapsed),
         "feature_cache_seconds": float(feature_cache_elapsed),
+        "feature_cache": feature_cache_stats,
         "train_elapsed_seconds": float(train_elapsed),
         "global_step": int(global_step),
         "train_curve": train_curve,
@@ -581,6 +763,7 @@ def main(argv: list[str] | None = None) -> int:
     eval_metrics = {
         "selected_checkpoint": ("best" if best_eval_metrics is not None else "final"),
         "best_checkpoint_saved": bool(args.save_best_state),
+        "feature_cache": feature_cache_stats,
         "best": best_eval_metrics,
         "final": final_eval_metrics,
     }
@@ -604,6 +787,7 @@ def main(argv: list[str] | None = None) -> int:
         },
         "train_config": train_cfg.to_dict(),
         "value_head_config": value_head_config.to_dict(),
+        "feature_cache": feature_cache_stats,
         "num_train_examples": len(train_examples),
         "num_eval_examples": len(eval_examples),
         "output_files": {
@@ -629,6 +813,7 @@ def main(argv: list[str] | None = None) -> int:
             "global_step": int(global_step),
             "train_elapsed_seconds": float(train_elapsed),
             "feature_cache_seconds": float(feature_cache_elapsed),
+            "feature_cache": feature_cache_stats,
             "model_load_seconds": float(model_load_elapsed),
             "train_target_mean": float(train_target_mean),
             "checkpoint_selection_metric": str(args.checkpoint_selection_metric),
@@ -656,6 +841,8 @@ def main(argv: list[str] | None = None) -> int:
                 "calibration_loss": args.calibration_loss,
                 "posthoc_calibration": args.posthoc_calibration,
                 "checkpoint_selection_metric": args.checkpoint_selection_metric,
+                "feature_cache_mode": args.feature_cache_mode,
+                "feature_cache_root": str(args.feature_cache_root),
             },
         ),
         encoding="utf-8",
@@ -665,6 +852,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"global_step       : {global_step}")
     print(f"train_elapsed_sec : {train_elapsed:.2f}")
     print(f"feature_cache_sec : {feature_cache_elapsed:.2f}")
+    print(
+        "feature_cache_use : "
+        f"hits={int(feature_cache_stats['hits'])} "
+        f"misses={int(feature_cache_stats['misses'])} "
+        f"writes={int(feature_cache_stats['writes'])}"
+    )
     print(f"selected_brier    : {selected_eval_metrics['calibration']['brier_score']:.6f}")
     print(f"selected_pearson  : {selected_eval_metrics['calibration']['pearson']:.6f}")
     if selected_eval_metrics.get("calibration_posthoc") is not None:
@@ -938,9 +1131,67 @@ def _build_isotonic_calibration_config(args: argparse.Namespace) -> IsotonicCali
     return cfg
 
 
+def _build_pik_example_cache_signature_payload(
+    *,
+    cache_kind: str,
+    examples: list[PIKSupervisionExample],
+    texts: list[str],
+    max_length: int,
+    backbone_signature: dict[str, Any],
+) -> dict[str, Any]:
+    """Build conservative cache signature for one P(IK) example-cache artifact."""
+    if len(examples) != len(texts):
+        raise ValueError(
+            "PIK cache signature expects text count == examples count: "
+            f"{len(texts)} vs {len(examples)}"
+        )
+    return {
+        "cache_kind": str(cache_kind),
+        "backbone_signature": backbone_signature,
+        "max_length": int(max_length),
+        "num_examples": int(len(examples)),
+        "sample_id_hash": hash_text_list([example.sample_id for example in examples]),
+        "question_hash": hash_text_list([example.question for example in examples]),
+        "text_hash": hash_text_list(texts),
+        "target_success_hash": hash_float_list([float(example.target_success_rate) for example in examples]),
+        "target_parseable_hash": hash_float_list([float(example.target_parseable_rate) for example in examples]),
+        "target_rollout_k_hash": hash_float_list([float(example.target_k_rollouts) for example in examples]),
+    }
+
+
+def _validate_cached_pik_example_cache_payload(
+    *,
+    cache: Any,
+    expected_num_examples: int,
+    torch_module: Any,
+) -> None:
+    """Validate loaded P(IK) cache payload before reusing."""
+    if not isinstance(cache, dict):
+        raise TypeError("PIK cache payload must be dict")
+    for key in ("features", "targets", "parseable"):
+        if key not in cache:
+            raise KeyError(f"PIK cache payload missing key `{key}`")
+    features = cache["features"]
+    if not torch_module.is_tensor(features) or features.ndim != 2:
+        raise TypeError("PIK cache `features` must be tensor[batch, hidden]")
+    if int(features.shape[0]) != int(expected_num_examples):
+        raise ValueError(
+            f"PIK cache feature rows mismatch: expected {expected_num_examples}, got {int(features.shape[0])}"
+        )
+    for key in ("targets", "parseable"):
+        tensor = cache[key]
+        if not torch_module.is_tensor(tensor) or tensor.ndim != 1:
+            raise TypeError(f"PIK cache `{key}` must be tensor[batch]")
+        if int(tensor.shape[0]) != int(expected_num_examples):
+            raise ValueError(
+                f"PIK cache `{key}` rows mismatch: expected {expected_num_examples}, got {int(tensor.shape[0])}"
+            )
+
+
 def _encode_example_cache(
     *,
     examples: list[PIKSupervisionExample],
+    texts: list[str] | None,
     backbone: Any,
     tokenizer: Any,
     torch_module: Any,
@@ -949,8 +1200,9 @@ def _encode_example_cache(
     progress_label: str,
 ) -> dict[str, Any]:
     """Encode P(IK) examples into cached pooled features + targets tensors."""
+    effective_texts = texts if texts is not None else [example.model_input_text() for example in examples]
     features = _encode_text_list_in_batches(
-        texts=[example.model_input_text() for example in examples],
+        texts=effective_texts,
         backbone=backbone,
         tokenizer=tokenizer,
         torch_module=torch_module,

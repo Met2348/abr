@@ -165,11 +165,15 @@ Source of truth:
 - `phase_D_plan.md`
 
 Workstream checklist:
-- [ ] D0: Teacher environment gate and reproducible smoke scoring
+- [x] D0: Teacher environment gate and reproducible smoke scoring
 - [x] D1: Add teacher sidecar scoring script (`scripts/phase_c_score_prm_teacher.py`)
-- [ ] D2: Add C1 teacher+MC fusion fields and disagreement logging
-- [ ] D3: Add C2 target-source switch (`mc/teacher/fused`)
-- [ ] D4: Run four-way ablation on StrategyQA smoke then full
+- [x] D2: Add C1 teacher+MC fusion fields and disagreement logging
+- [x] D3: Add C2 target-source switch (`mc/teacher/fused`)
+- [x] D3.5: C1/C2 quality upgrades
+  - pair-consensus gate (teacher clean-vs-corrupt delta),
+  - top-k corruption candidates per prefix (`--contrastive-max-corruptions-per-prefix`),
+  - C2 stage scheduler (`--train-mode two_stage`).
+- [ ] D4: Run four-way ablation on StrategyQA smoke then full (new HQ groups pending full rerun confirmation)
 - [ ] D5: Evaluate promotion gates and decide whether to resume BCR-lite/ABR-lite
 
 Promotion gates:

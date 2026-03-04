@@ -20,7 +20,7 @@
 # - `scripts/phase_b_eval_faithfulness.py` (standalone C2 eval)
 #
 # Example:
-#   ACTIVE_PHASE_D_GROUP=D4_STRATEGYQA_SMOKE_3WAY \
+#   ACTIVE_PHASE_D_GROUP=D4_STRATEGYQA_SMOKE_3WAY_HQ \
 #   RUN_PREFIX=phase_d_smoke_bundle \
 #   CUDA_VISIBLE_DEVICES=1 \
 #   bash scripts/run_phase_d_teacher_suite.sh
@@ -31,7 +31,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
-ACTIVE_PHASE_D_GROUP="${ACTIVE_PHASE_D_GROUP:-D4_STRATEGYQA_SMOKE_3WAY}"
+ACTIVE_PHASE_D_GROUP="${ACTIVE_PHASE_D_GROUP:-D4_STRATEGYQA_SMOKE_3WAY_HQ}"
 RUN_PREFIX="${RUN_PREFIX:-phase_d_teacher_bundle}"
 CURRENT_STAGE="init"
 
@@ -186,9 +186,71 @@ resolve_group() {
       C2_EVAL_EXTRA_ARGS_DEFAULT="${C2_EVAL_EXTRA_ARGS_DEFAULT:---target-source from_run --target-source-missing-policy from_run --posthoc-calibration from_run}"
       D3_TARGETS="${D3_TARGETS:-q_mean_smoothed q_teacher q_fused}"
       ;;
+    D4_STRATEGYQA_SMOKE_3WAY_HQ)
+      GROUP_TITLE="Phase D StrategyQA Smoke 3-Way (HQ Pair + Two-Stage C2)"
+      GROUP_INTENTION="Use quality-first pair consensus and two-stage C2 to test whether teacher-supported labels become truly learnable."
+      GROUP_OBSERVE="Compare mc vs teacher vs fused under stronger pair-quality controls and top-k contrastive candidates."
+      GROUP_EXPECT="If supervision is the blocker, HQ pair controls should lift corruption-ordering metrics beyond the legacy smoke baseline."
+      GROUP_DATASET="strategyqa"
+      TRAIN_INPUT_JSONL="${TRAIN_INPUT_JSONL:-assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl}"
+      EVAL_INPUT_JSONL="${EVAL_INPUT_JSONL:-assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/validation.jsonl}"
+      TRAIN_MAX_SAMPLES="${TRAIN_MAX_SAMPLES:-256}"
+      EVAL_MAX_SAMPLES="${EVAL_MAX_SAMPLES:-128}"
+      ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-192}"
+      ROLLOUT_COUNT="${ROLLOUT_COUNT:-16}"
+      ROLLOUT_MAX_NEW_TOKENS="${ROLLOUT_MAX_NEW_TOKENS:-128}"
+      C2_TRAIN_BATCH_SIZE="${C2_TRAIN_BATCH_SIZE:-192}"
+      C2_EVAL_BATCH_SIZE="${C2_EVAL_BATCH_SIZE:-192}"
+      C2_LR="${C2_LR:-1e-4}"
+      C2_EPOCHS="${C2_EPOCHS:-10}"
+      TEACHER_TRAIN_SCORES="${TEACHER_TRAIN_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_full_mcorr4_c2_strategyqa_quality_first_full_c1_train__b7a8789f1974/teacher_prefix_scores.jsonl}"
+      TEACHER_EVAL_SCORES="${TEACHER_EVAL_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_c2_strategyqa_quality_first_c1_eval__f608255f810d/teacher_prefix_scores.jsonl}"
+      TEACHER_TRAIN_CORR_SCORES="${TEACHER_TRAIN_CORR_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_full_mcorr4_c2_strategyqa_quality_first_full_c1_train__b7a8789f1974/teacher_corruption_scores.jsonl}"
+      TEACHER_EVAL_CORR_SCORES="${TEACHER_EVAL_CORR_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_c2_strategyqa_quality_first_c1_eval__f608255f810d/teacher_corruption_scores.jsonl}"
+      TEACHER_FUSE_MODE="${TEACHER_FUSE_MODE:-confidence}"
+      TEACHER_FUSION_LAMBDA="${TEACHER_FUSION_LAMBDA:-0.5}"
+      TEACHER_CONF_CI_REF="${TEACHER_CONF_CI_REF:-0.30}"
+      TEACHER_DISAGREE_THRESH="${TEACHER_DISAGREE_THRESH:-0.25}"
+      TEACHER_MIN_COVERAGE="${TEACHER_MIN_COVERAGE:-0.98}"
+      C1_PREP_EXTRA_ARGS_DEFAULT="${C1_PREP_EXTRA_ARGS_DEFAULT:---corruption-selection-policy cqr_balanced --max-corruptions-per-prefix 4 --min-non-step-drop-per-prefix 1 --max-step-drop-per-prefix 1 --enable-negation-flip --enable-comparator-flip --enable-condition-reversal --enable-entity-substitution --build-pair-quality --pair-rollout-count 16 --target-alpha 1.0 --target-beta 1.0 --target-ci-z 1.96 --target-weight-floor 0.1 --target-weight-gamma 1.0 --pair-delta-q-min 0.15 --pair-z-min 0.5 --rollout-two-stage --rollout-stage1-count 8 --rollout-stage2-count 24 --rollout-uncertain-band 0.2 --rollout-uncertain-ci-width 0.3 --pair-consensus-enable --pair-consensus-teacher-delta-q-min 0.03 --pair-consensus-weight-boost 1.25 --pair-consensus-fail-weight-scale 0.20 --no-pair-consensus-require-teacher-coverage}"
+      C2_TRAIN_EXTRA_ARGS_DEFAULT="${C2_TRAIN_EXTRA_ARGS_DEFAULT:---train-mode two_stage --two-stage-ranking-ratio 0.45 --contrastive-max-corruptions-per-prefix 4 --use-contrastive-loss --calibration-loss bce_mse --calibration-bce-weight 1.0 --calibration-mse-weight 0.5 --calibration-sample-weighting q_weight_parseable --calibration-weight-floor 0.1 --calibration-weight-gamma 1.0 --lambda-contrastive 0.08 --contrastive-margin 0.02 --contrastive-pair-filter confidence_parseable_label --contrastive-confidence-threshold 0.2 --contrastive-parseable-threshold 0.75 --contrastive-label-delta-q-min 0.15 --contrastive-label-z-min 0.5 --contrastive-label-pair-weight-min 0.25 --contrastive-require-pair-pass-gate --contrastive-use-pair-weights --contrastive-stratified-sampling --contrastive-stratify-step-bucket-size 2 --contrastive-stratify-include-no-corruption --posthoc-calibration temperature --checkpoint-selection-metric posthoc_brier}"
+      C2_EVAL_EXTRA_ARGS_DEFAULT="${C2_EVAL_EXTRA_ARGS_DEFAULT:---target-source from_run --target-source-missing-policy from_run --posthoc-calibration from_run}"
+      D3_TARGETS="${D3_TARGETS:-q_mean_smoothed q_teacher q_fused}"
+      ;;
+    D4_STRATEGYQA_FULL_3WAY_HQ)
+      GROUP_TITLE="Phase D StrategyQA Full 3-Way (HQ Pair + Two-Stage C2)"
+      GROUP_INTENTION="Promotion-grade full-corpus rerun with quality-first pair controls and teacher-informed labels."
+      GROUP_OBSERVE="Check whether smoke trends hold under full data and stable pair diagnostics."
+      GROUP_EXPECT="If improvements are real, full run should keep or improve pair metrics while preserving calibration competitiveness."
+      GROUP_DATASET="strategyqa"
+      TRAIN_INPUT_JSONL="${TRAIN_INPUT_JSONL:-assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl}"
+      EVAL_INPUT_JSONL="${EVAL_INPUT_JSONL:-assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/validation.jsonl}"
+      TRAIN_MAX_SAMPLES="${TRAIN_MAX_SAMPLES:-}"
+      EVAL_MAX_SAMPLES="${EVAL_MAX_SAMPLES:-}"
+      ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-192}"
+      ROLLOUT_COUNT="${ROLLOUT_COUNT:-16}"
+      ROLLOUT_MAX_NEW_TOKENS="${ROLLOUT_MAX_NEW_TOKENS:-128}"
+      C2_TRAIN_BATCH_SIZE="${C2_TRAIN_BATCH_SIZE:-192}"
+      C2_EVAL_BATCH_SIZE="${C2_EVAL_BATCH_SIZE:-192}"
+      C2_LR="${C2_LR:-1e-4}"
+      C2_EPOCHS="${C2_EPOCHS:-12}"
+      TEACHER_TRAIN_SCORES="${TEACHER_TRAIN_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_full_mcorr4_c2_strategyqa_quality_first_full_c1_train__b7a8789f1974/teacher_prefix_scores.jsonl}"
+      TEACHER_EVAL_SCORES="${TEACHER_EVAL_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_c2_strategyqa_quality_first_c1_eval__f608255f810d/teacher_prefix_scores.jsonl}"
+      TEACHER_TRAIN_CORR_SCORES="${TEACHER_TRAIN_CORR_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_full_mcorr4_c2_strategyqa_quality_first_full_c1_train__b7a8789f1974/teacher_corruption_scores.jsonl}"
+      TEACHER_EVAL_CORR_SCORES="${TEACHER_EVAL_CORR_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_c2_strategyqa_quality_first_c1_eval__f608255f810d/teacher_corruption_scores.jsonl}"
+      TEACHER_FUSE_MODE="${TEACHER_FUSE_MODE:-confidence}"
+      TEACHER_FUSION_LAMBDA="${TEACHER_FUSION_LAMBDA:-0.5}"
+      TEACHER_CONF_CI_REF="${TEACHER_CONF_CI_REF:-0.30}"
+      TEACHER_DISAGREE_THRESH="${TEACHER_DISAGREE_THRESH:-0.25}"
+      TEACHER_MIN_COVERAGE="${TEACHER_MIN_COVERAGE:-0.98}"
+      C1_PREP_EXTRA_ARGS_DEFAULT="${C1_PREP_EXTRA_ARGS_DEFAULT:---corruption-selection-policy cqr_balanced --max-corruptions-per-prefix 4 --min-non-step-drop-per-prefix 1 --max-step-drop-per-prefix 1 --enable-negation-flip --enable-comparator-flip --enable-condition-reversal --enable-entity-substitution --build-pair-quality --pair-rollout-count 16 --target-alpha 1.0 --target-beta 1.0 --target-ci-z 1.96 --target-weight-floor 0.1 --target-weight-gamma 1.0 --pair-delta-q-min 0.20 --pair-z-min 0.6 --rollout-two-stage --rollout-stage1-count 8 --rollout-stage2-count 24 --rollout-uncertain-band 0.2 --rollout-uncertain-ci-width 0.3 --pair-consensus-enable --pair-consensus-teacher-delta-q-min 0.05 --pair-consensus-weight-boost 1.25 --pair-consensus-fail-weight-scale 0.20 --no-pair-consensus-require-teacher-coverage}"
+      C2_TRAIN_EXTRA_ARGS_DEFAULT="${C2_TRAIN_EXTRA_ARGS_DEFAULT:---train-mode two_stage --two-stage-ranking-ratio 0.45 --contrastive-max-corruptions-per-prefix 4 --use-contrastive-loss --calibration-loss bce_mse --calibration-bce-weight 1.0 --calibration-mse-weight 0.5 --calibration-sample-weighting q_weight_parseable --calibration-weight-floor 0.1 --calibration-weight-gamma 1.0 --lambda-contrastive 0.08 --contrastive-margin 0.02 --contrastive-pair-filter confidence_parseable_label --contrastive-confidence-threshold 0.2 --contrastive-parseable-threshold 0.75 --contrastive-label-delta-q-min 0.20 --contrastive-label-z-min 0.6 --contrastive-label-pair-weight-min 0.25 --contrastive-require-pair-pass-gate --contrastive-use-pair-weights --contrastive-stratified-sampling --contrastive-stratify-step-bucket-size 2 --contrastive-stratify-include-no-corruption --posthoc-calibration temperature --checkpoint-selection-metric posthoc_brier}"
+      C2_EVAL_EXTRA_ARGS_DEFAULT="${C2_EVAL_EXTRA_ARGS_DEFAULT:---target-source from_run --target-source-missing-policy from_run --posthoc-calibration from_run}"
+      D3_TARGETS="${D3_TARGETS:-q_mean_smoothed q_teacher q_fused}"
+      ;;
     *)
       echo "ERROR: Unknown ACTIVE_PHASE_D_GROUP=$ACTIVE_PHASE_D_GROUP"
-      echo "Supported groups: D4_STRATEGYQA_SMOKE_3WAY"
+      echo "Supported groups: D4_STRATEGYQA_SMOKE_3WAY, D4_STRATEGYQA_SMOKE_3WAY_HQ, D4_STRATEGYQA_FULL_3WAY_HQ"
       exit 1
       ;;
   esac
@@ -200,6 +262,7 @@ run_c1_prepare() {
   local run_name="$3"
   local max_samples="$4"
   local teacher_scores="$5"
+  local teacher_corr_scores="$6"
 
   local cmd=(
     "$PYTHON_BIN" -u scripts/phase_b_prepare_value_data.py
@@ -226,6 +289,9 @@ run_c1_prepare() {
   if [[ -n "$max_samples" ]]; then
     cmd+=(--max-samples "$max_samples")
   fi
+  if [[ -n "$teacher_corr_scores" ]]; then
+    cmd+=(--teacher-corruption-scores-jsonl "$teacher_corr_scores")
+  fi
   append_extra_args cmd "${C1_PREP_EXTRA_ARGS_DEFAULT:-}"
   append_extra_args cmd "${PHASE_D_PREP_EXTRA_ARGS:-}"
 
@@ -235,6 +301,7 @@ run_c1_prepare() {
     log_line "D2 input         : ${input_jsonl}"
     log_line "D2 run_name      : ${run_name}"
     log_line "D2 teacher score : ${teacher_scores}"
+    log_line "D2 teacher corr  : ${teacher_corr_scores:-<none>}"
     log_line "D2 command       : ${cmd[*]}"
   } | tee -a "$SUITE_LOG_FILE"
   "${cmd[@]}" 2>&1 | tee -a "$SUITE_LOG_FILE"
@@ -333,7 +400,9 @@ C1_EVAL_RUN_NAME="${RUN_NAME}_d2_c1_eval"
   log_line "Train input    : $TRAIN_INPUT_JSONL"
   log_line "Eval input     : $EVAL_INPUT_JSONL"
   log_line "Teacher train  : $TEACHER_TRAIN_SCORES"
+  log_line "Teacher trainc : ${TEACHER_TRAIN_CORR_SCORES:-<none>}"
   log_line "Teacher eval   : $TEACHER_EVAL_SCORES"
+  log_line "Teacher evalc  : ${TEACHER_EVAL_CORR_SCORES:-<none>}"
   log_line "Fuse mode      : $TEACHER_FUSE_MODE"
   log_line "D3 targets     : $D3_TARGETS"
   log_line "Intention      : $GROUP_INTENTION"
@@ -350,9 +419,17 @@ if [[ ! -f "$TEACHER_EVAL_SCORES" ]]; then
   echo "ERROR: Missing teacher score file: $TEACHER_EVAL_SCORES" >&2
   exit 1
 fi
+if [[ -n "${TEACHER_TRAIN_CORR_SCORES:-}" && ! -f "$TEACHER_TRAIN_CORR_SCORES" ]]; then
+  echo "ERROR: Missing teacher corruption score file: $TEACHER_TRAIN_CORR_SCORES" >&2
+  exit 1
+fi
+if [[ -n "${TEACHER_EVAL_CORR_SCORES:-}" && ! -f "$TEACHER_EVAL_CORR_SCORES" ]]; then
+  echo "ERROR: Missing teacher corruption score file: $TEACHER_EVAL_CORR_SCORES" >&2
+  exit 1
+fi
 
-run_c1_prepare "train" "$TRAIN_INPUT_JSONL" "$C1_TRAIN_RUN_NAME" "${TRAIN_MAX_SAMPLES:-}" "$TEACHER_TRAIN_SCORES"
-run_c1_prepare "eval" "$EVAL_INPUT_JSONL" "$C1_EVAL_RUN_NAME" "${EVAL_MAX_SAMPLES:-}" "$TEACHER_EVAL_SCORES"
+run_c1_prepare "train" "$TRAIN_INPUT_JSONL" "$C1_TRAIN_RUN_NAME" "${TRAIN_MAX_SAMPLES:-}" "$TEACHER_TRAIN_SCORES" "${TEACHER_TRAIN_CORR_SCORES:-}"
+run_c1_prepare "eval" "$EVAL_INPUT_JSONL" "$C1_EVAL_RUN_NAME" "${EVAL_MAX_SAMPLES:-}" "$TEACHER_EVAL_SCORES" "${TEACHER_EVAL_CORR_SCORES:-}"
 
 CURRENT_STAGE="resolve_d2_dirs"
 C1_TRAIN_DIR="$(latest_phase_c_data_run_dir_for_name "$GROUP_DATASET" "$C1_TRAIN_RUN_NAME")"
@@ -392,7 +469,9 @@ CURRENT_STAGE="final_summary"
   echo "## D2 Settings"
   echo
   echo "- teacher_train_scores: \`$TEACHER_TRAIN_SCORES\`"
+  echo "- teacher_train_corruption_scores: \`${TEACHER_TRAIN_CORR_SCORES:-<none>}\`"
   echo "- teacher_eval_scores: \`$TEACHER_EVAL_SCORES\`"
+  echo "- teacher_eval_corruption_scores: \`${TEACHER_EVAL_CORR_SCORES:-<none>}\`"
   echo "- teacher_fuse_mode: \`$TEACHER_FUSE_MODE\`"
   echo "- teacher_fusion_lambda: \`$TEACHER_FUSION_LAMBDA\`"
   echo "- teacher_confidence_ci_ref: \`$TEACHER_CONF_CI_REF\`"

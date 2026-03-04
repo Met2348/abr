@@ -618,6 +618,9 @@ C1_TRAIN_RUN_NAME="${RUN_NAME}_c1_train"
 C1_EVAL_RUN_NAME="${RUN_NAME}_c1_eval"
 C2_TRAIN_RUN_NAME="${RUN_NAME}_c2"
 C2_STANDALONE_EVAL_RUN_NAME="${RUN_NAME}_c2_eval"
+FEATURE_CACHE_ROOT="${FEATURE_CACHE_ROOT:-assets/artifacts/phase_c_feature_cache}"
+FEATURE_CACHE_MODE="${FEATURE_CACHE_MODE:-read_write}"
+FEATURE_CACHE_LOCK_TIMEOUT_SEC="${FEATURE_CACHE_LOCK_TIMEOUT_SEC:-600}"
 # 中文：命名链固定后，后续“自动找最新目录”才能稳定命中本次产物。
 
 {
@@ -641,6 +644,9 @@ C2_STANDALONE_EVAL_RUN_NAME="${RUN_NAME}_c2_eval"
   log_line "C2 LR          : $C2_LR"
   log_line "C2 epochs      : $C2_EPOCHS"
   log_line "C2 use ctr     : $C2_USE_CONTRASTIVE"
+  log_line "Feature cache root : $FEATURE_CACHE_ROOT"
+  log_line "Feature cache mode : $FEATURE_CACHE_MODE"
+  log_line "Feature cache lock : $FEATURE_CACHE_LOCK_TIMEOUT_SEC"
   log_line "C2 default train extra: ${C2_TRAIN_EXTRA_ARGS_DEFAULT:-<none>}"
   log_line "C2 default eval extra : ${C2_EVAL_EXTRA_ARGS_DEFAULT:-<none>}"
   log_line "C1 default prep extra : ${C1_PREP_EXTRA_ARGS_DEFAULT:-<none>}"
@@ -677,6 +683,9 @@ c2_train_cmd=(
   --per-device-eval-batch-size "$C2_EVAL_BATCH_SIZE"
   --learning-rate "$C2_LR"
   --num-train-epochs "$C2_EPOCHS"
+  --feature-cache-root "$FEATURE_CACHE_ROOT"
+  --feature-cache-mode "$FEATURE_CACHE_MODE"
+  --feature-cache-lock-timeout-sec "$FEATURE_CACHE_LOCK_TIMEOUT_SEC"
 )
 if [[ "$C2_USE_CONTRASTIVE" == "1" ]]; then
   c2_train_cmd+=(--use-contrastive-loss --lambda-contrastive 1.0 --contrastive-margin 0.1)
@@ -704,6 +713,9 @@ c2_eval_cmd=(
   --eval-dir "$C1_EVAL_DIR"
   --checkpoint-name best
   --run-name "$C2_STANDALONE_EVAL_RUN_NAME"
+  --feature-cache-root "$FEATURE_CACHE_ROOT"
+  --feature-cache-mode "$FEATURE_CACHE_MODE"
+  --feature-cache-lock-timeout-sec "$FEATURE_CACHE_LOCK_TIMEOUT_SEC"
 )
 append_extra_args c2_eval_cmd "${C2_EVAL_EXTRA_ARGS_DEFAULT:-}"
 append_extra_args c2_eval_cmd "${PHASE_C_EVAL_EXTRA_ARGS:-}"
@@ -743,6 +755,9 @@ cat > "$SUMMARY_FILE" <<EOF
 - c1_eval_dir: $C1_EVAL_DIR
 - c2_train_dir: $C2_TRAIN_DIR
 - c2_eval_dir: $C2_EVAL_DIR
+- feature_cache_root: $FEATURE_CACHE_ROOT
+- feature_cache_mode: $FEATURE_CACHE_MODE
+- feature_cache_lock_timeout_sec: $FEATURE_CACHE_LOCK_TIMEOUT_SEC
 - suite_log_file: $SUITE_LOG_FILE
 
 ## C2 Key Metrics

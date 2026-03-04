@@ -353,6 +353,31 @@ New C2 options (can be toggled independently):
 - CQR C1 corruption policy: `--corruption-selection-policy`, `--min-non-step-drop-per-prefix`, `--max-step-drop-per-prefix`, semantic toggles (`--enable-negation-flip`, `--enable-comparator-flip`, `--enable-condition-reversal`, `--enable-entity-substitution`)
 - CQR C2 stratified sampling: `--contrastive-stratified-sampling`, `--contrastive-stratify-step-bucket-size`, `--contrastive-stratify-include-no-corruption`
 
+Persistent feature cache (safe default, recommended):
+- `--feature-cache-root assets/artifacts/phase_c_feature_cache`
+- `--feature-cache-mode {off,read,write,read_write}` (default: `read_write`)
+- `--feature-cache-lock-timeout-sec 600`
+
+Safety guarantees for persistent cache reuse:
+1. cache key includes frozen-backbone provenance and data signature hashes,
+2. payload shape contract is validated before reuse,
+3. writes are lock-protected and atomically committed.
+
+One-click healthcheck for cache infra:
+
+```bash
+# Fast: static + module selftest
+RUN_PREFIX=cache_hc_fast CHECK_PROFILE=fast bash scripts/run_feature_cache_healthcheck.sh
+
+# Full: include runtime smoke when prerequisites are available
+RUN_PREFIX=cache_hc_full CHECK_PROFILE=full CUDA_VISIBLE_DEVICES=0 \
+bash scripts/run_feature_cache_healthcheck.sh
+```
+
+Healthcheck outputs:
+- `assets/artifacts/healthcheck_logs/<RUN_PREFIX>/suite.log`
+- `assets/artifacts/healthcheck_logs/<RUN_PREFIX>/final_summary.md`
+
 C2 standalone evaluation entrypoint:
 
 ```bash
@@ -413,6 +438,11 @@ Main P(IK) scripts:
 - `scripts/phase_c_train_pik.py`
 - `scripts/phase_c_eval_pik.py`
 
+PIK train/eval also supports the same persistent feature-cache flags:
+- `--feature-cache-root`
+- `--feature-cache-mode`
+- `--feature-cache-lock-timeout-sec`
+
 Supported lifecycle groups:
 1. `C2_STRATEGYQA_SMOKE`
 2. `C2_STRATEGYQA_FULL`
@@ -462,7 +492,8 @@ If a historical artifact directory is missing `manifest.json`, add:
 D2 C1 teacher/MC fusion (implemented):
 - `scripts/phase_b_prepare_value_data.py` now supports teacher join + fusion,
 - writes `q_teacher`, `q_fused`, `teacher_available`, `teacher_disagree` into `rollout_targets.jsonl`,
-- writes join diagnostics under `teacher_fusion_summary` in `summary.json`.
+- writes join diagnostics under `teacher_fusion_summary` in `summary.json`,
+- supports pair-quality teacher consensus (`--teacher-corruption-scores-jsonl`, `--pair-consensus-*`).
 
 ```bash
 python -u scripts/phase_b_prepare_value_data.py \
@@ -478,15 +509,21 @@ python -u scripts/phase_b_prepare_value_data.py \
   --device-map auto \
   --require-cuda \
   --teacher-prefix-scores-jsonl <path_to_teacher_prefix_scores.jsonl> \
+  --teacher-corruption-scores-jsonl <path_to_teacher_corruption_scores.jsonl> \
   --teacher-fuse-mode fixed \
   --teacher-fusion-lambda 0.5 \
-  --teacher-min-coverage 0.98
+  --teacher-min-coverage 0.98 \
+  --build-pair-quality \
+  --pair-consensus-enable
 ```
 
 D3 C2 target-source switch (implemented):
 - `scripts/phase_b_train_value.py`:
   - `--target-source {q_mean_smoothed,q_teacher,q_fused}`
   - `--target-source-missing-policy {fail,fallback_mc}`
+  - `--contrastive-max-corruptions-per-prefix`
+  - `--train-mode {joint,ranking_only,calibration_only,two_stage}`
+  - `--two-stage-ranking-ratio`
 - `scripts/phase_b_eval_faithfulness.py`:
   - `--target-source from_run` to reuse training selection.
 
@@ -512,19 +549,39 @@ python -u scripts/phase_b_eval_faithfulness.py \
   --run-name phase_d_c2_eval
 ```
 
-Phase D bundled suite (new, recommended):
+Phase D bundled suite (recommended):
 - One command runs D2 prep (train+eval) and D3 three-way ablation (`mc/teacher/fused`).
 - Consolidates all metrics in one summary table.
+- New HQ group enables pair-consensus gating + C2 two-stage (`ranking -> calibration`) + top-k corruption candidates.
+
+Smoke (fast, recommended first):
 
 ```bash
-ACTIVE_PHASE_D_GROUP=D4_STRATEGYQA_SMOKE_3WAY \
-RUN_PREFIX=phase_d_bundle_smoke \
-TRAIN_INPUT_JSONL=<phase_a_prepared_train_jsonl> \
-EVAL_INPUT_JSONL=<phase_a_prepared_eval_jsonl> \
-TEACHER_TRAIN_SCORES=<teacher_prefix_scores_train_jsonl> \
-TEACHER_EVAL_SCORES=<teacher_prefix_scores_eval_jsonl> \
+ACTIVE_PHASE_D_GROUP=D4_STRATEGYQA_SMOKE_3WAY_HQ \
+RUN_PREFIX=phase_d_bundle_smoke_hq \
 CUDA_VISIBLE_DEVICES=1 \
 bash scripts/run_phase_d_teacher_suite.sh
+```
+
+Full (promotion-oriented):
+
+```bash
+ACTIVE_PHASE_D_GROUP=D4_STRATEGYQA_FULL_3WAY_HQ \
+RUN_PREFIX=phase_d_bundle_full_hq \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_d_teacher_suite.sh
+```
+
+Optional overrides (common):
+
+```bash
+TEACHER_TRAIN_SCORES=<.../teacher_prefix_scores.jsonl> \
+TEACHER_TRAIN_CORR_SCORES=<.../teacher_corruption_scores.jsonl> \
+TEACHER_EVAL_SCORES=<.../teacher_prefix_scores.jsonl> \
+TEACHER_EVAL_CORR_SCORES=<.../teacher_corruption_scores.jsonl> \
+ROLLOUT_BATCH_SIZE=192 \
+C2_TRAIN_BATCH_SIZE=192 \
+C2_EVAL_BATCH_SIZE=192
 ```
 
 Main outputs:
@@ -533,7 +590,49 @@ Main outputs:
 3. auto-linked D2 dirs in `assets/artifacts/phase_c_data/...`
 4. auto-linked D3 runs in `assets/artifacts/phase_c_runs/...` and `assets/artifacts/phase_c_eval/...`
 
-Suite usage for D3 ablation (example):
+Phase D4 external-pair suite (new):
+- One command runs D4A -> D4B -> D4C with external pair preparation + C2 train/eval.
+- D4A: direct pair warm start (`R-PRM` + `PRMBench_Preview`).
+- D4B: add step-converted pairs (`Math-Shepherd` + `RLHFlow`).
+- D4C: stabilize with conservative external weight + two-stage C2.
+
+Smoke (recommended first):
+
+```bash
+ACTIVE_PHASE_D4_GROUP=D4ABC_STRATEGYQA_SMOKE \
+RUN_PREFIX=phase_d4abc_smoke \
+PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<your_train_dir> \
+PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<your_eval_dir> \
+CUDA_VISIBLE_DEVICES=0 \
+bash scripts/run_phase_d_external_pair_suite.sh
+```
+
+Single-stage examples:
+
+```bash
+ACTIVE_PHASE_D4_GROUP=D4A_STRATEGYQA_SMOKE bash scripts/run_phase_d_external_pair_suite.sh
+ACTIVE_PHASE_D4_GROUP=D4B_STRATEGYQA_SMOKE bash scripts/run_phase_d_external_pair_suite.sh
+ACTIVE_PHASE_D4_GROUP=D4C_STRATEGYQA_SMOKE bash scripts/run_phase_d_external_pair_suite.sh
+```
+
+Full-scale group:
+
+```bash
+ACTIVE_PHASE_D4_GROUP=D4ABC_STRATEGYQA_FULL \
+RUN_PREFIX=phase_d4abc_full \
+PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<your_train_dir> \
+PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<your_eval_dir> \
+CUDA_VISIBLE_DEVICES=0 \
+bash scripts/run_phase_d_external_pair_suite.sh
+```
+
+D4 suite outputs:
+1. `assets/artifacts/phase_d_logs/<RUN_PREFIX>/suite.log`
+2. `assets/artifacts/phase_d_logs/<RUN_PREFIX>/final_summary.md`
+3. stage-wise external pair artifacts in `assets/artifacts/phase_d_external_pairs/...`
+4. stage-wise C2 runs/evals in `assets/artifacts/phase_c_runs/...` and `assets/artifacts/phase_c_eval/...`
+
+Suite usage for C2-only ablation (example):
 
 ```bash
 ACTIVE_PHASE_C_GROUP=C2_STRATEGYQA_CQR_SMOKE \
@@ -590,8 +689,40 @@ For the new `B2_*` groups, this comparison is automated and written to:
 - `phase_A_report.md`: Phase A conclusions and outcomes
 - `phase_B_plan.md`: Phase B lifecycle and goals
 - `phase_D_plan.md`: Phase D lifecycle and external-PRM integration plan
+- `phase_D4ABC_external_pairs_tutorial.md`: D4A/B/C newcomer tutorial and troubleshooting
 - `result_records.md`: experiment records and diagnosis history
 - `foundation_reliability_audit.md`: reliability risks and hardening notes
+
+## External Dataset Variants (Community Snapshots)
+
+This repo now supports loading common community mirrors directly from:
+- `assets/external_datasets/openai_gsm8k`
+- `assets/external_datasets/voidful_strategyqa`
+
+You can use them without manual folder renaming by setting `--dataset-root`.
+
+Quick check:
+
+```bash
+source ~/anaconda3/etc/profile.d/conda.sh
+conda activate bcr
+python scripts/check_data.py --datasets gsm8k strategyqa --dataset-root assets/external_datasets --split train --limit 2
+```
+
+Prepare Phase A artifacts from external snapshots:
+
+```bash
+source ~/anaconda3/etc/profile.d/conda.sh
+conda activate bcr
+python scripts/phase_a_prepare.py \
+  --datasets gsm8k strategyqa \
+  --dataset-root assets/external_datasets \
+  --source-split train \
+  --split-policy hash \
+  --target-style cot_then_answer \
+  --template-id qa_strategyqa_cot_compact \
+  --output-dir assets/artifacts/phase_a_prepared_external
+```
 
 ## Note for Maintainers
 

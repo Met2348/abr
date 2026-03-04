@@ -1,0 +1,518 @@
+"""Source adapters for building canonical Phase D external pair artifacts."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable
+
+from .external_pairs import ExternalPairRecord
+
+
+@dataclass(slots=True)
+class PairBuildConfig:
+    """Quality-control config shared by external-pair source adapters."""
+
+    min_chars: int = 12
+    max_length_ratio: float = 4.0
+    max_token_overlap: float = 0.995
+    max_pairs_per_sample: int = 2
+
+    def validate(self) -> None:
+        if self.min_chars <= 0:
+            raise ValueError("`min_chars` must be > 0")
+        if self.max_length_ratio <= 1.0:
+            raise ValueError("`max_length_ratio` must be > 1")
+        if not (0.0 <= self.max_token_overlap <= 1.0):
+            raise ValueError("`max_token_overlap` must be in [0, 1]")
+        if self.max_pairs_per_sample <= 0:
+            raise ValueError("`max_pairs_per_sample` must be > 0")
+
+
+def load_r_prm_dpo_pairs(
+    *,
+    root: Path,
+    split: str,
+    config: PairBuildConfig,
+    max_pairs: int | None = None,
+) -> list[ExternalPairRecord]:
+    """Load direct chosen/rejected pairs from R-PRM DPO split."""
+    config.validate()
+    split = str(split).strip()
+    if split not in {"train", "validation"}:
+        raise ValueError("R-PRM split must be one of {train, validation}")
+    source_root = root / "dpo" / split
+    files = sorted(source_root.glob("*.parquet"))
+    if not files:
+        raise FileNotFoundError(f"No parquet shards found in {source_root}")
+
+    rows: list[ExternalPairRecord] = []
+    for shard_idx, payload in enumerate(
+        _iter_parquet_rows(
+            files=files,
+            columns=("instruction", "chosen", "rejected"),
+        )
+    ):
+        prompt_text = str(payload.get("instruction", ""))
+        chosen_text = str(payload.get("chosen", ""))
+        rejected_text = str(payload.get("rejected", ""))
+        record = _build_record(
+            source_tag="r_prm",
+            domain_tag="general_math",
+            prompt_text=prompt_text,
+            chosen_text=chosen_text,
+            rejected_text=rejected_text,
+            pair_confidence=0.78,
+            metadata={
+                "source_split": split,
+                "source_row_index": int(shard_idx),
+                "source_root": str(root),
+            },
+            config=config,
+        )
+        if record is None:
+            continue
+        rows.append(record)
+        if max_pairs is not None and len(rows) >= int(max_pairs):
+            break
+    return rows
+
+
+def load_prmbench_preview_pairs(
+    *,
+    path: Path,
+    config: PairBuildConfig,
+    max_pairs: int | None = None,
+) -> list[ExternalPairRecord]:
+    """Load pair candidates from PRMBench preview JSONL."""
+    config.validate()
+    if not path.exists():
+        raise FileNotFoundError(f"PRMBench preview JSONL not found: {path}")
+
+    rows: list[ExternalPairRecord] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_no, raw in enumerate(handle, start=1):
+            text = raw.strip()
+            if not text:
+                continue
+            payload = json.loads(text)
+            question = str(payload.get("question") or payload.get("modified_question") or "")
+            original_process = payload.get("original_process")
+            modified_process = payload.get("modified_process")
+            error_steps = payload.get("error_steps")
+            if not isinstance(original_process, list) or not isinstance(modified_process, list):
+                continue
+            if not isinstance(error_steps, list):
+                continue
+            for error_step in error_steps:
+                try:
+                    # PRMBench stores 1-based step indices in most rows.
+                    idx = int(error_step)
+                except Exception:  # noqa: BLE001
+                    continue
+                idx = idx - 1 if idx > 0 else idx
+                if idx < 0:
+                    continue
+                if idx >= len(original_process) or idx >= len(modified_process):
+                    continue
+                chosen_text = _join_steps_as_prefix(original_process, idx)
+                rejected_text = _join_steps_as_prefix(modified_process, idx)
+                confidence = 0.86 if len(error_steps) > 0 else 0.8
+                record = _build_record(
+                    source_tag="prmbench_preview",
+                    domain_tag="general_math",
+                    prompt_text=f"{question}\n\n",
+                    chosen_text=chosen_text,
+                    rejected_text=rejected_text,
+                    pair_confidence=confidence,
+                    metadata={
+                        "source_row_line": int(line_no),
+                        "source_idx": payload.get("idx"),
+                        "classification": payload.get("classification"),
+                        "error_step_index": int(idx),
+                        "num_error_steps": int(len(error_steps)),
+                    },
+                    config=config,
+                )
+                if record is None:
+                    continue
+                rows.append(record)
+                if max_pairs is not None and len(rows) >= int(max_pairs):
+                    return rows
+    return rows
+
+
+def load_math_shepherd_pairs(
+    *,
+    path: Path,
+    config: PairBuildConfig,
+    max_pairs: int | None = None,
+) -> list[ExternalPairRecord]:
+    """Convert Math-Shepherd step labels into pair candidates."""
+    config.validate()
+    if not path.exists():
+        raise FileNotFoundError(f"Math-Shepherd JSONL not found: {path}")
+
+    rows: list[ExternalPairRecord] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_no, raw in enumerate(handle, start=1):
+            text = raw.strip()
+            if not text:
+                continue
+            payload = json.loads(text)
+            label_text = str(payload.get("label", ""))
+            task = str(payload.get("task", "")).strip().lower()
+            if not label_text:
+                continue
+            prompt = _extract_problem_prefix(label_text)
+            steps = _extract_step_labels_from_math_shepherd(label_text)
+            domain_tag = "gsm8k_math" if task == "gsm8k" else "general_math"
+            converted = _convert_step_labels_to_pairs(
+                prompt_text=f"{prompt}\n\n",
+                step_labels=steps,
+                source_tag="math_shepherd",
+                domain_tag=domain_tag,
+                config=config,
+                base_metadata={
+                    "source_line": int(line_no),
+                    "task": payload.get("task"),
+                },
+            )
+            rows.extend(converted)
+            if max_pairs is not None and len(rows) >= int(max_pairs):
+                return rows[: int(max_pairs)]
+    return rows
+
+
+def load_rlhflow_pairs(
+    *,
+    mistral_root: Path | None,
+    deepseek_path: Path | None,
+    config: PairBuildConfig,
+    max_pairs_per_source: int | None = None,
+) -> list[ExternalPairRecord]:
+    """Convert RLHFlow step-label conversations into pair candidates."""
+    config.validate()
+    rows: list[ExternalPairRecord] = []
+    if mistral_root is not None:
+        rows.extend(
+            _load_rlhflow_mistral_pairs(
+                root=mistral_root,
+                config=config,
+                max_pairs=max_pairs_per_source,
+            )
+        )
+    if deepseek_path is not None:
+        rows.extend(
+            _load_rlhflow_deepseek_pairs(
+                path=deepseek_path,
+                config=config,
+                max_pairs=max_pairs_per_source,
+            )
+        )
+    return rows
+
+
+def _load_rlhflow_mistral_pairs(
+    *,
+    root: Path,
+    config: PairBuildConfig,
+    max_pairs: int | None = None,
+) -> list[ExternalPairRecord]:
+    source_root = root / "data"
+    files = sorted(source_root.glob("*.parquet"))
+    if not files:
+        raise FileNotFoundError(f"No RLHFlow mistral shards found in {source_root}")
+
+    rows: list[ExternalPairRecord] = []
+    for row_idx, payload in enumerate(_iter_parquet_rows(files=files, columns=("conversations",))):
+        conv = payload.get("conversations")
+        if not isinstance(conv, list):
+            continue
+        step_labels = _extract_step_labels_from_conversations(conv)
+        prompt = _extract_problem_prefix(str(conv[0].get("content", ""))) if conv else ""
+        converted = _convert_step_labels_to_pairs(
+            prompt_text=f"{prompt}\n\n",
+            step_labels=step_labels,
+            source_tag="rlhflow_mistral",
+            domain_tag="general_math",
+            config=config,
+            base_metadata={
+                "source_row_index": int(row_idx),
+                "source_root": str(root),
+            },
+        )
+        rows.extend(converted)
+        if max_pairs is not None and len(rows) >= int(max_pairs):
+            return rows[: int(max_pairs)]
+    return rows
+
+
+def _load_rlhflow_deepseek_pairs(
+    *,
+    path: Path,
+    config: PairBuildConfig,
+    max_pairs: int | None = None,
+) -> list[ExternalPairRecord]:
+    if not path.exists():
+        raise FileNotFoundError(f"RLHFlow deepseek JSONL not found: {path}")
+    rows: list[ExternalPairRecord] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_no, raw in enumerate(handle, start=1):
+            text = raw.strip()
+            if not text:
+                continue
+            payload = json.loads(text)
+            conv = payload.get("conversations")
+            if not isinstance(conv, list):
+                continue
+            step_labels = _extract_step_labels_from_conversations(conv)
+            prompt = _extract_problem_prefix(str(conv[0].get("content", ""))) if conv else ""
+            converted = _convert_step_labels_to_pairs(
+                prompt_text=f"{prompt}\n\n",
+                step_labels=step_labels,
+                source_tag="rlhflow_deepseek",
+                domain_tag="general_math",
+                config=config,
+                base_metadata={
+                    "source_line": int(line_no),
+                    "source_path": str(path),
+                },
+            )
+            rows.extend(converted)
+            if max_pairs is not None and len(rows) >= int(max_pairs):
+                return rows[: int(max_pairs)]
+    return rows
+
+
+def _iter_parquet_rows(
+    *,
+    files: list[Path],
+    columns: Iterable[str],
+) -> Iterable[dict[str, Any]]:
+    """Yield parquet rows as plain dictionaries."""
+    try:
+        import pyarrow.parquet as pq
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "Failed to import `pyarrow.parquet` while reading external parquet shards. "
+            "Please fix your pyarrow runtime first, for example: "
+            "`python -m pip install -U pyarrow` "
+            "and make sure no mixed conda/pip binary conflict remains."
+        ) from exc
+
+    for file_path in files:
+        pf = pq.ParquetFile(file_path)
+        for batch in pf.iter_batches(batch_size=1024, columns=list(columns)):
+            names = list(batch.schema.names)
+            cols = [batch.column(i) for i in range(len(names))]
+            for row_idx in range(batch.num_rows):
+                payload: dict[str, Any] = {}
+                for col_idx, name in enumerate(names):
+                    payload[name] = cols[col_idx][row_idx].as_py()
+                yield payload
+
+
+def _extract_problem_prefix(text: str) -> str:
+    """Extract question/problem prefix before step markers."""
+    normalized = " ".join(str(text).replace("\r", "\n").split())
+    match = re.split(r"(?i)\bstep\s*1\s*:", normalized, maxsplit=1)
+    if not match:
+        return normalized[:512]
+    return match[0].strip()[:512]
+
+
+def _extract_step_labels_from_math_shepherd(label_text: str) -> list[tuple[str, str]]:
+    """Extract `(step_text, label)` from Math-Shepherd `label` field."""
+    rows: list[tuple[str, str]] = []
+    lines = [line.strip() for line in str(label_text).replace("\r", "\n").split("\n")]
+    for line in lines:
+        if not line or not line.lower().startswith("step "):
+            continue
+        match = re.match(r"^(Step\s+\d+\s*:\s*.*?)(?:\s+([+-]))\s*$", line)
+        if not match:
+            continue
+        step_text = str(match.group(1)).strip()
+        label = str(match.group(2)).strip()
+        if label not in {"+", "-"}:
+            continue
+        rows.append((step_text, label))
+    return rows
+
+
+def _extract_step_labels_from_conversations(conversations: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """Extract `(step_text, label)` from RLHFlow conversation turns."""
+    rows: list[tuple[str, str]] = []
+    for idx in range(len(conversations) - 1):
+        left = conversations[idx]
+        right = conversations[idx + 1]
+        if str(left.get("role", "")).strip().lower() != "user":
+            continue
+        if str(right.get("role", "")).strip().lower() != "assistant":
+            continue
+        label = str(right.get("content", "")).strip()
+        if label not in {"+", "-"}:
+            continue
+        step_text = str(left.get("content", "")).strip()
+        if step_text == "":
+            continue
+        rows.append((step_text, label))
+    return rows
+
+
+def _convert_step_labels_to_pairs(
+    *,
+    prompt_text: str,
+    step_labels: list[tuple[str, str]],
+    source_tag: str,
+    domain_tag: str,
+    config: PairBuildConfig,
+    base_metadata: dict[str, Any],
+) -> list[ExternalPairRecord]:
+    """Convert `+/-` step labels into prefix-level chosen/rejected pairs."""
+    positives = [idx for idx, (_, label) in enumerate(step_labels) if label == "+"]
+    negatives = [idx for idx, (_, label) in enumerate(step_labels) if label == "-"]
+    if not positives or not negatives:
+        return []
+
+    rows: list[ExternalPairRecord] = []
+    used_pairs: set[tuple[int, int]] = set()
+    for pos_idx in positives:
+        if len(rows) >= int(config.max_pairs_per_sample):
+            break
+        neg_idx = min(negatives, key=lambda n: abs(n - pos_idx))
+        key = (pos_idx, neg_idx)
+        if key in used_pairs:
+            continue
+        used_pairs.add(key)
+        chosen_text = _join_steps_as_prefix([step for step, _ in step_labels], pos_idx)
+        rejected_text = _join_steps_as_prefix([step for step, _ in step_labels], neg_idx)
+        distance = abs(pos_idx - neg_idx)
+        confidence = 0.62 if distance <= 2 else 0.55
+        record = _build_record(
+            source_tag=source_tag,
+            domain_tag=domain_tag,
+            prompt_text=prompt_text,
+            chosen_text=chosen_text,
+            rejected_text=rejected_text,
+            pair_confidence=confidence,
+            metadata={
+                **base_metadata,
+                "positive_step_index": int(pos_idx),
+                "negative_step_index": int(neg_idx),
+                "num_step_labels": int(len(step_labels)),
+            },
+            config=config,
+        )
+        if record is not None:
+            rows.append(record)
+    return rows
+
+
+def _join_steps_as_prefix(steps: list[Any], step_index: int) -> str:
+    """Join step list as one prefix ending at `step_index` (inclusive)."""
+    if not steps:
+        return ""
+    end = min(max(int(step_index), 0), len(steps) - 1)
+    fragments = [str(step).strip() for step in steps[: end + 1] if str(step).strip()]
+    return "\n".join(fragments) + ("\n" if fragments else "")
+
+
+def _build_record(
+    *,
+    source_tag: str,
+    domain_tag: str,
+    prompt_text: str,
+    chosen_text: str,
+    rejected_text: str,
+    pair_confidence: float,
+    metadata: dict[str, Any],
+    config: PairBuildConfig,
+) -> ExternalPairRecord | None:
+    """Build one validated canonical pair record, or return None if filtered."""
+    flags = _compute_quality_flags(
+        prompt_text=prompt_text,
+        chosen_text=chosen_text,
+        rejected_text=rejected_text,
+    )
+    if not _passes_quality_filter(flags=flags, config=config):
+        return None
+    pair_id = _stable_hash(
+        source_tag,
+        domain_tag,
+        _normalize_space(prompt_text),
+        _normalize_space(chosen_text),
+        _normalize_space(rejected_text),
+    )[:20]
+    record = ExternalPairRecord(
+        pair_id=pair_id,
+        source_tag=str(source_tag).strip(),
+        domain_tag=str(domain_tag).strip(),
+        prompt_text=str(prompt_text),
+        chosen_text=str(chosen_text),
+        rejected_text=str(rejected_text),
+        pair_confidence=float(min(max(pair_confidence, 0.0), 1.0)),
+        quality_flags=flags,
+        metadata=dict(metadata),
+    )
+    record.validate()
+    return record
+
+
+def _compute_quality_flags(
+    *,
+    prompt_text: str,
+    chosen_text: str,
+    rejected_text: str,
+) -> dict[str, Any]:
+    chosen_norm = _normalize_space(chosen_text)
+    rejected_norm = _normalize_space(rejected_text)
+    chosen_chars = len(chosen_norm)
+    rejected_chars = len(rejected_norm)
+    min_len = min(chosen_chars, rejected_chars) if chosen_chars and rejected_chars else 0
+    max_len = max(chosen_chars, rejected_chars) if chosen_chars or rejected_chars else 0
+    ratio = float(max_len / max(min_len, 1))
+    chosen_tokens = set(chosen_norm.split())
+    rejected_tokens = set(rejected_norm.split())
+    union = chosen_tokens | rejected_tokens
+    overlap = (len(chosen_tokens & rejected_tokens) / len(union)) if union else 1.0
+    return {
+        "chosen_chars": int(chosen_chars),
+        "rejected_chars": int(rejected_chars),
+        "length_ratio": float(ratio),
+        "token_overlap_ratio": float(overlap),
+        "non_empty": bool(chosen_chars > 0 and rejected_chars > 0),
+        "distinct_pair": bool(chosen_norm != rejected_norm),
+        "prompt_chars": int(len(_normalize_space(prompt_text))),
+    }
+
+
+def _passes_quality_filter(*, flags: dict[str, Any], config: PairBuildConfig) -> bool:
+    if not bool(flags.get("non_empty", False)):
+        return False
+    if not bool(flags.get("distinct_pair", False)):
+        return False
+    if int(flags.get("chosen_chars", 0)) < int(config.min_chars):
+        return False
+    if int(flags.get("rejected_chars", 0)) < int(config.min_chars):
+        return False
+    if float(flags.get("length_ratio", 999.0)) > float(config.max_length_ratio):
+        return False
+    if float(flags.get("token_overlap_ratio", 1.0)) > float(config.max_token_overlap):
+        return False
+    return True
+
+
+def _normalize_space(text: str) -> str:
+    return " ".join(str(text).replace("\r", "\n").split())
+
+
+def _stable_hash(*parts: Any) -> str:
+    digest = hashlib.sha256()
+    for part in parts:
+        digest.update(str(part).encode("utf-8", errors="ignore"))
+        digest.update(b"\0")
+    return digest.hexdigest()

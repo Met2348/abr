@@ -51,6 +51,18 @@ from ours.phase_b.faithfulness_eval import (  # noqa: E402
     compute_calibration_summary,
     render_faithfulness_summary_markdown,
 )
+from ours.phase_b.feature_cache import (  # noqa: E402
+    build_backbone_signature,
+    build_cache_key,
+    feature_cache_can_read,
+    feature_cache_can_write,
+    hash_float_list,
+    hash_text_list,
+    move_tensors_to_device,
+    save_feature_cache,
+    try_load_feature_cache,
+    validate_feature_cache_mode,
+)
 from ours.phase_b.pik_data import (  # noqa: E402
     assert_phase_c_pik_compatibility,
     load_phase_c_pik_manifest,
@@ -67,6 +79,7 @@ from ours.phase_b.value_head import (  # noqa: E402
     encode_text_features,
     freeze_backbone,
     load_value_head_checkpoint,
+    resolve_model_input_device,
 )
 
 
@@ -86,6 +99,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--max-eval-samples", type=int, default=None)
     parser.add_argument("--max-length", type=int, default=None)
+    parser.add_argument(
+        "--feature-cache-root",
+        type=Path,
+        default=Path("assets/artifacts/phase_c_feature_cache"),
+        help="Persistent feature-cache root for standalone P(IK) eval feature encoding.",
+    )
+    parser.add_argument(
+        "--feature-cache-mode",
+        choices=["off", "read", "write", "read_write"],
+        default="read_write",
+        help="Feature-cache behavior for standalone P(IK) eval.",
+    )
+    parser.add_argument(
+        "--feature-cache-lock-timeout-sec",
+        type=float,
+        default=600.0,
+        help="Lock wait timeout for safe concurrent cache writes.",
+    )
     parser.add_argument("--known-threshold", type=float, default=None)
     parser.add_argument(
         "--posthoc-calibration",
@@ -117,6 +148,9 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--posthoc-temperature-max must be > --posthoc-temperature-min")
     if args.posthoc_isotonic_min_points <= 0:
         raise ValueError("--posthoc-isotonic-min-points must be > 0")
+    args.feature_cache_mode = validate_feature_cache_mode(str(args.feature_cache_mode))
+    if float(args.feature_cache_lock_timeout_sec) <= 0.0:
+        raise ValueError("--feature-cache-lock-timeout-sec must be > 0")
 
     # 先做 run/eval artifact 兼容性检查，再做任何推理。
     manifest_path = args.value_run_dir / "manifest.json"
@@ -184,15 +218,86 @@ def main(argv: list[str] | None = None) -> int:
         backbone = _attach_peft_adapter_for_inference(backbone, Path(adapter_path))
     freeze_backbone(backbone)
 
-    # 重新编码 eval features，避免依赖训练时缓存状态。
-    features = _encode_text_list(
-        texts=[example.model_input_text() for example in eval_examples],
-        backbone=backbone,
-        tokenizer=tokenizer,
-        torch_module=torch,
-        max_length=max_length,
-        batch_size=int(value_manifest["train_config"]["per_device_eval_batch_size"]),
+    feature_cache_stats: dict[str, Any] = {
+        "mode": str(args.feature_cache_mode),
+        "root": str(args.feature_cache_root),
+        "hits": 0,
+        "misses": 0,
+        "writes": 0,
+        "entries": {},
+    }
+    feature_cache_root = Path(args.feature_cache_root)
+    eval_batch_size = int(value_manifest["train_config"]["per_device_eval_batch_size"])
+    eval_texts = [example.model_input_text() for example in eval_examples]
+    backbone_signature = build_backbone_signature(
+        model_path=str(resolved["model_path"]),
+        adapter_path=(str(resolved["adapter_path"]) if resolved.get("adapter_path") else None),
+        tokenizer_path=str(tokenizer_path),
+        dtype=str(resolved["dtype"]),
+        max_length=int(max_length),
     )
+    cache_signature = _build_eval_feature_cache_signature_payload(
+        texts=eval_texts,
+        examples=eval_examples,
+        max_length=int(max_length),
+        backbone_signature=backbone_signature,
+    )
+    cache_key, signature_hash = build_cache_key("phase_c_pik_eval_features", cache_signature)
+    features = None
+    if feature_cache_can_read(str(args.feature_cache_mode)):
+        cached_payload, _, _ = try_load_feature_cache(
+            cache_root=feature_cache_root,
+            cache_key=cache_key,
+            expected_signature_hash=signature_hash,
+            torch_module=torch,
+        )
+        if cached_payload is not None:
+            try:
+                _validate_cached_feature_tensor_payload(
+                    payload=cached_payload,
+                    expected_rows=len(eval_texts),
+                    torch_module=torch,
+                )
+                features = move_tensors_to_device(cached_payload, resolve_model_input_device(backbone), torch)
+                feature_cache_stats["hits"] += 1
+                feature_cache_stats["entries"]["eval_features"] = {
+                    "status": "hit",
+                    "cache_key": cache_key,
+                }
+                print(f"feature_cache    : eval_features hit ({cache_key})", flush=True)
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"feature_cache    : eval_features invalid payload, fallback to re-encode ({exc})",
+                    flush=True,
+                )
+    if features is None:
+        feature_cache_stats["misses"] += 1
+        feature_cache_stats["entries"]["eval_features"] = {
+            "status": "miss",
+            "cache_key": cache_key,
+        }
+        print(f"feature_cache    : eval_features miss ({cache_key})", flush=True)
+        features = _encode_text_list(
+            texts=eval_texts,
+            backbone=backbone,
+            tokenizer=tokenizer,
+            torch_module=torch,
+            max_length=max_length,
+            batch_size=eval_batch_size,
+        )
+        if feature_cache_can_write(str(args.feature_cache_mode)):
+            save_feature_cache(
+                cache_root=feature_cache_root,
+                cache_key=cache_key,
+                signature_hash=signature_hash,
+                payload=features,
+                torch_module=torch,
+                producer="scripts/phase_c_eval_pik.py:eval_features",
+                lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
+                extra_metadata={"num_rows": int(len(eval_texts))},
+            )
+            feature_cache_stats["writes"] += 1
+            feature_cache_stats["entries"]["eval_features"]["write"] = True
 
     value_head.to(features.device)
     value_head.eval()
@@ -265,6 +370,7 @@ def main(argv: list[str] | None = None) -> int:
         "value_run_dir": str(args.value_run_dir),
         "eval_dir": str(args.eval_dir),
         "checkpoint_path": str(checkpoint_path),
+        "feature_cache": feature_cache_stats,
         "calibration": calibration_raw,
         "calibration_posthoc": calibration_posthoc,
         "posthoc_calibration": posthoc_payload,
@@ -288,6 +394,8 @@ def main(argv: list[str] | None = None) -> int:
                 "known_auc": f"{known_auc:.6f}",
                 "posthoc_known_auc": (f"{known_auc_posthoc:.6f}" if known_auc_posthoc is not None else "n/a"),
                 "posthoc_calibration": args.posthoc_calibration,
+                "feature_cache_mode": args.feature_cache_mode,
+                "feature_cache_root": str(args.feature_cache_root),
             },
         ),
         encoding="utf-8",
@@ -306,6 +414,8 @@ def main(argv: list[str] | None = None) -> int:
                     "checkpoint_name": args.checkpoint_name,
                     "checkpoint_path": str(checkpoint_path),
                 },
+                "feature_cache_mode": str(args.feature_cache_mode),
+                "feature_cache_root": str(args.feature_cache_root),
                 "output_files": {
                     "metrics": str(metrics_path),
                     "question_scores": str(question_scores_path),
@@ -325,6 +435,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"value_run_dir     : {args.value_run_dir}")
     print(f"eval_dir          : {args.eval_dir}")
     print(f"checkpoint_path   : {checkpoint_path}")
+    print(f"feature_cache_mode: {args.feature_cache_mode}")
+    print(f"feature_cache_root: {args.feature_cache_root}")
+    print(
+        "feature_cache_use : "
+        f"hits={int(feature_cache_stats['hits'])} "
+        f"misses={int(feature_cache_stats['misses'])} "
+        f"writes={int(feature_cache_stats['writes'])}"
+    )
     print(f"brier_score       : {calibration_raw['brier_score']:.6f}")
     print(f"pearson           : {calibration_raw['pearson']:.6f}")
     if calibration_posthoc is not None:
@@ -392,6 +510,45 @@ def _resolve_posthoc_payload(
             raise TypeError(f"Saved post-hoc payload must be a JSON object: {path}")
         return payload
     raise ValueError(f"Unsupported --posthoc-calibration: {args.posthoc_calibration!r}")
+
+
+def _build_eval_feature_cache_signature_payload(
+    *,
+    texts: list[str],
+    examples: list[Any],
+    max_length: int,
+    backbone_signature: dict[str, Any],
+) -> dict[str, Any]:
+    """Build conservative signature payload for standalone P(IK) eval features."""
+    return {
+        "cache_kind": "phase_c_pik_eval_features",
+        "backbone_signature": backbone_signature,
+        "max_length": int(max_length),
+        "num_rows": int(len(texts)),
+        "sample_id_hash": hash_text_list([str(example.sample_id) for example in examples]),
+        "question_hash": hash_text_list([str(example.question) for example in examples]),
+        "text_hash": hash_text_list(texts),
+        "target_success_hash": hash_float_list([float(example.target_success_rate) for example in examples]),
+    }
+
+
+def _validate_cached_feature_tensor_payload(
+    *,
+    payload: Any,
+    expected_rows: int,
+    torch_module: Any,
+) -> None:
+    """Validate cached standalone-eval feature tensor before reusing."""
+    if not torch_module.is_tensor(payload):
+        raise TypeError("Cached eval feature payload must be tensor")
+    if payload.ndim != 2:
+        raise ValueError(
+            f"Cached eval feature tensor must have shape [batch, hidden], got {tuple(payload.shape)!r}"
+        )
+    if int(payload.shape[0]) != int(expected_rows):
+        raise ValueError(
+            f"Cached eval feature row mismatch: expected {expected_rows}, got {int(payload.shape[0])}"
+        )
 
 
 def _encode_text_list(

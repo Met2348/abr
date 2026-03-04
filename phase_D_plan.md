@@ -365,6 +365,28 @@ Risk E: extractor-template mismatch inflates parse-error metrics.
 4. Run the first D4 four-way ablation on StrategyQA smoke, then full.
 5. Publish `phase_D_report.md` as the new live report file.
 
+### 10.1 Implementation Status Snapshot (2026-03-04)
+
+Already implemented and validated by unit tests:
+1. C1 pair-consensus gate (teacher clean-vs-corrupt delta checks):
+   - new controls in `scripts/phase_b_prepare_value_data.py`:
+     - `--teacher-corruption-scores-jsonl`
+     - `--pair-consensus-*`
+2. C2 top-k contrastive candidates per clean prefix:
+   - data loader supports ranked corruption candidates,
+   - training cache encodes candidate banks instead of single corruption only.
+3. C2 stage scheduler:
+   - `--train-mode {joint,ranking_only,calibration_only,two_stage}`
+   - `--two-stage-ranking-ratio`
+4. Bundled Phase D suite upgraded:
+   - `scripts/run_phase_d_teacher_suite.sh`
+   - new groups:
+     - `D4_STRATEGYQA_SMOKE_3WAY_HQ`
+     - `D4_STRATEGYQA_FULL_3WAY_HQ`
+
+Remaining highest-priority execution item:
+1. run full HQ ablation matrix and decide D5 promotion against Section 11 gates.
+
 ## 11. Quantitative Promotion Gates (ABR-Oriented)
 
 Phase D must pass all gates before restarting BCR-lite / ABR-lite expansion.
@@ -700,3 +722,545 @@ Report for each:
 2. If CQR improves both pair diagnostics and C2 ranking/calibration:
    - keep repaired corruption policy as Phase D default,
    - continue with ABR-oriented rerank/router tests.
+
+### 17.5 D3 Plateau Diagnosis (2026-03-04 Smoke Snapshot)
+
+This subsection records the current best-effort diagnosis for why Phase D
+(`teacher` / `fused`) shows only limited ranking gains.
+
+Observed snapshot (from `phase_d_bundle_smoke`):
+1. ranking moved slightly (`pair_acc` from ~0.547 to ~0.566) but `corr_auc`
+   stayed around `0.52` and did not approach the promotion gate `0.60`,
+2. teacher coverage is high (`teacher_available_ratio=1.0`), so the bottleneck is
+   not missing teacher rows,
+3. disagreement is non-trivial (~0.34 on eval), indicating MC and teacher signals
+   are not fully aligned.
+
+Likely bottlenecks:
+1. **Target saturation under teacher/fused labels**:
+   - `q_teacher`/`q_fused` are concentrated near high values on StrategyQA,
+   - this weakens calibration learnability and can make Brier-baseline comparison
+     structurally unfavorable.
+2. **Fusion dominance**:
+   - confidence fusion currently keeps `q_fused` close to `q_teacher` in practice,
+   - effective diversity between `teacher` and `fused` supervision is limited.
+3. **Ranking branch remains pair-quality limited**:
+   - D2 mainly augments clean-prefix targets; contrastive ranking still depends on
+     corruption pair quality and filtering gates,
+   - if pair margins are weak/noisy, PRM injection at clean-target level cannot
+     fully fix ranking.
+4. **Frozen-backbone capacity constraint**:
+   - C2 only trains a small value head; representational updates are limited,
+   - noisy supervision or weak pair signal is harder to absorb in this regime.
+
+Action items (must be treated as Phase D-critical):
+1. **Label-shape diagnostics (mandatory)**:
+   - report distribution and entropy of `q_mc`, `q_teacher`, `q_fused` per split,
+   - include spread metrics (std, IQR, quantiles) and not only means.
+2. **Fusion sensitivity sweep (mandatory)**:
+   - run fixed-lambda and confidence-fusion variants under equal budget,
+   - explicitly compare how much `q_fused` departs from `q_teacher`.
+3. **Teacher-for-ranking extension (priority)**:
+   - add optional corruption-side teacher scoring path and evaluate teacher-derived
+     pair margins, not only clean-prefix scalar targets.
+4. **Pair-signal strengthening (priority)**:
+   - tighten `delta_q`/`z_delta` gates and monitor retained-pair ratio,
+   - prioritize high-margin pairs before increasing architecture complexity.
+5. **Capacity fallback protocol**:
+   - if gates still fail after improved pair quality, run controlled unfreeze/adapter
+     ablation to test whether the bottleneck is model capacity rather than labels.
+
+Interpretation rule:
+1. Do not claim “PRM ineffective” from one smoke table.
+2. The current evidence supports a narrower conclusion:
+   - **PRM-as-clean-target augmentation alone is insufficient for promotion-level
+     ranking gains in the current C2 setup.**
+
+### 17.6 External Evidence for Similar Plateaus and What Worked
+
+This subsection records external evidence that this type of D2/D3 plateau is
+common, plus interventions that repeatedly helped.
+
+Observed in prior work:
+1. **Process signal is often weak/noisy without strong supervision density**:
+   - *Let’s Verify Step by Step* required large-scale step supervision to train a
+     strong PRM, rather than relying on sparse outcome-derived signals.
+2. **Process feedback can outperform outcome feedback, but only with careful setup**:
+   - *Solving Math Word Problems With Process- and Outcome-Based Feedback* reports
+     strong gains from process supervision in math settings, reinforcing that label
+     quality/pipeline design is the deciding factor.
+3. **Benchmark evidence that process-level checking is hard**:
+   - ProcessBench reports many strong LLM/RM variants still struggle on explicit
+     process-level verification tasks.
+4. **PRM can be gamed if used naively**:
+   - *The Lessons of Developing Process Reward Models in Mathematical Reasoning*
+     highlights reward-hacking patterns (e.g., verbosity/BoN effects) and argues
+     for stricter anti-gaming protocols.
+5. **Theory reminder**:
+   - *Do We Need to Verify Step by Step?* indicates process supervision is not a
+     free lunch; when assumptions hold, outcome supervision can be similarly
+     learnable, so implementation/data quality dominate practical outcomes.
+
+What prior work typically does to recover signal:
+1. **Improve label quality first**:
+   - increase effective supervision density,
+   - keep high-margin/hard pairs, down-weight ambiguous pairs,
+   - control label saturation and distribution collapse.
+2. **Use ranking-centric objectives for decision boundaries**:
+   - prefer pair/listwise formulations for pairwise selection behavior,
+   - avoid relying only on pointwise calibration loss when ranking is the target.
+3. **Use PRM as a teacher/search signal, not only a scalar replacement target**:
+   - use step-wise scores in rerank/selection loops,
+   - evaluate with process-specific benchmarks, not just aggregate calibration.
+4. **Add anti-gaming checks**:
+   - length sensitivity, format sensitivity, and BoN inflation tests are required
+     before concluding a true faithfulness gain.
+
+Direct implications for our D2/D3 stack:
+1. Current pattern (small pair gain, AUC plateau) is consistent with known weak
+   signal regimes; this is not an isolated failure mode.
+2. The most likely high-impact next step is not “more fusion variants” alone, but:
+   - teacher-informed **pair construction**,
+   - stronger pair filtering/margin controls,
+   - explicit anti-gaming diagnostics,
+   - and only then controlled capacity increase if needed.
+3. Promotion interpretation must remain strict:
+   - we only claim D-stage success after both ranking and calibration pass gates
+     under robustness checks.
+
+Reference links (primary sources and official code):
+1. Let’s Verify Step by Step (paper): https://arxiv.org/abs/2305.20050
+2. PRM800K (official repo): https://github.com/openai/prm800k
+3. Process- vs Outcome-Based Feedback (paper): https://arxiv.org/abs/2211.14275
+4. ProcessBench (paper): https://arxiv.org/abs/2412.06559
+5. ProcessBench (official repo): https://github.com/QwenLM/ProcessBench
+6. PRMBench (paper): https://arxiv.org/abs/2504.16828
+7. PRMBench (official repo): https://github.com/ssmisya/PRMBench
+8. The Lessons of Developing PRMs (paper): https://arxiv.org/abs/2501.07301
+9. Do We Need to Verify Step by Step? (paper): https://arxiv.org/abs/2502.10581
+10. ThinkPRM (official repo): https://github.com/mukhal/thinkprm
+11. ImplicitPRM (official repo): https://github.com/PRIME-RL/ImplicitPRM
+
+### 17.7 Pair Data Bootstrap Decision and Available Resources
+
+This subsection captures the project-direction decision from recent discussion:
+we should not rely on a 7B model to bootstrap pair supervision from scratch.
+
+Decision:
+1. **Do not use 7B self-bootstrapping as the primary pair-data source**.
+2. **Use external pair/step-supervision resources + teacher filtering as the
+   primary path**, and keep 7B-generated pairs only as a late-stage supplement.
+
+Why:
+1. Current D2/D3 evidence already shows weak-signal behavior (small pair gain,
+   AUC plateau).
+2. Prior PRM literature repeatedly reports high noise when process labels are
+   sparse or weakly grounded.
+3. In this setting, pure self-generated pairs are likely to amplify bias and
+   annotation noise rather than fix ranking quality.
+
+Available resources (high priority first):
+1. **R-PRM dataset** (direct chosen/rejected preference pairs):
+   - https://huggingface.co/datasets/kevinpro/R-PRM
+   - https://github.com/NJUNLP/R-PRM
+2. **PRMBench_Preview** (original vs modified process trajectories):
+   - https://huggingface.co/datasets/hitsmy/PRMBench_Preview
+3. **PRM800K** (step-level ratings, convertible to pair data):
+   - https://github.com/openai/prm800k
+4. **Math-Shepherd** (step-level +/- supervision):
+   - https://huggingface.co/datasets/peiyi9979/Math-Shepherd
+5. **RLHFlow PRM data** (step-level process labels):
+   - https://huggingface.co/datasets/RLHFlow/Mistral-PRM-Data
+   - https://huggingface.co/datasets/RLHFlow/Deepseek-PRM-Data
+   - https://github.com/RLHFlow/RLHF-Reward-Modeling
+
+Evaluation-only resources (not primary training source):
+1. ProcessBench:
+   - https://arxiv.org/abs/2412.06559
+   - https://github.com/QwenLM/ProcessBench
+2. PRMBench:
+   - https://arxiv.org/abs/2504.16828
+   - https://github.com/ssmisya/PRMBench
+
+Execution plan (Phase D alignment):
+1. Build a **pair-source mix**: external curated pairs + converted step-level pairs.
+2. Normalize into current C1/C2 schema with explicit `source_tag` and confidence.
+3. Apply teacher-side filtering:
+   - keep high-margin pairs first,
+   - down-weight ambiguous pairs,
+   - reject style/length-only artifacts.
+4. Train C2 ranking with source-balanced sampling.
+5. Keep 7B-generated pairs as optional augmentation only after baseline quality
+   gates are met.
+
+Quality gates before promotion:
+1. Pair-level:
+   - retained high-quality pair ratio above threshold,
+   - margin distribution not collapsed.
+2. Model-level:
+   - `corr_pair_acc` and `corr_auc` both improve under equal budget,
+   - robustness checks (length/style/BoN anti-gaming) pass.
+3. Claim-level:
+   - no D-stage promotion claim if gains depend on one narrow source only.
+
+### 17.8 Task-Specific Availability (GSM8K vs StrategyQA) and Installation Guide
+
+Key availability finding:
+1. **GSM8K**:
+   - has multiple community preference/pair datasets (chosen/rejected format),
+   - plus several step-level process datasets convertible to pair supervision.
+2. **StrategyQA**:
+   - official data provides question/answer/decomposition/evidence,
+   - no widely adopted official chosen/rejected pair corpus.
+3. Project implication:
+   - for GSM8K, external pair resources can be plugged in directly,
+   - for StrategyQA, pair supervision still relies on our corruption + teacher
+     scoring pipeline.
+
+Verified dataset links (as of 2026-03-04):
+1. GSM8K official:
+   - https://huggingface.co/datasets/openai/gsm8k
+   - https://github.com/openai/grade-school-math
+2. StrategyQA official:
+   - https://huggingface.co/datasets/voidful/StrategyQA
+3. Direct pair / preference resources:
+   - https://huggingface.co/datasets/kevinpro/R-PRM
+   - https://huggingface.co/datasets/hitsmy/PRMBench_Preview
+   - https://huggingface.co/datasets/Rudra-ai/ai-responses-gsm8k-405b-dpo
+   - https://huggingface.co/datasets/Rudra-ai/ai-responses-gsm8k-70b-update-dpo
+   - https://huggingface.co/datasets/Genesis-AI-Labs/GAIL-gsm8k-preference-small
+4. Step-level resources (convertible to pair):
+   - https://huggingface.co/datasets/peiyi9979/Math-Shepherd
+   - https://huggingface.co/datasets/RLHFlow/Mistral-PRM-Data
+   - https://huggingface.co/datasets/RLHFlow/Deepseek-PRM-Data
+5. Evaluation/diagnostic:
+   - https://huggingface.co/datasets/Qwen/ProcessBench
+   - https://github.com/ssmisya/PRMBench
+
+Install/download instructions (copy-paste friendly):
+
+1. Environment setup:
+```bash
+conda activate bcr
+pip install -U datasets huggingface_hub pyarrow
+huggingface-cli --version
+```
+
+2. Optional auth (for rate limits/private mirrors):
+```bash
+huggingface-cli login
+```
+
+3. Create local storage root:
+```bash
+mkdir -p assets/external_datasets
+```
+
+4. Fast raw download (recommended first pass):
+```bash
+huggingface-cli download openai/gsm8k --repo-type dataset --local-dir assets/external_datasets/openai_gsm8k --local-dir-use-symlinks False
+huggingface-cli download voidful/StrategyQA --repo-type dataset --local-dir assets/external_datasets/voidful_strategyqa --local-dir-use-symlinks False
+huggingface-cli download kevinpro/R-PRM --repo-type dataset --local-dir assets/external_datasets/kevinpro_r_prm --local-dir-use-symlinks False
+huggingface-cli download hitsmy/PRMBench_Preview --repo-type dataset --local-dir assets/external_datasets/hitsmy_prmbench_preview --local-dir-use-symlinks False
+huggingface-cli download peiyi9979/Math-Shepherd --repo-type dataset --local-dir assets/external_datasets/peiyi_math_shepherd --local-dir-use-symlinks False
+huggingface-cli download RLHFlow/Mistral-PRM-Data --repo-type dataset --local-dir assets/external_datasets/rlhflow_mistral_prm --local-dir-use-symlinks False
+huggingface-cli download RLHFlow/Deepseek-PRM-Data --repo-type dataset --local-dir assets/external_datasets/rlhflow_deepseek_prm --local-dir-use-symlinks False
+huggingface-cli download Qwen/ProcessBench --repo-type dataset --local-dir assets/external_datasets/qwen_processbench --local-dir-use-symlinks False
+```
+
+5. Optional community GSM8K pair datasets:
+```bash
+huggingface-cli download Rudra-ai/ai-responses-gsm8k-405b-dpo --repo-type dataset --local-dir assets/external_datasets/rudra_gsm8k_405b_dpo --local-dir-use-symlinks False
+huggingface-cli download Rudra-ai/ai-responses-gsm8k-70b-update-dpo --repo-type dataset --local-dir assets/external_datasets/rudra_gsm8k_70b_dpo --local-dir-use-symlinks False
+huggingface-cli download Genesis-AI-Labs/GAIL-gsm8k-preference-small --repo-type dataset --local-dir assets/external_datasets/gail_gsm8k_preference_small --local-dir-use-symlinks False
+```
+
+6. Validate schemas quickly before integration:
+```bash
+python - <<'PY'
+from datasets import (
+    get_dataset_config_names,
+    get_dataset_split_names,
+    load_dataset,
+)
+
+repos = [
+    "openai/gsm8k",
+    "voidful/StrategyQA",
+    "kevinpro/R-PRM",
+    "hitsmy/PRMBench_Preview",
+    "peiyi9979/Math-Shepherd",
+    "RLHFlow/Mistral-PRM-Data",
+    "RLHFlow/Deepseek-PRM-Data",
+    "Qwen/ProcessBench",
+]
+
+for repo in repos:
+    cfgs = get_dataset_config_names(repo)
+    cfg = cfgs[0] if cfgs else None
+    split_kwargs = {"name": cfg} if cfg else {}
+    splits = get_dataset_split_names(repo, **split_kwargs)
+    split = "train" if "train" in splits else splits[0]
+    load_kwargs = {"split": split}
+    if cfg:
+        load_kwargs["name"] = cfg
+    ds = load_dataset(repo, **load_kwargs)
+    row = ds[0]
+    print("\\n==", repo)
+    print("config:", cfg)
+    print("split:", split)
+    print("rows:", len(ds))
+    print("keys:", list(row.keys())[:12])
+PY
+```
+
+Integration caution:
+1. Treat community pair datasets as weakly trusted until schema + quality checks.
+2. Keep `source_tag` and provenance hashes in manifests.
+3. Do not mix StrategyQA with math-only pair data without explicit domain tagging.
+
+## 18. Phase D4: External Pair Bootstrap and Integration
+
+Objective:
+1. Inject reliable external pair signal into C2 ranking training.
+2. Keep StrategyQA in-domain supervision path (corruption + teacher) as the anchor.
+3. Raise ranking metrics (`corr_pair_acc`, `corr_auc`) without sacrificing calibration robustness.
+
+### 18.1 Scope and non-goals
+
+In scope:
+1. external pair ingestion and normalization,
+2. step-label -> pair conversion,
+3. pair quality filtering and source-balanced training integration,
+4. controlled ablation matrix and promotion gates.
+
+Out of scope (for D4):
+1. full RL policy optimization,
+2. replacing C1/C2 contracts end-to-end,
+3. claiming cross-domain generalization without dedicated tests.
+
+### 18.2 Data source roles
+
+Role A (direct pair warm start):
+1. `R-PRM (dpo)`:
+   - strongest immediate chosen/rejected signal,
+   - use first for ranking warm start.
+2. `PRMBench_Preview`:
+   - smaller but high-quality modified-process errors,
+   - use as hard negative supplement.
+
+Role B (converted pair expansion):
+1. `Math-Shepherd`:
+   - convert step `+/-` labels into pair candidates.
+2. `RLHFlow Mistral/Deepseek PRM data`:
+   - convert conversation-level `+/-` supervision into pair candidates.
+
+Role C (in-domain anchor):
+1. StrategyQA C1 artifacts:
+   - keep corruption + teacher path as the primary in-domain signal.
+
+### 18.3 New artifacts and contracts
+
+Add one normalized external-pair artifact family:
+1. output root:
+   - `assets/artifacts/phase_d_external_pairs/<run_name>__<fingerprint>/`
+2. required files:
+   - `train_pairs.jsonl`
+   - `validation_pairs.jsonl`
+   - `summary.json`
+   - `manifest.json`
+3. canonical row schema:
+   - `pair_id`
+   - `source_tag` (e.g., `r_prm`, `prmbench_preview`, `math_shepherd`, `rlhflow_mistral`)
+   - `domain_tag` (e.g., `gsm8k_math`, `strategyqa_like`, `general_math`)
+   - `prompt_text`
+   - `chosen_text`
+   - `rejected_text`
+   - `pair_confidence` in `[0, 1]`
+   - `quality_flags` (length_ratio, overlap_ratio, parse_ok, etc.)
+   - `metadata` (upstream ids/split/source file hashes)
+
+### 18.4 Implementation tasks (code-level)
+
+Task D4-1: external-pair preparation script
+1. add `scripts/phase_d_prepare_external_pairs.py`:
+   - load all configured sources,
+   - map each source to canonical row schema,
+   - deduplicate by normalized hash,
+   - split train/validation deterministically,
+   - write artifact + manifest.
+
+Task D4-2: source adapters
+1. add adapter module: `src/ours/phase_d/external_pairs_adapters.py`:
+   - `load_r_prm_pairs(...)`
+   - `load_prmbench_preview_pairs(...)`
+   - `load_math_shepherd_step_pairs(...)`
+   - `load_rlhflow_step_pairs(...)`
+2. source-specific notes:
+   - `R-PRM`: direct `instruction/chosen/rejected`.
+   - `PRMBench_Preview`: chosen=`original_process`, rejected=`modified_process`,
+     confidence boosted by `error_steps` count and explicit classification tags.
+   - `Math-Shepherd` and `RLHFlow`: build intra-question step pairs from `+/-`
+     labels; keep only high-margin candidates.
+
+Task D4-3: pair quality filters
+1. add module: `src/ours/phase_d/pair_filters.py`:
+   - minimum/maximum length ratio,
+   - lexical overlap sanity checks,
+   - malformed/empty step rejection,
+   - optional teacher rescoring gate.
+2. write per-source rejection stats to summary.
+
+Task D4-4: C2 training integration
+1. extend `scripts/phase_b_train_value.py` with optional args:
+   - `--external-pair-jsonl`
+   - `--external-pair-weight`
+   - `--external-pair-max-train-samples`
+   - `--external-pair-source-balance` (`none|uniform|custom`)
+   - `--external-pair-domain-filter`
+2. training behavior:
+   - keep existing C1 calibration + contrastive path,
+   - add external pair ranking loss branch using the same value head,
+   - combine loss with explicit weights.
+
+Task D4-5: data loaders
+1. add `src/ours/phase_d/external_pairs_data.py`:
+   - canonical row validator,
+   - source-balanced sampler,
+   - optional domain-aware sampling caps.
+
+### 18.5 Suggested execution order
+
+Phase D4-A (minimum viable):
+1. prepare pairs from `R-PRM` + `PRMBench_Preview`,
+2. integrate into C2 as ranking warm start only,
+3. evaluate vs current D3 baseline.
+
+Phase D4-B (expansion):
+1. add converted pairs from `Math-Shepherd` + `RLHFlow`,
+2. apply stricter quality gates + lower initial weight,
+3. rerun ablations.
+
+Phase D4-C (in-domain stabilization):
+1. combine external pairs with StrategyQA in-domain pair-quality branch,
+2. tune source-balanced sampling,
+3. run robustness/anti-gaming checks before promotion claim.
+
+### 18.6 Experiment matrix (required)
+
+E0 (baseline):
+1. current D3 (`q_fused`, no external pair branch).
+
+E1 (direct pair warm start):
+1. add `R-PRM` only.
+
+E2 (high-quality supplement):
+1. E1 + `PRMBench_Preview`.
+
+E3 (step-converted expansion):
+1. E2 + `Math-Shepherd` + `RLHFlow` converted pairs.
+
+E4 (domain-aware balancing):
+1. E3 + source/domain balanced sampling + stricter filters.
+
+For each experiment, report:
+1. retained pair counts by source,
+2. pair margin/quality distributions,
+3. `corr_pair_acc`, `corr_auc`, calibration metrics,
+4. anti-gaming checks (length/style/BoN sensitivity).
+
+### 18.7 Promotion gates for D4
+
+Primary gates:
+1. `corr_auc` improves materially vs E0 and remains stable across at least two seeds.
+2. `corr_pair_acc` improves with non-collapsed retained-pair ratio.
+3. no severe degradation in calibration metrics.
+
+Reliability gates:
+1. gains persist under source-ablation (remove any single external source).
+2. no single-source dominance > 70% in effective training pairs after filtering.
+3. robustness checks pass (no obvious length/style reward hacking).
+
+### 18.8 Risks and mitigations
+
+Risk 1: domain shift from math-heavy external pairs.
+1. Mitigation:
+   - enforce `domain_tag`,
+   - cap out-of-domain sampling ratio,
+   - prioritize StrategyQA in-domain branch during late epochs.
+
+Risk 2: noisy converted step pairs.
+1. Mitigation:
+   - apply strict pair-quality gates,
+   - start with low external weight,
+   - inspect rejection summaries each run.
+
+Risk 3: shortcut learning from formatting artifacts.
+1. Mitigation:
+   - normalize templates,
+   - add length/style perturbation checks,
+   - block promotion if shortcut sensitivity is high.
+
+### 18.9 Minimal command template (D4-A)
+
+1. Prepare external pairs:
+```bash
+python -u scripts/phase_d_prepare_external_pairs.py \
+  --run-name d4a_direct_pairs \
+  --r-prm-root assets/external_datasets/kevinpro_r_prm \
+  --prmbench-preview-path assets/external_datasets/hitsmy_prmbench_preview/prmbench_preview.jsonl \
+  --output-root assets/artifacts/phase_d_external_pairs
+```
+
+2. Train C2 with external pair branch:
+```bash
+python -u scripts/phase_b_train_value.py \
+  --train-dir <phase_c_train_dir> \
+  --eval-dir <phase_c_eval_dir> \
+  --target-source q_fused \
+  --external-pair-jsonl assets/artifacts/phase_d_external_pairs/d4a_direct_pairs__<fp>/train_pairs.jsonl \
+  --external-pair-weight 0.5 \
+  --external-pair-source-balance uniform \
+  --run-name d4a_with_external_pairs
+```
+
+3. Evaluate and compare with E0:
+```bash
+python -u scripts/phase_b_eval_faithfulness.py \
+  --value-run-dir <d4a_run_dir> \
+  --eval-dir <phase_c_eval_dir> \
+  --checkpoint best \
+  --run-name d4a_eval
+```
+
+### 18.10 Implemented entrypoints (D4A/B/C)
+
+Implemented scripts:
+1. `scripts/phase_d_prepare_external_pairs.py`
+   - normalizes external sources into canonical pair schema.
+2. `scripts/run_phase_d_external_pair_suite.sh`
+   - one-command runner for D4A / D4B / D4C.
+3. `scripts/phase_b_train_value.py`
+   - supports external pair branch via:
+     - `--external-pair-jsonl`
+     - `--external-pair-weight`
+     - `--external-pair-source-balance`
+     - `--external-pair-min-confidence`
+     - related controls.
+
+Supported suite groups:
+1. `D4A_STRATEGYQA_SMOKE`
+2. `D4B_STRATEGYQA_SMOKE`
+3. `D4C_STRATEGYQA_SMOKE`
+4. `D4ABC_STRATEGYQA_SMOKE`
+5. `D4ABC_STRATEGYQA_FULL`
+
+Quick smoke run:
+```bash
+ACTIVE_PHASE_D4_GROUP=D4ABC_STRATEGYQA_SMOKE \
+RUN_PREFIX=phase_d4abc_smoke \
+PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<train_dir> \
+PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<eval_dir> \
+CUDA_VISIBLE_DEVICES=0 \
+bash scripts/run_phase_d_external_pair_suite.sh
+```

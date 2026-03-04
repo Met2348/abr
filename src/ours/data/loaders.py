@@ -95,8 +95,19 @@ def load_gsm8k(
             f"falling back to split={split!r}."
         )
 
+    # Support both canonical repo layout (`assets/datasets/gsm8k/...`) and
+    # external mirror layout (`assets/external_datasets/openai_gsm8k/...`).
+    # This keeps downstream scripts unchanged while allowing quick adoption of
+    # community snapshots dropped under `assets/external_datasets`.
+    gsm8k_root, gsm8k_variant = _resolve_existing_root(
+        candidates=[
+            (dataset_root / "gsm8k", "gsm8k"),
+            (dataset_root / "openai_gsm8k", "openai_gsm8k"),
+        ],
+        default=(dataset_root / "gsm8k", "gsm8k"),
+    )
     files = _glob_required(
-        dataset_root / "gsm8k" / config, f"{split}-*.parquet", dataset="gsm8k"
+        gsm8k_root / config, f"{split}-*.parquet", dataset=f"gsm8k/{gsm8k_variant}"
     )
     rows = _load_parquet_rows(files, cache_dir=cache_dir, limit=limit)
 
@@ -117,6 +128,7 @@ def load_gsm8k(
                     "source_split": split,
                     "requested_split": requested_split,
                     "config": config,
+                    "dataset_variant": gsm8k_variant,
                 },
             )
         )
@@ -140,21 +152,45 @@ def load_strategyqa(
     """
     del cache_dir  # not used; kept in signature for a uniform loader interface
 
-    filename_map = {
-        "train": "strategyQA_train.json",
-        "validation": "strategyQA_validation.json",
-        "test": "strategyQA_test.json",
-    }
-    if split not in filename_map:
+    if split not in {"train", "validation", "test"}:
         raise ValueError("StrategyQA split must be one of: train/validation/test")
 
-    path = dataset_root / "strategyqa" / filename_map[split]
+    # Layout A (canonical in this repo):
+    #   <root>/strategyqa/strategyQA_train.json
+    # Layout B (external community mirror):
+    #   <root>/voidful_strategyqa/strategyqa_train.json
+    strategyqa_root, strategyqa_variant = _resolve_existing_root(
+        candidates=[
+            (dataset_root / "strategyqa", "strategyqa"),
+            (dataset_root / "voidful_strategyqa", "voidful_strategyqa"),
+        ],
+        default=(dataset_root / "strategyqa", "strategyqa"),
+    )
+    filename_map_by_variant = {
+        "strategyqa": {
+            "train": "strategyQA_train.json",
+            "validation": "strategyQA_validation.json",
+            "test": "strategyQA_test.json",
+        },
+        "voidful_strategyqa": {
+            "train": "strategyqa_train.json",
+            # voidful snapshot does not provide an official validation split.
+            "validation": "strategyqa_test.json",
+            "test": "strategyqa_test.json",
+        },
+    }
+    filename_map = filename_map_by_variant[strategyqa_variant]
+    requested_split = split
+    if (
+        strategyqa_variant == "voidful_strategyqa"
+        and split == "validation"
+    ):
+        _note(
+            "voidful_strategyqa does not provide a validation file; "
+            "falling back to strategyqa_test.json for split='validation'."
+        )
+    path = strategyqa_root / filename_map[split]
     if not path.exists():
-        if split != "train":
-            raise FileNotFoundError(
-                f"Requested split={split!r} but file is missing: {path}. "
-                "Your local snapshot currently contains only train split."
-            )
         raise FileNotFoundError(f"Missing StrategyQA file: {path}")
 
     rows = json.loads(path.read_text(encoding="utf-8"))
@@ -185,6 +221,9 @@ def load_strategyqa(
                     "term": row.get("term"),
                     "description": row.get("description"),
                     "facts": row.get("facts"),
+                    "source_split": split,
+                    "requested_split": requested_split,
+                    "dataset_variant": strategyqa_variant,
                 },
             )
         )
@@ -471,6 +510,27 @@ def _glob_required(root: Path, pattern: str, dataset: str) -> list[Path]:
             f"No files found for dataset={dataset!r}, path={root}, pattern={pattern!r}."
         )
     return files
+
+
+def _resolve_existing_root(
+    *,
+    candidates: list[tuple[Path, str]],
+    default: tuple[Path, str],
+) -> tuple[Path, str]:
+    """Resolve the first existing dataset root among candidate layouts.
+
+    Parameters
+    ----------
+    candidates:
+        Ordered `(path, variant_name)` pairs. First existing path wins.
+    default:
+        Fallback `(path, variant_name)` when none of candidates exist. This
+        keeps downstream error messages deterministic in `_glob_required`.
+    """
+    for path, variant in candidates:
+        if path.exists():
+            return path, variant
+    return default
 
 
 def _normalize_split(split: str, available: set[str], fallback: str) -> str:

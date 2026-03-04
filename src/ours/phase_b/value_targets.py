@@ -781,12 +781,20 @@ def summarize_pair_quality_records(pairs: list[PairQualityRecord]) -> dict[str, 
             "mean_z_delta": 0.0,
             "mean_pair_weight": 0.0,
             "positive_delta_ratio": 0.0,
+            "pair_pass_gate_ratio": 0.0,
+            "pair_pass_gate_mc_ratio": 0.0,
+            "pair_consensus_pass_ratio": 0.0,
+            "teacher_pair_available_ratio": 0.0,
             "type_counts": {},
         }
     total_delta = 0.0
     total_z = 0.0
     total_w = 0.0
     pos = 0
+    pair_pass = 0
+    pair_pass_mc = 0
+    pair_consensus_pass = 0
+    teacher_pair_available = 0
     type_counts: dict[str, int] = {}
     for pair in pairs:
         pair.validate()
@@ -795,6 +803,15 @@ def summarize_pair_quality_records(pairs: list[PairQualityRecord]) -> dict[str, 
         total_w += float(pair.pair_weight)
         if float(pair.delta_q) > 0.0:
             pos += 1
+        meta = pair.metadata or {}
+        if bool(meta.get("pair_pass_gate", False)):
+            pair_pass += 1
+        if bool(meta.get("pair_pass_gate_mc", False)):
+            pair_pass_mc += 1
+        if bool(meta.get("pair_consensus_pass", False)):
+            pair_consensus_pass += 1
+        if bool(meta.get("teacher_pair_available", False)):
+            teacher_pair_available += 1
         type_counts[pair.corruption_type] = type_counts.get(pair.corruption_type, 0) + 1
     n = float(len(pairs))
     return {
@@ -803,6 +820,10 @@ def summarize_pair_quality_records(pairs: list[PairQualityRecord]) -> dict[str, 
         "mean_z_delta": total_z / n,
         "mean_pair_weight": total_w / n,
         "positive_delta_ratio": float(pos) / n,
+        "pair_pass_gate_ratio": float(pair_pass) / n,
+        "pair_pass_gate_mc_ratio": float(pair_pass_mc) / n,
+        "pair_consensus_pass_ratio": float(pair_consensus_pass) / n,
+        "teacher_pair_available_ratio": float(teacher_pair_available) / n,
         "type_counts": type_counts,
     }
 
