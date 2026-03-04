@@ -16,6 +16,9 @@ Current milestone status (2026-03-05):
   - D2 teacher+MC target fusion is implemented in C1,
   - D3 target-source ablation (`mc`, `teacher`, `fused`) is implemented in C2.
 - Latest empirical signal (important):
+  - Mentor-review methodology correction:
+    - promote `MC target + PRM pair gate` as new mainline,
+    - treat `q_teacher/q_fused` direct-target runs as ablation.
   - D1 teacher on full StrategyQA C1 train artifact:
     - `num_prefix_scores=7192`, `num_corruption_scores=6111`, `num_errors=0`,
     - `mean_prefix_score=0.9138`, `mean_corrupt_score=0.8881`,
@@ -23,14 +26,80 @@ Current milestone status (2026-03-05):
   - C2 CQR full control run is currently the strongest internal baseline:
     - `brier=0.1968`, `posthoc_brier=0.1112`,
     - `corr_pair_acc=0.5379`, `corr_auc=0.5141`.
-  - D4 smoke 3-way HQ currently does **not** beat MC target:
-    - `mc` better than `teacher/fused` on calibration metrics in latest smoke.
+  - D3 teacher path is **mixed, not dead**:
+    - in `phase_d_bundle_smoke` and `overnight_d4_conf_fulltrain`, `teacher`
+      improves pair metrics over MC with moderate deltas,
+    - but gains are still below promotion-level targets.
+  - D4 smoke 3-way HQ currently regresses and should not be used as evidence:
+    - quality summary confirms HQ pair-consensus path had ineffective teacher
+      corruption alignment in that run.
+  - D4ABC external-pair chain is currently exploratory-only:
+    - A/B/C stages show weak AUC and poor calibration under current config.
   - Several D4 tuning runs failed at D2 eval due teacher-coverage gate
     (`coverage < teacher_min_coverage`), so command-level coverage control is required.
+  - D6 ranking-first implementation is now ready (code-level complete, pending
+    first execution):
+    - ranking-based checkpoint selection in C2,
+    - teacher-free MC control arm,
+    - direct D6 control-vs-pair-gate smoke groups.
 
 Primary roadmap:
 - `TODO_ours.md`
 - `phase_D_plan.md`
+
+## 2026-03-05 Critical Diagnosis (Project Direction)
+
+This diagnosis is direction-critical and is now reflected in `phase_D_plan.md`.
+
+What is confirmed:
+1. D3 `q_teacher` is not a universal failure; it can improve pair metrics over
+   MC in some controlled runs.
+2. Current D4ABC settings do not deliver usable gains.
+3. Low absolute Brier in teacher runs can be misleading under skewed targets;
+   baseline-relative calibration checks must be mandatory.
+
+What changes now:
+1. Keep D3 path active.
+2. Prioritize D2 teacher-corruption alignment integrity before new ablations.
+3. Treat current HQ and D4ABC outcomes as exploratory, not promotion evidence.
+4. Apply the methodology pivot recorded in `phase_D_plan.md` Section 1.2:
+   - stop using calibration gains as primary success signal,
+   - switch to ranking-first training and evaluation,
+   - enforce high-quality within-question pair construction.
+
+Root-cause diagnosis (newly formalized):
+1. This is an objective mismatch:
+   - calibration/regression targets can improve while pair discrimination stays weak.
+2. External PRM should be used mainly for pair gating/filtering and confidence
+   control, not as a direct replacement for ranking supervision.
+3. Promotion decisions must be ranking-led (`corr_pair_acc`, `corr_auc`) with
+   calibration as a secondary guardrail.
+
+Mentor guidance (actionable summary, 2026-03-05):
+1. Our current plateau is a community-known failure mode in PRM/value-head
+   training, not an isolated implementation mistake.
+2. Blocking point is process-supervision quality:
+   - weak outcome-only labels,
+   - noisy/low-margin pairs,
+   - score-fusion without sufficient pair redesign.
+3. Project implication:
+   - keep BCR/ABR direction,
+   - prioritize D6 ranking-first + strict pair quality path,
+   - use D4/D5 as ablation context rather than promotion evidence.
+4. New branch added in plan:
+   - `D6-T Triplet Validation Branch` (Math-Shepherd/PRM800K),
+   - objective is to prove ranking learnability with high-confidence
+     same-question triplets before further C1-heavy expansion.
+5. Execution update:
+   - `phase_D_plan.md` now includes a staged checklist `D6T-0 -> D6T-5`
+     (contract freeze, data quality gate, seed-3 stability gate, mixed-source
+     robustness gate, and migration decision gate).
+
+Evidence files:
+1. `assets/artifacts/phase_d_logs/phase_d_bundle_smoke/final_summary.md`
+2. `assets/artifacts/phase_d_logs/overnight_d4_conf_fulltrain/final_summary.md`
+3. `assets/artifacts/phase_cd_reports/smoke_local/summary.md`
+4. `assets/artifacts/phase_d_logs/phase_d4abc_smoke_opt/stage_results.jsonl`
 
 Context files:
 - `idea_polish.md`
@@ -57,6 +126,70 @@ reproducing the current project state.
 cd /home/zling/y/bcr/ref
 export PYTHONPATH=$PWD/src
 ```
+
+### Repro Tracking (New)
+
+Raw outputs are already persisted by default in core pipelines:
+1. Phase A (`scripts/phase_a_generate_and_eval.py`) writes:
+   - `predictions.jsonl` (raw model outputs),
+   - `scored_predictions.jsonl`,
+   - `metrics.json`,
+   - `manifest.json`,
+   - `console.log`.
+2. Phase C/D runs similarly persist metrics + manifest + summary artifacts.
+
+To auto-maintain command and result docs with compact signal-only summaries:
+
+```bash
+# Run any experiment command through the logger wrapper.
+bash scripts/run_with_exp_log.sh \
+  python -u scripts/phase_a_generate_and_eval.py \
+  --input-jsonl assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/validation.jsonl \
+  --run-name phase_a_log_demo \
+  --require-cuda \
+  --dtype bfloat16 \
+  --device-map auto \
+  --no-do-sample \
+  --max-new-tokens 16 \
+  --strategyqa-decode-mode binary_choice \
+  --batch-size 1 \
+  --max-samples 20 \
+  --no-compare-latest-same-name
+```
+
+Control switches (important):
+
+```bash
+# 1) Keep logging but skip markdown rewrite (JSONL only).
+EXP_LOG_UPDATE_DOCS=0 \
+bash scripts/run_with_exp_log.sh \
+  python -u scripts/phase_b_eval_faithfulness.py --help
+
+# 2) Temporary bypass logger and run command directly.
+EXP_LOG_ENABLE=0 \
+bash scripts/run_with_exp_log.sh \
+  python -u scripts/phase_c_train_pik.py --help
+
+# 3) Add run tags and a short note for filtering.
+EXP_LOG_TAGS="phase_d,smoke,ablation" \
+EXP_LOG_NOTE="D4A baseline smoke after cache check" \
+bash scripts/run_with_exp_log.sh \
+  python -u scripts/phase_b_prepare_value_data.py --help
+
+# 4) Rebuild docs from existing JSONL records only (no new run).
+python -u scripts/experiment_command_logger.py \
+  --rebuild-docs-only
+```
+
+Auto-maintained files:
+1. `docs/commands_to_run.md`: command-family catalog (normalized signatures).
+2. `docs/command_result.md`: per-run concise outcomes (key metrics only).
+3. `assets/artifacts/command_logs/run_records.jsonl`: full machine-readable history.
+
+Rule for repeated runs of the same command:
+1. Each run gets a unique `run_id`.
+2. A normalized `command_family_id` groups semantically same commands.
+3. `family_run_index` increments across retries, so conflicting outcomes remain visible.
 
 ### Bundle A: Phase A whole-dataset baselines
 
@@ -138,6 +271,135 @@ CUDA_VISIBLE_DEVICES=0 \
 bash scripts/run_phase_d_teacher_suite.sh
 ```
 
+### Bundle D6: Ranking-first method-correction (new mainline engineering)
+
+```bash
+# D6 control: ranking-first + MC target only (teacher-free C1 path)
+ACTIVE_PHASE_D_GROUP=D6_STRATEGYQA_SMOKE_RANKING_CTRL \
+RUN_PREFIX=phase_d6_smoke_rank_ctrl \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_d_teacher_suite.sh
+
+# D6 main: ranking-first + PRM pair gate (teacher only for pair consensus)
+ACTIVE_PHASE_D_GROUP=D6_STRATEGYQA_SMOKE_RANKING_PRM_GATE \
+RUN_PREFIX=phase_d6_smoke_rank_pairgate \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_d_teacher_suite.sh
+```
+
+### Bundle D6-T: Triplet validation branch (DT1..DT6, mentor-mandated)
+
+```bash
+# Optional prerequisite for DT3/DT4/DT5/DT6:
+# clone PRM800K data repo locally (path used by suite default).
+git clone https://github.com/openai/prm800k assets/external_datasets/openai_prm800k
+
+# DT1: Math-Shepherd smoke
+ACTIVE_PHASE_D6T_GROUP=DT1_MATH_SHEPHERD_SMOKE \
+RUN_PREFIX=d6t_dt1_smoke \
+PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<train_dir> \
+PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<eval_dir> \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+
+# DT2: Math-Shepherd seed-3 gate
+ACTIVE_PHASE_D6T_GROUP=DT2_MATH_SHEPHERD_SEED3 \
+RUN_PREFIX=d6t_dt2_seed3 \
+PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<train_dir> \
+PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<eval_dir> \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+
+# DT3: PRM800K smoke (requires local PRM800K path)
+ACTIVE_PHASE_D6T_GROUP=DT3_PRM800K_SMOKE \
+RUN_PREFIX=d6t_dt3_prm800k_smoke \
+PRM800K_PATH=assets/external_datasets/openai_prm800k \
+PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<train_dir> \
+PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<eval_dir> \
+CUDA_VISIBLE_DEVICES=3 \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+
+# DT4: mixed Math-Shepherd + PRM800K seed-3
+ACTIVE_PHASE_D6T_GROUP=DT4_MIXED_MS_PRM800K_SEED3 \
+RUN_PREFIX=d6t_dt4_mixed_seed3 \
+PRM800K_PATH=assets/external_datasets/openai_prm800k \
+PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<train_dir> \
+PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<eval_dir> \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+
+# DT5: ablation without strict pair filters
+ACTIVE_PHASE_D6T_GROUP=DT5_ABLATION_NO_FILTER \
+RUN_PREFIX=d6t_dt5_no_filter \
+PRM800K_PATH=assets/external_datasets/openai_prm800k \
+PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<train_dir> \
+PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<eval_dir> \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+
+# DT6: ablation with calibration auxiliary
+ACTIVE_PHASE_D6T_GROUP=DT6_ABLATION_WITH_CAL_AUX \
+RUN_PREFIX=d6t_dt6_cal_aux \
+PRM800K_PATH=assets/external_datasets/openai_prm800k \
+PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<train_dir> \
+PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<eval_dir> \
+CUDA_VISIBLE_DEVICES=3 \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+```
+
+Direct external held-out eval only (no retraining):
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_d_eval_external_pairs.py \
+  --value-run-dir assets/artifacts/phase_c_runs/<d6t_c2_run_dir> \
+  --external-pair-jsonl assets/artifacts/phase_d_external_pairs/<d6t_pair_run_dir>/validation_pairs.jsonl \
+  --run-name d6t_manual_ext_eval \
+  --checkpoint-name best \
+  --batch-size 64 \
+  --require-cuda
+```
+
+Triplet-suite safety note:
+1. Avoid shrinking eval by setting both
+   `--max-eval-samples` and `--max-corruption-variants-eval` inside
+   `C2_TRAIN_EXTRA_ARGS`; this can break clean/corruption ID alignment in C2 eval.
+
+Low-resource quick smoke (small batch, one seed):
+
+```bash
+ACTIVE_PHASE_D6T_GROUP=DT1_MATH_SHEPHERD_SMOKE \
+RUN_PREFIX=d6t_dt1_lowres_smoke \
+PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<train_dir> \
+PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<eval_dir> \
+C2_EPOCHS=1 \
+C2_TRAIN_BATCH_SIZE=8 \
+C2_EVAL_BATCH_SIZE=8 \
+MAX_PAIRS_PER_SOURCE=200 \
+MAX_PAIRS_TOTAL=300 \
+MIN_PAIR_CONFIDENCE=0.55 \
+FEATURE_CACHE_MODE=read_write \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+```
+
+Even lighter fallback (if still OOM / queue pressure):
+
+```bash
+ACTIVE_PHASE_D6T_GROUP=DT1_MATH_SHEPHERD_SMOKE \
+RUN_PREFIX=d6t_dt1_tiny_smoke \
+PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<train_dir> \
+PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<eval_dir> \
+C2_EPOCHS=1 \
+C2_TRAIN_BATCH_SIZE=4 \
+C2_EVAL_BATCH_SIZE=4 \
+MAX_PAIRS_PER_SOURCE=80 \
+MAX_PAIRS_TOTAL=120 \
+MIN_PAIR_CONFIDENCE=0.55 \
+FEATURE_CACHE_MODE=read_write \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+```
+
 If you hit teacher-coverage failure in D2 (`coverage < teacher_min_coverage`),
 first ensure teacher-score files match the current C1 artifact. For exploratory
 runs, you may lower the gate:
@@ -159,6 +421,55 @@ PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<your_train_c1_dir> \
 PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<your_eval_c1_dir> \
 CUDA_VISIBLE_DEVICES=0 \
 bash scripts/run_phase_d_external_pair_suite.sh
+```
+
+### Bundle E: One-click C-vs-D control + global diagnosis (new)
+
+This bundle is the recommended orchestration entrypoint when GPUs are free:
+- runs comparable C baseline,
+- runs D teacher ablations,
+- runs D4 external-pair chain when C1 dirs are available,
+- always emits a unified C/D diagnosis report.
+
+```bash
+# Light bundle (fast)
+ACTIVE_PHASE_CD_GROUP=CD_LIGHT \
+RUN_PREFIX=phase_cd_light \
+CUDA_PHASE_C=1 CUDA_PHASE_D=2 CUDA_PHASE_D4=3 \
+bash scripts/run_phase_cd_control_suite.sh
+
+# Full bundle (detailed)
+ACTIVE_PHASE_CD_GROUP=CD_FULL \
+RUN_PREFIX=phase_cd_full \
+CUDA_PHASE_C=1 CUDA_PHASE_D=2 CUDA_PHASE_D4=3 \
+bash scripts/run_phase_cd_control_suite.sh
+
+# Method-correction bundle (PRM as pair gate, not target)
+ACTIVE_PHASE_CD_GROUP=CD_METHOD_FIX_LIGHT \
+RUN_PREFIX=phase_cd_fix_light \
+CUDA_PHASE_C=1 CUDA_PHASE_D=2 CUDA_PHASE_D4=3 \
+bash scripts/run_phase_cd_control_suite.sh
+
+ACTIVE_PHASE_CD_GROUP=CD_METHOD_FIX_FULL \
+RUN_PREFIX=phase_cd_fix_full \
+CUDA_PHASE_C=1 CUDA_PHASE_D=2 CUDA_PHASE_D4=3 \
+bash scripts/run_phase_cd_control_suite.sh
+
+# D6 ranking-first one-click bundle
+ACTIVE_PHASE_CD_GROUP=CD_D6_RANKING_LIGHT \
+RUN_PREFIX=phase_cd_d6_rank_light \
+CUDA_PHASE_C=1 CUDA_PHASE_D=2 CUDA_PHASE_D4=3 \
+bash scripts/run_phase_cd_control_suite.sh
+```
+
+Standalone diagnosis-only command:
+
+```bash
+python -u scripts/phase_cd_compare_report.py \
+  --phase-c-logs-root assets/artifacts/phase_c_logs \
+  --phase-d-logs-root assets/artifacts/phase_d_logs \
+  --output-dir assets/artifacts/phase_cd_reports/manual_diag \
+  --dataset strategyqa
 ```
 
 Notes:
@@ -473,7 +784,7 @@ The following options are now implemented and can be enabled/disabled directly:
 
 2. Trick-2: post-hoc temperature calibration
 - `--posthoc-calibration {none,temperature,isotonic}`
-- `--checkpoint-selection-metric {raw_brier,posthoc_brier}`
+- `--checkpoint-selection-metric {raw_brier,posthoc_brier,corr_pair_acc,corr_auc,ranking_score}`
 - `--posthoc-temperature-lr`, `--posthoc-temperature-max-iters`
 - `--posthoc-temperature-min`, `--posthoc-temperature-max`
 - `--posthoc-isotonic-min-points`

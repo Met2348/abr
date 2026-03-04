@@ -27,7 +27,13 @@
 ### Phase D（当前主线）
 - 已接入外部 PRM（Qwen2.5-Math-PRM-7B）做 teacher scoring（D1）。
 - 已实现 teacher+MC 融合标签（D2）与目标源切换评估（D3）。
-- 当前重点：提高 pair 质量与监督可信度，验证是否能真正提升 C2 的可学习性。
+- 已上线 D6（ranking-first）工程版本：
+  - C2 支持按 `corr_pair_acc/corr_auc/ranking_score` 选 best checkpoint，
+  - 新增 D6 参数组（MC 控制 vs PRM pair gate）做直接对照。
+- 已新增 D6-T 分支（triplet validation）：
+  - `DT1..DT6` 一键套件已实现，
+  - 支持 Math-Shepherd / PRM800K triplet 构造、ranking-only 训练、外部 held-out pair 直接评测。
+- 当前重点：先在 D6-T 上验证“高置信 triplet + ranking 目标”是否可稳定过门槛，再回迁主线。
 
 ## 2. 近期关键实验结论
 
@@ -62,6 +68,16 @@ bash scripts/run_phase_c_pik_suite.sh
 bash scripts/run_phase_d_teacher_suite.sh
 ```
 
+### Phase D6-T（triplet validation suite）
+```bash
+bash scripts/run_phase_d_triplet_validation_suite.sh
+```
+
+### Phase C/D（one-click control + diagnosis）
+```bash
+bash scripts/run_phase_cd_control_suite.sh
+```
+
 ## 4. 文档导航
 
 - 总体路线与状态：`docs/readme.md`
@@ -69,6 +85,7 @@ bash scripts/run_phase_d_teacher_suite.sh
 - Phase B 结果总表：`docs/phase_B_report.md`
 - Phase C 方案与诊断：`docs/phase_C_plan.md`, `docs/phase_C_fix_value_head.md`
 - Phase D 正式计划：`docs/phase_D_plan.md`
+- C/D 统一对照诊断：`scripts/phase_cd_compare_report.py`
 - 调试手册：`docs/phase_a_debug_playbook.md`, `docs/phase_b_debug_playbook.md`, `docs/phase_c_debug_playbook.md`
 
 ## 5. 输出位置
@@ -76,6 +93,9 @@ bash scripts/run_phase_d_teacher_suite.sh
 - A/B/C/D 运行日志与摘要：`assets/artifacts/phase_*_logs/`
 - 运行产物：`assets/artifacts/phase_*_runs/`
 - C1/C2 相关数据：`assets/artifacts/phase_c_data/`, `assets/artifacts/phase_c_eval/`
+- 命令级复现实验日志：`assets/artifacts/command_logs/`
+  - 通过 `bash scripts/run_with_exp_log.sh <your_command...>` 自动记录
+  - 自动维护：`docs/commands_to_run.md` 与 `docs/command_result.md`
 - 默认状态下仓库不含 `assets\external_datasets`, `assets\model`中各个`safetensors`文件(Model Shard)，以及部分缓存结果`assets\artifact`中的文件。 需要手动补齐这部分文件，代码才能够运行
 ---
 

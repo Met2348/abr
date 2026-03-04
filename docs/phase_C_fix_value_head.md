@@ -7,6 +7,33 @@
 > 状态更新（2026-03-03）：项目已正式进入 **Phase D（external-PRM-supported）**。
 > 本文档保留为 Phase C 诊断与外援策略依据；当前执行以 `phase_D_plan.md` 为准。
 
+> 状态更新（2026-03-05，导师介入后的方法纠偏）：
+> 1. 保留本文件中的“弱监督噪声诊断”结论；
+> 2. 将“PRM 直接作为 `q_teacher/q_fused` 主监督”降级为消融路径；
+> 3. 新主线改为：`MC target + PRM pair-quality gate`（PRM主要做排序/筛选信号）。
+
+---
+
+## 0.5 关键纠偏结论（2026-03-05）
+
+导师质疑点是成立的（且与当前代码表现一致）：
+1. PRM 可提供过程可靠性信号，但不应直接等价为我们需要的 prefix utility 主监督。
+2. 当前 D1 拿到的是 step-level 序列分数，但 D2/D3 主要回归 `teacher_score_mean`，
+   会把步骤结构信息压扁成单标量，导致目标错位风险。
+3. 因此：
+   - `q_teacher/q_fused` 路线保留为 ablation，
+   - promotion 主线切到 `q_mean_smoothed` + PRM pair gate。
+
+执行规则（新）：
+1. C2 主目标固定 `--target-source q_mean_smoothed`。
+2. PRM 只在 C1/C2 进入 pair 质量控制：
+   - pair consensus,
+   - pair filtering,
+   - pair weighting。
+3. 评估优先看排序指标：
+   - `corr_pair_acc`, `corr_auc`，
+   - 再看校准指标是否至少不恶化。
+
 ---
 
 ## 1. 问题本质：这是一个“冷启动弱监督”问题

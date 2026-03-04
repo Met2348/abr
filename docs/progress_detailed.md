@@ -2,6 +2,162 @@
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
 
+## 2026-03-05 01:01:19 +0800 (+08)
+- Type: Phase D6-T Implementation / Triplet Validation Branch (DT1~DT6)
+- Summary: Completed the mentor-mandated D6-T branch implementation end-to-end, including PRM800K adapter support, one-click DT1~DT6 suite orchestration, and direct external held-out pair evaluation.
+- Details:
+  - External pair data preparation pipeline upgraded:
+    - `src/ours/phase_d/external_pairs_adapters.py`:
+      - added PRM800K adapter (`load_prm800k_pairs`) with multi-schema JSON/JSONL parsing,
+      - added robust step-label extraction helpers and payload coercion logic,
+      - kept canonical pair quality filtering path unchanged.
+    - `scripts/phase_d_prepare_external_pairs.py`:
+      - added `--prm800k-path`,
+      - integrated PRM800K source into artifact fingerprint/manifest/summary flow.
+  - New direct ranking eval path for triplet branch:
+    - added `scripts/phase_d_eval_external_pairs.py`:
+      - evaluates chosen vs rejected ranking directly on external validation pairs,
+      - reports `pair_accuracy`, `auc_chosen_vs_rejected`, margin metrics,
+      - supports feature-cache reuse and OOM-safe batched encoding/scoring.
+  - New one-click D6-T suite:
+    - added `scripts/run_phase_d_triplet_validation_suite.sh`:
+      - implemented all planned groups:
+        - `DT1_MATH_SHEPHERD_SMOKE`
+        - `DT2_MATH_SHEPHERD_SEED3`
+        - `DT3_PRM800K_SMOKE`
+        - `DT4_MIXED_MS_PRM800K_SEED3`
+        - `DT5_ABLATION_NO_FILTER`
+        - `DT6_ABLATION_WITH_CAL_AUX`
+      - each run executes:
+        - pair prepare -> C2 train -> external held-out eval -> aggregated summary,
+      - includes seed-level JSONL rows and gate summary (`mean/std` thresholds).
+  - C2 training control tightened for triplet branch:
+    - `scripts/phase_b_train_value.py`:
+      - added `--external-pair-only` to disable internal C1 contrastive branch,
+      - propagated this mode into validation, runtime logs, train metrics, and manifest.
+  - Documentation synchronized:
+    - `docs/phase_D_plan.md`: added implemented D6-T entrypoints and DT1~DT6 command blocks.
+    - `docs/readme.md`: updated public status/entrypoint with D6-T branch.
+    - `docs/readme_full.md`: added complete D6-T runbook commands and standalone external eval command.
+- Files changed:
+  - `src/ours/phase_d/external_pairs_adapters.py`
+  - `scripts/phase_d_prepare_external_pairs.py`
+  - `scripts/phase_d_eval_external_pairs.py`
+  - `scripts/run_phase_d_triplet_validation_suite.sh`
+  - `scripts/phase_b_train_value.py`
+  - `docs/phase_D_plan.md`
+  - `docs/readme.md`
+  - `docs/readme_full.md`
+  - `docs/progress_detailed.md`
+- Breaking changes:
+  - None (existing D4/D5/D6 scripts remain available; new behavior is opt-in via new script/flags).
+
+## 2026-03-05 00:28:42 +0800 (+08)
+- Type: Phase D6 Implementation / Ranking-First Mainline Engineering
+- Summary: Implemented D6 code path to align C2 training/checkpoint selection with ranking objectives, and fixed teacher dependency leakage in MC control runs.
+- Details:
+  - C2 checkpoint selection upgraded in `scripts/phase_b_train_value.py`:
+    - `--checkpoint-selection-metric` now supports ranking-led options:
+      - `corr_pair_acc`
+      - `corr_auc`
+      - `ranking_score`
+    - added metric-direction-aware selection logic (maximize ranking metrics, minimize Brier metrics).
+    - training summary now logs `selected_metric_v`.
+  - D6 groups added in `scripts/run_phase_d_teacher_suite.sh`:
+    - `D6_STRATEGYQA_SMOKE_RANKING_CTRL`
+    - `D6_STRATEGYQA_SMOKE_RANKING_PRM_GATE`
+  - MC control arm safety fix:
+    - teacher args are now passed to C1 only when teacher files are explicitly configured.
+    - teacher file existence checks are now conditional, preventing false hard-fail in teacher-free controls.
+  - Phase C/D orchestration and diagnosis updated:
+    - `scripts/run_phase_cd_control_suite.sh` adds `CD_D6_RANKING_LIGHT`.
+    - `scripts/phase_cd_compare_report.py` now ingests `D6_STRATEGYQA_*` logs.
+  - Docs updated for D6 route and runnable commands:
+    - `docs/phase_D_plan.md`
+    - `docs/readme.md`
+    - `docs/readme_full.md`
+- Files changed:
+  - `scripts/phase_b_train_value.py`
+  - `scripts/run_phase_d_teacher_suite.sh`
+  - `scripts/run_phase_cd_control_suite.sh`
+  - `scripts/phase_cd_compare_report.py`
+  - `docs/phase_D_plan.md`
+  - `docs/readme.md`
+  - `docs/readme_full.md`
+  - `docs/progress_detailed.md`
+- Breaking changes:
+  - None (existing D4/D5 groups and default metric behavior remain available).
+
+## 2026-03-04 23:30:00 +08 (+0800)
+- Type: Phase D Methodology Correction / Docs + Suite Mainline Update
+- Summary: Promoted mentor-driven correction into executable mainline: PRM is no longer used as direct value target for promotion, and previous D4 teacher-target runs are explicitly downgraded to ablation.
+- Details:
+  - Method position clarified across docs:
+    - keep `q_mean_smoothed` as C2 training target,
+    - use PRM mainly for pair-quality gating / selection support,
+    - treat `q_teacher` / `q_fused` target routes as ablation evidence.
+  - Added new D5 group family in `scripts/run_phase_d_teacher_suite.sh`:
+    - `D5_STRATEGYQA_SMOKE_MC_CTRL`
+    - `D5_STRATEGYQA_SMOKE_MC_PRM_PAIR_GATE`
+    - `D5_STRATEGYQA_FULL_MC_CTRL`
+    - `D5_STRATEGYQA_FULL_MC_PRM_PAIR_GATE`
+  - Added one-click method-fix bundles in `scripts/run_phase_cd_control_suite.sh`:
+    - `CD_METHOD_FIX_LIGHT`
+    - `CD_METHOD_FIX_FULL`
+  - Extended comparison report ingestion to include both D4 and D5 logs in `scripts/phase_cd_compare_report.py`.
+  - Updated planning/status docs (excluding entry `README.md`):
+    - `docs/phase_D_plan.md`
+    - `docs/phase_C_fix_value_head.md`
+    - `docs/phase_C_plan.md`
+    - `docs/TODO_ours.md`
+    - `docs/readme_full.md`
+- Files changed:
+  - `scripts/run_phase_d_teacher_suite.sh`
+  - `scripts/run_phase_cd_control_suite.sh`
+  - `scripts/phase_cd_compare_report.py`
+  - `docs/phase_D_plan.md`
+  - `docs/phase_C_fix_value_head.md`
+  - `docs/phase_C_plan.md`
+  - `docs/TODO_ours.md`
+  - `docs/readme_full.md`
+  - `docs/progress_detailed.md`
+- Breaking changes:
+  - None (existing D4 groups remain available for ablation and retrospective comparison).
+
+## 2026-03-04 23:08:46 +08 (+0800)
+- Type: Experiment Ops / Command Logging Infrastructure
+- Summary: Added an opt-in command logger workflow that auto-persists run commands, compact key metrics, and reproducibility docs.
+- Details:
+  - Added `scripts/experiment_command_logger.py`:
+    - executes arbitrary experiment commands,
+    - stores full raw terminal logs under `assets/artifacts/command_logs/raw_logs/`,
+    - extracts compact high-signal fields (accuracy/brier/auc/etc.),
+    - writes machine-readable history to `assets/artifacts/command_logs/run_records.jsonl`,
+    - supports repeated-run tracking with `command_family_id` + `family_run_index`.
+  - Added `scripts/run_with_exp_log.sh`:
+    - beginner-friendly wrapper for daily usage,
+    - optional control toggles:
+      - `EXP_LOG_ENABLE=0`
+      - `EXP_LOG_UPDATE_DOCS=0`
+      - `EXP_LOG_TAGS=...`
+      - `EXP_LOG_NOTE=...`
+  - Added/initialized reproducibility docs:
+    - `docs/commands_to_run.md`
+    - `docs/command_result.md`
+  - Updated documentation:
+    - `docs/readme_full.md` with artifact-retention clarification and logging workflow commands.
+    - `docs/readme.md` with command-log output location and wrapper usage.
+- Files changed:
+  - `scripts/experiment_command_logger.py`
+  - `scripts/run_with_exp_log.sh`
+  - `docs/commands_to_run.md`
+  - `docs/command_result.md`
+  - `docs/readme_full.md`
+  - `docs/readme.md`
+  - `docs/progress_detailed.md`
+- Breaking changes:
+  - None.
+
 ## 2026-03-04 22:27:36 +08 (+0800)
 - Type: Docs / Operations
 - Summary: Refreshed `docs/readme_full.md` with a verified command set for cache infra healthcheck and stable Phase C/D execution.

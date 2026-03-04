@@ -40,6 +40,7 @@ from ours.phase_d.external_pairs import ExternalPairRecord, summarize_external_p
 from ours.phase_d.external_pairs_adapters import (  # noqa: E402
     PairBuildConfig,
     load_math_shepherd_pairs,
+    load_prm800k_pairs,
     load_prmbench_preview_pairs,
     load_r_prm_dpo_pairs,
     load_rlhflow_pairs,
@@ -104,6 +105,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to math-shepherd.jsonl.",
     )
     parser.add_argument(
+        "--prm800k-path",
+        type=Path,
+        default=None,
+        help=(
+            "Path to PRM800K data root or one JSON/JSONL file. "
+            "Supports common mirrored schemas via best-effort parser."
+        ),
+    )
+    parser.add_argument(
         "--rlhflow-mistral-root",
         type=Path,
         default=None,
@@ -146,6 +156,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.r_prm_root is None
         and args.prmbench_preview_path is None
         and args.math_shepherd_path is None
+        and args.prm800k_path is None
         and args.rlhflow_mistral_root is None
         and args.rlhflow_deepseek_path is None
     ):
@@ -182,6 +193,9 @@ def main(argv: list[str] | None = None) -> int:
             ),
             "math_shepherd_path": (
                 str(args.math_shepherd_path) if args.math_shepherd_path is not None else None
+            ),
+            "prm800k_path": (
+                str(args.prm800k_path) if args.prm800k_path is not None else None
             ),
             "rlhflow_mistral_root": (
                 str(args.rlhflow_mistral_root) if args.rlhflow_mistral_root is not None else None
@@ -257,6 +271,14 @@ def main(argv: list[str] | None = None) -> int:
             )
             source_rows_before_filter["math_shepherd"] = len(rows)
             all_rows.extend(rows)
+        if args.prm800k_path is not None:
+            rows = load_prm800k_pairs(
+                path=args.prm800k_path,
+                config=config,
+                max_pairs=args.max_pairs_per_source,
+            )
+            source_rows_before_filter["prm800k"] = len(rows)
+            all_rows.extend(rows)
         if args.rlhflow_mistral_root is not None or args.rlhflow_deepseek_path is not None:
             rows = load_rlhflow_pairs(
                 mistral_root=args.rlhflow_mistral_root,
@@ -327,12 +349,15 @@ def main(argv: list[str] | None = None) -> int:
             "prmbench_preview_path": (
                 str(args.prmbench_preview_path) if args.prmbench_preview_path is not None else None
             ),
-            "math_shepherd_path": (
-                str(args.math_shepherd_path) if args.math_shepherd_path is not None else None
-            ),
-            "rlhflow_mistral_root": (
-                str(args.rlhflow_mistral_root) if args.rlhflow_mistral_root is not None else None
-            ),
+                "math_shepherd_path": (
+                    str(args.math_shepherd_path) if args.math_shepherd_path is not None else None
+                ),
+                "prm800k_path": (
+                    str(args.prm800k_path) if args.prm800k_path is not None else None
+                ),
+                "rlhflow_mistral_root": (
+                    str(args.rlhflow_mistral_root) if args.rlhflow_mistral_root is not None else None
+                ),
             "rlhflow_deepseek_path": (
                 str(args.rlhflow_deepseek_path) if args.rlhflow_deepseek_path is not None else None
             ),
@@ -451,4 +476,3 @@ def _render_summary_markdown(summary: dict[str, Any]) -> str:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

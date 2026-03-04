@@ -21,6 +21,18 @@ The plan below is grounded in:
   - `assets/BCR on step level.pptx`
   - `assets/BCR_discussion_20251219.pptx`
 
+## 0.5 Status Re-interpretation (2026-03-05)
+
+Phase C remains complete at infrastructure level, but its current role is now:
+1. provide stable control baselines for Phase D,
+2. provide C1/C2 contracts and quality diagnostics,
+3. no longer act as the promotion mainline by itself.
+
+Methodology correction linked from Phase D:
+1. use PRM primarily as pair-quality signal,
+2. avoid treating PRM score means as default C2 target supervision,
+3. keep prior teacher-target runs as ablation evidence only.
+
 ## 1. Why Phase C Exists
 
 Phase B answered the baseline question:

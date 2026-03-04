@@ -4,6 +4,8 @@ This file defines the official Phase D execution plan.
 
 Date baseline: 2026-03-03.
 
+Methodology correction update: 2026-03-05.
+
 ## 0. Document Governance (Source of Truth)
 
 Primary execution document:
@@ -31,6 +33,172 @@ Phase C conclusions from completed runs:
 5. Therefore the bottleneck is now supervision quality, not runtime reliability.
 
 This is the precise trigger for Phase D: introduce high-quality external PRM signals as a controlled teacher, without replacing our method.
+
+## 1.1 Mentor Intervention: Methodology Correction (2026-03-05)
+
+New consensus after mentor review:
+1. The previous D3 path that directly used `q_teacher` / `q_fused` as primary
+   C2 supervision can be method-misaligned for our task.
+2. Rationale:
+   - external PRM score is a process-likelihood signal,
+   - but our C2 objective needs robust prefix-level utility supervision,
+   - direct regression to teacher means can dilute step-level ordering structure.
+3. Therefore Phase D is re-scoped to:
+   - keep `q_mean_smoothed` as the main target for C2,
+   - use PRM mainly for pair-quality gating / filtering / weighting in C1->C2,
+   - treat prior `q_teacher/q_fused` target runs as ablation evidence, not mainline.
+
+Execution implication:
+1. D4 3-way runs are preserved as historical ablation.
+2. New D5 runs become the primary promotion path.
+3. Promotion gates remain calibration + corruption-order, but now evaluated
+   under MC-target + PRM-pair-gate strategy.
+
+## 1.1 Critical Diagnosis Update (2026-03-05, Direction-Setting)
+
+This update consolidates the latest D2/D3/D4 artifacts and overrides several
+earlier assumptions that were too coarse.
+
+### A. What is now **confirmed by evidence**
+
+1. Teacher targets are **not a full failure** on StrategyQA D3.
+2. In multiple non-HQ D3 runs, `q_teacher` beats MC on pair ordering metrics
+   (moderate gain, not promotion-grade gain).
+3. D4ABC external-pair chain (current settings) is underperforming and is not
+   yet a viable promotion path.
+
+Evidence:
+1. `assets/artifacts/phase_d_logs/phase_d_bundle_smoke/final_summary.md`
+2. `assets/artifacts/phase_d_logs/overnight_d4_conf_fulltrain/final_summary.md`
+3. `assets/artifacts/phase_cd_reports/smoke_local/summary.md`
+4. `assets/artifacts/phase_d_logs/phase_d4abc_smoke_opt/stage_results.jsonl`
+
+### B. What was **misleading and must be corrected**
+
+1. "Teacher path is generally broken" is too strong.
+   - False as a global statement; some D3 rows improve pair metrics over C ref.
+2. "Very low Brier means solved calibration" is unsafe in current target
+   distribution.
+   - Several teacher runs have low absolute Brier but still negative
+     `brier_improvement_vs_baseline` and weak Pearson.
+3. "HQ route proves teacher+pair consensus works" is unsupported.
+   - In HQ D2 artifacts, teacher corruption-to-pair alignment is effectively
+     absent (`teacher_pair_available_ratio = 0.0`), so claimed consensus lift
+     cannot be trusted.
+
+Evidence:
+1. `assets/artifacts/phase_c_eval/phase_d_bundle_smoke_d4_strategyqa_smoke_3way_teacher_c2_eval_20260303T221150Z/metrics.json`
+2. `assets/artifacts/phase_c_eval/overnight_d4_conf_fulltrain_d4_strategyqa_smoke_3way_teacher_c2_eval_20260304T083158Z/metrics.json`
+3. `assets/artifacts/phase_c_data/strategyqa/phase_d_bundle_smoke_hq_d4_strategyqa_smoke_3way_hq_d2_c1_eval__1d3a8a7cdf6c/summary.json`
+
+### C. Immediate execution decision (effective now)
+
+1. Do **not** terminate D-path as "dead". Keep D3 teacher/fused path active.
+2. Freeze promotion claims until teacher-pair alignment is fixed in D2.
+3. Treat current D4ABC as exploratory only; do not use as evidence for
+   external-pair efficacy.
+4. Shift next cycle to "signal-integrity-first" runs:
+   - fix teacher corruption join coverage for D2 pair quality,
+   - re-run D3 with the same recipe and 3 seeds,
+   - compare against C reference with fixed eval protocol.
+
+## 1.2 Methodology Pivot (2026-03-05, Mentor-Guided)
+
+This section records the direction-critical diagnosis that changes how D4+ should
+be executed.
+
+### A. Root cause (confirmed)
+
+1. We are facing an **objective mismatch**:
+   - current training emphasizes calibration/regression to scalar targets
+     (`q_mean_smoothed`, `q_teacher`, `q_fused`),
+   - but the operational need for ABR routing is **prefix ranking/discrimination**.
+2. In recent runs, low or improved Brier did not translate into usable pair
+   ordering (`corr_pair_acc`, `corr_auc` stayed near random in many settings).
+3. Therefore the current bottleneck is not only "more signals" but "right signal
+   type + right objective".
+
+### B. Immediate methodological change
+
+1. Move from **score-regression-first** to **ranking-first** training.
+2. Keep scalar target regression as optional auxiliary objective, not the main
+   optimization target.
+3. Treat external PRM mainly as pair construction/gating support, not as direct
+   "ground-truth value" replacement.
+
+### C. Pair construction policy (mandatory for new D4/D5 runs)
+
+1. Primary pair unit must be within-question comparisons whenever possible.
+2. Keep only high-separation pairs (margin filtering + uncertainty filtering).
+3. Prioritize hard negatives:
+   - Phase B "fluent but wrong" chains,
+   - quality-checked corruption branches with teacher/MC agreement constraints.
+4. External datasets are warm-start resources, but must be normalized with source
+   tags and confidence fields before entering C2.
+
+### D. Training objective policy (new default)
+
+1. Main loss: pairwise ranking loss (`margin ranking` / `log-sigmoid ranking` /
+   equivalent contrastive form).
+2. Optional auxiliary loss: low-weight calibration term for numeric stability.
+3. Selection priority for checkpoint promotion:
+   - first `corr_pair_acc` / `corr_auc`,
+   - then calibration robustness and anti-gaming checks.
+
+### E. Promotion gate update (directional)
+
+1. A run is not promotable if it only improves Brier without meaningful pair
+   discrimination gain.
+2. Required evidence must include:
+   - pair margin distribution quality,
+   - seed-stable pair metrics,
+   - no obvious length/style leakage shortcuts.
+
+## 1.3 Mentor Guidance Synthesis (2026-03-05, Decision-Critical)
+
+This section consolidates mentor feedback against our latest artifacts and is
+treated as a direction-lock for D6 and later phases.
+
+### A. Community consensus (what is repeatedly confirmed)
+
+1. Outcome-only supervision is weak for step-level ranking.
+   - Regressing to final correctness (or rollout success rate) often improves
+     calibration but leaves pair ordering near-random.
+2. PRM/value-head training is noise-sensitive.
+   - Useful step discrimination requires high-quality process labels, strict
+     pair construction, and aggressive filtering.
+3. External PRM-as-score is not enough by itself.
+   - Score fusion alone does not solve ranking; pair generation and objective
+     design must be reworked.
+
+### B. Our current bottleneck mapping (project-specific)
+
+1. Label quality remains below the "stable ranking" threshold.
+   - Small-K rollout estimates and many low-margin pairs produce weak
+     `delta_q`/`z_delta` signal.
+2. Objective mismatch has been real in prior runs.
+   - Calibration metrics can improve while `corr_pair_acc`/`corr_auc` stay
+     around random.
+3. Pair construction still needs stronger quality controls.
+   - Teacher score availability and clean-vs-corrupt alignment must be
+     enforced before trusting pair-consensus gains.
+
+### C. Locked execution implications (effective immediately)
+
+1. Keep BCR/ABR roadmap active; do not mis-diagnose this as ABR design failure.
+2. Treat "process supervision quality" as the blocking subsystem.
+3. Use ranking-first training and ranking-led checkpoint selection as D6 default.
+4. Require control-vs-gated paired evidence before any promotion claims.
+5. Keep D4/D5 as explanatory ablation history, but drive decisions from D6+.
+
+### D. Realistic advance path (without abandoning BCR)
+
+1. Validate ranking learnability first (small but strict setting).
+   - Target: stable improvement in both `corr_pair_acc` and `corr_auc`.
+2. Upgrade pair construction quality before scaling budgets.
+   - within-question pairs, higher margins, and stronger coverage checks.
+3. Use calibration as guardrail, not as primary success proxy.
+4. Only after ranking gates pass, resume ABR/BCR downstream expansion.
 
 ## 2. Phase C Closeout (What Is Done, What Remains)
 
@@ -169,6 +337,10 @@ For each run report:
 4. `corr_auc`
 5. calibration baseline delta
 
+Interpretation rule after 2026-03-05:
+- D4 is now an ablation family (to quantify what happens when teacher is used
+  as direct target), not the promotion-default route.
+
 ### D5: Promotion gate to ABR/BCR continuation
 
 Only proceed to router/BCR-lite expansion if both pass:
@@ -181,6 +353,52 @@ If gate fails:
 1. upgrade pair construction (sibling-style high-margin pairs),
 2. increase selective rollout budget,
 3. try control teacher variant before architectural expansion.
+
+### D5.1 New Mainline Matrix (Method-Corrected)
+
+Primary matrix (same split/protocol):
+1. `MC_CTRL`:
+   - target source = `q_mean_smoothed`,
+   - no PRM pair-consensus gate.
+2. `MC_PRM_PAIR_GATE`:
+   - target source = `q_mean_smoothed`,
+   - PRM used only for pair consensus / pair weighting.
+
+Required report fields:
+1. `posthoc_brier`,
+2. `corr_pair_acc`,
+3. `corr_auc`,
+4. retained pair ratio,
+5. PRM teacher coverage / disagreement.
+
+Promotion decision is based on D5 matrix first; D4 numbers only provide
+explanatory ablation context.
+
+### D6: Ranking-First Execution Matrix (Current Active Engineering)
+
+Purpose:
+1. Directly close the mentor-identified objective-mismatch risk.
+2. Align optimization and checkpoint selection to corruption-ordering metrics.
+
+Primary matrix (same split/protocol):
+1. `D6_STRATEGYQA_SMOKE_RANKING_CTRL`
+   - `target_source=q_mean_smoothed`,
+   - ranking-only C2 training,
+   - no teacher fusion in C1 (teacher-free control arm).
+2. `D6_STRATEGYQA_SMOKE_RANKING_PRM_GATE`
+   - `target_source=q_mean_smoothed`,
+   - ranking-only C2 training,
+   - PRM only for pair-consensus gating/weighting in C1.
+
+D6 mandatory policy:
+1. checkpoint selection metric must be ranking-led (`corr_auc` / `corr_pair_acc` / `ranking_score`).
+2. calibration metrics remain guardrails, not promotion drivers.
+3. teacher files are optional for control arm, mandatory for PRM-gated arm.
+
+D6 success criteria:
+1. `corr_pair_acc` and `corr_auc` both improve over D6 control.
+2. gains are seed-stable (at least 3 seeds before promotion claim).
+3. no collapse in basic calibration robustness.
 
 ## 7. Experiment Protocol (Phase D)
 
@@ -362,8 +580,79 @@ Risk E: extractor-template mismatch inflates parse-error metrics.
      `--target-source {q_mean_smoothed,q_teacher,q_fused}`.
    - `scripts/phase_b_eval_faithfulness.py` supports `--target-source from_run`
      for evaluation consistency with training.
-4. Run the first D4 four-way ablation on StrategyQA smoke, then full.
-5. Publish `phase_D_report.md` as the new live report file.
+4. Keep D4 four-way ablation as historical reference.
+5. Switch promotion mainline to D5 matrix (MC target + PRM pair gate).
+6. Publish `phase_D_report.md` as the new live report file.
+7. Execute D6 ranking-first smoke pair as the immediate implementation gate.
+
+### 10.0.1 D5 Recommended Command Pair (Immediate)
+
+Smoke control vs pair-gate:
+
+```bash
+ACTIVE_PHASE_D_GROUP=D5_STRATEGYQA_SMOKE_MC_CTRL \
+RUN_PREFIX=phase_d5_smoke_ctrl \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_d_teacher_suite.sh
+
+ACTIVE_PHASE_D_GROUP=D5_STRATEGYQA_SMOKE_MC_PRM_PAIR_GATE \
+RUN_PREFIX=phase_d5_smoke_pairgate \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_d_teacher_suite.sh
+```
+
+Full control vs pair-gate:
+
+```bash
+ACTIVE_PHASE_D_GROUP=D5_STRATEGYQA_FULL_MC_CTRL \
+RUN_PREFIX=phase_d5_full_ctrl \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_d_teacher_suite.sh
+
+ACTIVE_PHASE_D_GROUP=D5_STRATEGYQA_FULL_MC_PRM_PAIR_GATE \
+RUN_PREFIX=phase_d5_full_pairgate \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_d_teacher_suite.sh
+```
+
+One-click orchestration:
+
+```bash
+ACTIVE_PHASE_CD_GROUP=CD_METHOD_FIX_LIGHT \
+RUN_PREFIX=phase_cd_fix_light \
+CUDA_PHASE_C=1 CUDA_PHASE_D=2 CUDA_PHASE_D4=3 \
+bash scripts/run_phase_cd_control_suite.sh
+
+ACTIVE_PHASE_CD_GROUP=CD_METHOD_FIX_FULL \
+RUN_PREFIX=phase_cd_fix_full \
+CUDA_PHASE_C=1 CUDA_PHASE_D=2 CUDA_PHASE_D4=3 \
+bash scripts/run_phase_cd_control_suite.sh
+```
+
+### 10.0.2 D6 Recommended Command Pair (Now)
+
+Smoke ranking-first control vs PRM-gate:
+
+```bash
+ACTIVE_PHASE_D_GROUP=D6_STRATEGYQA_SMOKE_RANKING_CTRL \
+RUN_PREFIX=phase_d6_smoke_rank_ctrl \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_d_teacher_suite.sh
+
+ACTIVE_PHASE_D_GROUP=D6_STRATEGYQA_SMOKE_RANKING_PRM_GATE \
+RUN_PREFIX=phase_d6_smoke_rank_pairgate \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_d_teacher_suite.sh
+```
+
+One-click D6 orchestration:
+
+```bash
+ACTIVE_PHASE_CD_GROUP=CD_D6_RANKING_LIGHT \
+RUN_PREFIX=phase_cd_d6_rank_light \
+CUDA_PHASE_C=1 CUDA_PHASE_D=2 CUDA_PHASE_D4=3 \
+bash scripts/run_phase_cd_control_suite.sh
+```
 
 ### 10.1 Implementation Status Snapshot (2026-03-04)
 
@@ -383,9 +672,16 @@ Already implemented and validated by unit tests:
    - new groups:
      - `D4_STRATEGYQA_SMOKE_3WAY_HQ`
      - `D4_STRATEGYQA_FULL_3WAY_HQ`
+5. D6 ranking-first upgrades:
+   - `scripts/phase_b_train_value.py` supports ranking-based best-checkpoint selection:
+     - `--checkpoint-selection-metric {corr_pair_acc,corr_auc,ranking_score}`
+   - `scripts/run_phase_d_teacher_suite.sh` includes:
+     - `D6_STRATEGYQA_SMOKE_RANKING_CTRL`
+     - `D6_STRATEGYQA_SMOKE_RANKING_PRM_GATE`
+   - D6 MC control can run without teacher files (teacher-free C1 fusion path).
 
 Remaining highest-priority execution item:
-1. run full HQ ablation matrix and decide D5 promotion against Section 11 gates.
+1. run D6 smoke pair (3 seeds) and decide promotion readiness against Section 11 gates.
 
 ## 11. Quantitative Promotion Gates (ABR-Oriented)
 
@@ -1263,4 +1559,321 @@ PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<train_dir> \
 PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<eval_dir> \
 CUDA_VISIBLE_DEVICES=0 \
 bash scripts/run_phase_d_external_pair_suite.sh
+```
+
+## 19. D6-T Triplet Validation Branch (Mentor-Mandated)
+
+Purpose:
+1. Verify one core hypothesis before further ABR/BCR expansion:
+   - with high-quality same-question triplets, value head can learn stable
+     ranking signal (`good prefix > bad prefix`).
+2. Decouple this proof from current StrategyQA/GSM8K weak-label bottlenecks.
+
+### 19.1 Hypothesis and pass criteria
+
+Hypothesis:
+1. Ranking-first training on high-confidence triplets will produce clear
+   pairwise discrimination gains.
+
+Hard pass criteria (held-out set):
+1. `pair_acc >= 0.65`
+2. `auc >= 0.65`
+3. 3-seed stability: standard deviation <= 0.03 on both metrics.
+
+Fail interpretation:
+1. If this branch fails, the issue is likely architecture/optimization/pipeline
+   (not just C1 label noise).
+2. If this branch passes but C1-based runs fail, the blocker is confirmed as
+   pair construction quality in current C1 flow.
+
+### 19.2 Data scope (phase-1 minimal viable)
+
+Primary source:
+1. `Math-Shepherd` subset (step-labeled process data).
+
+Secondary source (phase-2 extension):
+1. `PRM800K` subset (step correctness labels).
+
+Scope control:
+1. phase-1 should run on Math-Shepherd only to reduce confounders.
+2. PRM800K is used only after phase-1 pass.
+
+### 19.3 Triplet construction contract
+
+Canonical triplet:
+1. `(question, prefix_good, prefix_bad, source_tag, confidence, split, metadata)`
+
+Mandatory rules:
+1. `prefix_good` and `prefix_bad` must come from the same question.
+2. prefer same/nearby step index to avoid trivial length shortcuts.
+3. keep only high-confidence pairs:
+   - explicit positive-vs-negative step evidence,
+   - no malformed/noise-heavy text.
+4. record full provenance:
+   - source dataset,
+   - conversion rule id,
+   - filtering reasons.
+
+Recommended anti-shortcut filters:
+1. token length ratio bounded (for example 0.7 to 1.3),
+2. remove degenerate template-only differences,
+3. deduplicate near-identical pairs.
+
+### 19.4 Training objective (branch lock)
+
+Training mode:
+1. ranking-first only (no calibration-driven checkpoint selection).
+
+Objective:
+1. pairwise ranking loss as main objective,
+2. optional tiny calibration auxiliary only after branch passes.
+
+Checkpoint selection:
+1. ranking-led metric only:
+   - `corr_auc` (primary),
+   - `corr_pair_acc` (secondary),
+   - optional combined `ranking_score`.
+
+### 19.5 Evaluation protocol
+
+Mandatory reports:
+1. held-out `pair_acc`, `auc`, margin distribution,
+2. seed variance summary (3 seeds),
+3. anti-gaming diagnostics:
+   - length/style sensitivity,
+   - format-template leakage checks.
+
+Reference baseline:
+1. random pair ordering baseline (`pair_acc ~ 0.5`, `auc ~ 0.5`).
+
+### 19.6 Named parameter groups (to implement as one-click suite)
+
+Group naming:
+1. `DT1_MATH_SHEPHERD_SMOKE`
+2. `DT2_MATH_SHEPHERD_SEED3`
+3. `DT3_PRM800K_SMOKE`
+4. `DT4_MIXED_MS_PRM800K_SEED3`
+5. `DT5_ABLATION_NO_FILTER`
+6. `DT6_ABLATION_WITH_CAL_AUX`
+
+Expected observation by group:
+1. `DT1`:
+   - quick sanity for data/loader/training loop.
+2. `DT2`:
+   - decisive phase-1 gate (pass/fail of triplet hypothesis).
+3. `DT3`:
+   - cross-source consistency check.
+4. `DT4`:
+   - mixed-source robustness check.
+5. `DT5`:
+   - verify quality filters are truly necessary.
+6. `DT6`:
+   - evaluate whether small calibration auxiliary helps or hurts ranking.
+
+### 19.7 Execution decision tree
+
+If `DT2` fails:
+1. stop downstream ABR-facing claims,
+2. inspect architecture/optimizer/loss implementation first.
+
+If `DT2` passes and `DT4` passes:
+1. migrate triplet construction logic back to StrategyQA/GSM8K C1 path,
+2. keep ranking-first selection policy for D6 mainline.
+
+If `DT2` passes but `DT4` fails:
+1. keep single-source high-quality data path for short-term progress,
+2. postpone mixed-source expansion until shift-control improves.
+
+### 19.8 Concrete execution checklist (D6T-0 -> D6T-5)
+
+`D6-T` should be executed as a strict branch, with stage gates. No stage should
+be skipped.
+
+Stage `D6T-0` (data sanity + contract freeze):
+1. Freeze one canonical triplet schema for this branch:
+   - `question`, `prefix_good`, `prefix_bad`, `source_tag`,
+     `pair_confidence`, `split`, `metadata`.
+2. Produce one `data_quality_report.md` that includes:
+   - total pairs,
+   - per-source counts,
+   - positive/negative step-index gap histogram,
+   - length-ratio histogram,
+   - dedup ratio.
+3. Gate:
+   - no malformed critical fields,
+   - no cross-question pairs,
+   - reproducible split by deterministic hash.
+
+Stage `D6T-1` (Math-Shepherd-only smoke, fast):
+1. Use only Math-Shepherd converted triplets.
+2. Use strict filtering:
+   - same question only,
+   - bounded length ratio,
+   - near-step alignment,
+   - deduplicate near-identical pairs.
+3. Run ranking-only smoke to validate:
+   - loader,
+   - objective wiring,
+   - metric pipeline.
+4. Gate:
+   - training runs end-to-end without contract errors,
+   - held-out metrics strictly above random baseline.
+
+Stage `D6T-2` (Math-Shepherd seed-3 stability):
+1. Repeat `D6T-1` under 3 seeds with identical config.
+2. Gate:
+   - mean `pair_acc >= 0.65`,
+   - mean `auc >= 0.65`,
+   - std <= 0.03 for both.
+
+Stage `D6T-3` (PRM800K adapter + smoke):
+1. Add PRM800K subset adapter to the same canonical schema.
+2. Run PRM800K-only smoke with identical ranking-first objective.
+3. Gate:
+   - metric trend consistent with `D6T-1`,
+   - no severe distribution-shift collapse.
+
+Stage `D6T-4` (mixed-source robustness):
+1. Mix Math-Shepherd + PRM800K in source-balanced sampling.
+2. Keep ranking-only selection policy unchanged.
+3. Gate:
+   - both metrics remain above pass threshold,
+   - no single-source dominance in training batches.
+
+Stage `D6T-5` (migration readiness decision):
+1. If `D6T-2` and `D6T-4` pass:
+   - mark branch as migration-ready,
+   - port triplet filters and ranking setup into StrategyQA/GSM8K path.
+2. If fail:
+   - do not claim ABR-ready value head,
+   - keep branch isolated and debug objective/data first.
+
+### 19.9 Fixed training/eval policy for this branch
+
+To prevent moving-target experiments, lock the following for `D6-T`:
+1. train mode: ranking-first (`ranking_only`).
+2. checkpoint selection: ranking-led (`corr_auc` primary, `corr_pair_acc` secondary).
+3. calibration loss:
+   - off during `D6T-1..D6T-4`,
+   - only tested in dedicated ablation (`DT6`) after pass.
+4. report bundle per run:
+   - metrics JSON,
+   - pair margin distribution,
+   - per-source contribution summary,
+   - seed summary table.
+5. keep C2 eval alignment intact:
+   - avoid simultaneously shrinking eval prefixes and corruption variants with
+     mismatched caps, otherwise clean/corruption ID joins can break.
+
+### 19.10 Failure triage map (for fast diagnosis)
+
+If `pair_acc` and `auc` both ~0.5:
+1. check pair construction quality first:
+   - question mismatch,
+   - weak/conflicting labels,
+   - filter too loose.
+2. then check objective wiring:
+   - ranking loss actually active,
+   - correct sign (`good > bad`),
+   - no accidental calibration-only path.
+
+If smoke passes but seed-3 fails:
+1. suspect optimization instability:
+   - learning rate too high,
+   - batch composition drift,
+   - source imbalance.
+2. lock optimizer/batch schedule before adding new tricks.
+
+If single-source passes but mixed-source fails:
+1. keep single-source as temporary upstream provider,
+2. postpone mixed-source promotion and fix shift-control first.
+
+### 19.11 Implemented pipeline entrypoints (code-complete)
+
+Implemented scripts:
+1. `scripts/run_phase_d_triplet_validation_suite.sh`
+   - one-click D6-T group runner for `DT1..DT6`,
+   - stages: pair prepare -> C2 train -> external held-out eval -> summary.
+2. `scripts/phase_d_eval_external_pairs.py`
+   - direct ranking eval on `validation_pairs.jsonl` from external pair artifacts.
+3. `scripts/phase_d_prepare_external_pairs.py`
+   - now supports `--prm800k-path` in addition to existing sources.
+
+Core implementation note:
+1. C2 supports `--external-pair-only` to disable internal C1 contrastive branch.
+2. This enforces mentor-required branch behavior:
+   - ranking signal comes from high-confidence same-question external triplets.
+
+### 19.12 One-click commands (DT1..DT6)
+
+Common base:
+```bash
+PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<train_dir> \
+PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<eval_dir> \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+```
+
+DT1:
+```bash
+ACTIVE_PHASE_D6T_GROUP=DT1_MATH_SHEPHERD_SMOKE \
+RUN_PREFIX=d6t_dt1_smoke \
+PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<train_dir> \
+PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<eval_dir> \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+```
+
+DT2:
+```bash
+ACTIVE_PHASE_D6T_GROUP=DT2_MATH_SHEPHERD_SEED3 \
+RUN_PREFIX=d6t_dt2_seed3 \
+PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<train_dir> \
+PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<eval_dir> \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+```
+
+DT3:
+```bash
+ACTIVE_PHASE_D6T_GROUP=DT3_PRM800K_SMOKE \
+RUN_PREFIX=d6t_dt3_prm800k_smoke \
+PRM800K_PATH=assets/external_datasets/openai_prm800k \
+PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<train_dir> \
+PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<eval_dir> \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+```
+
+DT4:
+```bash
+ACTIVE_PHASE_D6T_GROUP=DT4_MIXED_MS_PRM800K_SEED3 \
+RUN_PREFIX=d6t_dt4_mixed_seed3 \
+PRM800K_PATH=assets/external_datasets/openai_prm800k \
+PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<train_dir> \
+PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<eval_dir> \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+```
+
+DT5:
+```bash
+ACTIVE_PHASE_D6T_GROUP=DT5_ABLATION_NO_FILTER \
+RUN_PREFIX=d6t_dt5_no_filter \
+PRM800K_PATH=assets/external_datasets/openai_prm800k \
+PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<train_dir> \
+PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<eval_dir> \
+CUDA_VISIBLE_DEVICES=3 \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+```
+
+DT6:
+```bash
+ACTIVE_PHASE_D6T_GROUP=DT6_ABLATION_WITH_CAL_AUX \
+RUN_PREFIX=d6t_dt6_cal_aux \
+PRM800K_PATH=assets/external_datasets/openai_prm800k \
+PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/<train_dir> \
+PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/<eval_dir> \
+CUDA_VISIBLE_DEVICES=3 \
+bash scripts/run_phase_d_triplet_validation_suite.sh
 ```

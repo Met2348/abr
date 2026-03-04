@@ -11,7 +11,8 @@
 # What this file does:
 # 1. Resolve one named Phase D group (`ACTIVE_PHASE_D_GROUP`).
 # 2. Build D2 C1 train/eval artifacts once.
-# 3. Run a bundled D3 ablation set (`q_mean_smoothed`, `q_teacher`, `q_fused`).
+# 3. Run a bundled D3 target set defined by each group
+#    (legacy D4: `q_mean_smoothed/q_teacher/q_fused`; D5/D6: `q_mean_smoothed`).
 # 4. Collect key metrics into one final Markdown report.
 #
 # Interaction with other files:
@@ -248,9 +249,192 @@ resolve_group() {
       C2_EVAL_EXTRA_ARGS_DEFAULT="${C2_EVAL_EXTRA_ARGS_DEFAULT:---target-source from_run --target-source-missing-policy from_run --posthoc-calibration from_run}"
       D3_TARGETS="${D3_TARGETS:-q_mean_smoothed q_teacher q_fused}"
       ;;
+    D5_STRATEGYQA_SMOKE_MC_CTRL)
+      GROUP_TITLE="Phase D5 StrategyQA Smoke (MC Target, No PRM Pair Gate)"
+      GROUP_INTENTION="Method-correction control: keep MC as the only training target and disable teacher-based pair consensus."
+      GROUP_OBSERVE="This is the control arm for assessing whether PRM should be used as ranking/filter signal instead of direct target supervision."
+      GROUP_EXPECT="Compared with D5 pair-gated run, this run isolates the effect of PRM pair-quality gating."
+      GROUP_DATASET="strategyqa"
+      TRAIN_INPUT_JSONL="${TRAIN_INPUT_JSONL:-assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl}"
+      EVAL_INPUT_JSONL="${EVAL_INPUT_JSONL:-assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/validation.jsonl}"
+      TRAIN_MAX_SAMPLES="${TRAIN_MAX_SAMPLES:-256}"
+      EVAL_MAX_SAMPLES="${EVAL_MAX_SAMPLES:-128}"
+      ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-192}"
+      ROLLOUT_COUNT="${ROLLOUT_COUNT:-16}"
+      ROLLOUT_MAX_NEW_TOKENS="${ROLLOUT_MAX_NEW_TOKENS:-128}"
+      C2_TRAIN_BATCH_SIZE="${C2_TRAIN_BATCH_SIZE:-192}"
+      C2_EVAL_BATCH_SIZE="${C2_EVAL_BATCH_SIZE:-192}"
+      C2_LR="${C2_LR:-1e-4}"
+      C2_EPOCHS="${C2_EPOCHS:-10}"
+      TEACHER_TRAIN_SCORES="${TEACHER_TRAIN_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_full_mcorr4_c2_strategyqa_quality_first_full_c1_train__b7a8789f1974/teacher_prefix_scores.jsonl}"
+      TEACHER_EVAL_SCORES="${TEACHER_EVAL_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_c2_strategyqa_quality_first_c1_eval__f608255f810d/teacher_prefix_scores.jsonl}"
+      TEACHER_FUSE_MODE="${TEACHER_FUSE_MODE:-none}"
+      TEACHER_FUSION_LAMBDA="${TEACHER_FUSION_LAMBDA:-0.5}"
+      TEACHER_CONF_CI_REF="${TEACHER_CONF_CI_REF:-0.30}"
+      TEACHER_DISAGREE_THRESH="${TEACHER_DISAGREE_THRESH:-0.25}"
+      TEACHER_MIN_COVERAGE="${TEACHER_MIN_COVERAGE:-0.55}"
+      C1_PREP_EXTRA_ARGS_DEFAULT="${C1_PREP_EXTRA_ARGS_DEFAULT:---corruption-selection-policy cqr_balanced --max-corruptions-per-prefix 4 --min-non-step-drop-per-prefix 1 --max-step-drop-per-prefix 1 --enable-negation-flip --enable-comparator-flip --enable-condition-reversal --enable-entity-substitution --build-pair-quality --pair-rollout-count 16 --target-alpha 1.0 --target-beta 1.0 --target-ci-z 1.96 --target-weight-floor 0.1 --target-weight-gamma 1.0 --pair-delta-q-min 0.15 --pair-z-min 0.5 --rollout-two-stage --rollout-stage1-count 8 --rollout-stage2-count 24 --rollout-uncertain-band 0.2 --rollout-uncertain-ci-width 0.3}"
+      C2_TRAIN_EXTRA_ARGS_DEFAULT="${C2_TRAIN_EXTRA_ARGS_DEFAULT:---train-mode two_stage --two-stage-ranking-ratio 0.45 --contrastive-max-corruptions-per-prefix 4 --use-contrastive-loss --calibration-loss bce_mse --calibration-bce-weight 1.0 --calibration-mse-weight 0.5 --calibration-sample-weighting q_weight_parseable --calibration-weight-floor 0.1 --calibration-weight-gamma 1.0 --lambda-contrastive 0.08 --contrastive-margin 0.02 --contrastive-pair-filter label_quality --contrastive-label-delta-q-min 0.15 --contrastive-label-z-min 0.5 --contrastive-label-pair-weight-min 0.25 --contrastive-require-pair-pass-gate --contrastive-use-pair-weights --contrastive-stratified-sampling --contrastive-stratify-step-bucket-size 2 --contrastive-stratify-include-no-corruption --posthoc-calibration temperature --checkpoint-selection-metric posthoc_brier}"
+      C2_EVAL_EXTRA_ARGS_DEFAULT="${C2_EVAL_EXTRA_ARGS_DEFAULT:---target-source from_run --target-source-missing-policy from_run --posthoc-calibration from_run}"
+      D3_TARGETS="${D3_TARGETS:-q_mean_smoothed}"
+      ;;
+    D5_STRATEGYQA_SMOKE_MC_PRM_PAIR_GATE)
+      GROUP_TITLE="Phase D5 StrategyQA Smoke (MC Target + PRM Pair Gate)"
+      GROUP_INTENTION="Method-correction main arm: keep MC as training target, use PRM only for pair-quality consensus/filtering."
+      GROUP_OBSERVE="Compare against D5 MC control to test whether PRM helps as ranking supervision, not as direct q target."
+      GROUP_EXPECT="If correction is valid, pair metrics should improve without requiring teacher/fused target regression."
+      GROUP_DATASET="strategyqa"
+      TRAIN_INPUT_JSONL="${TRAIN_INPUT_JSONL:-assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl}"
+      EVAL_INPUT_JSONL="${EVAL_INPUT_JSONL:-assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/validation.jsonl}"
+      TRAIN_MAX_SAMPLES="${TRAIN_MAX_SAMPLES:-256}"
+      EVAL_MAX_SAMPLES="${EVAL_MAX_SAMPLES:-128}"
+      ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-192}"
+      ROLLOUT_COUNT="${ROLLOUT_COUNT:-16}"
+      ROLLOUT_MAX_NEW_TOKENS="${ROLLOUT_MAX_NEW_TOKENS:-128}"
+      C2_TRAIN_BATCH_SIZE="${C2_TRAIN_BATCH_SIZE:-192}"
+      C2_EVAL_BATCH_SIZE="${C2_EVAL_BATCH_SIZE:-192}"
+      C2_LR="${C2_LR:-1e-4}"
+      C2_EPOCHS="${C2_EPOCHS:-10}"
+      TEACHER_TRAIN_SCORES="${TEACHER_TRAIN_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_full_mcorr4_c2_strategyqa_quality_first_full_c1_train__b7a8789f1974/teacher_prefix_scores.jsonl}"
+      TEACHER_EVAL_SCORES="${TEACHER_EVAL_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_c2_strategyqa_quality_first_c1_eval__f608255f810d/teacher_prefix_scores.jsonl}"
+      TEACHER_TRAIN_CORR_SCORES="${TEACHER_TRAIN_CORR_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_full_mcorr4_c2_strategyqa_quality_first_full_c1_train__b7a8789f1974/teacher_corruption_scores.jsonl}"
+      TEACHER_EVAL_CORR_SCORES="${TEACHER_EVAL_CORR_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_c2_strategyqa_quality_first_c1_eval__f608255f810d/teacher_corruption_scores.jsonl}"
+      TEACHER_FUSE_MODE="${TEACHER_FUSE_MODE:-none}"
+      TEACHER_FUSION_LAMBDA="${TEACHER_FUSION_LAMBDA:-0.5}"
+      TEACHER_CONF_CI_REF="${TEACHER_CONF_CI_REF:-0.30}"
+      TEACHER_DISAGREE_THRESH="${TEACHER_DISAGREE_THRESH:-0.25}"
+      TEACHER_MIN_COVERAGE="${TEACHER_MIN_COVERAGE:-0.55}"
+      C1_PREP_EXTRA_ARGS_DEFAULT="${C1_PREP_EXTRA_ARGS_DEFAULT:---corruption-selection-policy cqr_balanced --max-corruptions-per-prefix 4 --min-non-step-drop-per-prefix 1 --max-step-drop-per-prefix 1 --enable-negation-flip --enable-comparator-flip --enable-condition-reversal --enable-entity-substitution --build-pair-quality --pair-rollout-count 16 --target-alpha 1.0 --target-beta 1.0 --target-ci-z 1.96 --target-weight-floor 0.1 --target-weight-gamma 1.0 --pair-delta-q-min 0.15 --pair-z-min 0.5 --rollout-two-stage --rollout-stage1-count 8 --rollout-stage2-count 24 --rollout-uncertain-band 0.2 --rollout-uncertain-ci-width 0.3 --pair-consensus-enable --pair-consensus-teacher-delta-q-min 0.03 --pair-consensus-weight-boost 1.25 --pair-consensus-fail-weight-scale 0.20 --no-pair-consensus-require-teacher-coverage}"
+      C2_TRAIN_EXTRA_ARGS_DEFAULT="${C2_TRAIN_EXTRA_ARGS_DEFAULT:---train-mode two_stage --two-stage-ranking-ratio 0.45 --contrastive-max-corruptions-per-prefix 4 --use-contrastive-loss --calibration-loss bce_mse --calibration-bce-weight 1.0 --calibration-mse-weight 0.5 --calibration-sample-weighting q_weight_parseable --calibration-weight-floor 0.1 --calibration-weight-gamma 1.0 --lambda-contrastive 0.08 --contrastive-margin 0.02 --contrastive-pair-filter label_quality --contrastive-label-delta-q-min 0.15 --contrastive-label-z-min 0.5 --contrastive-label-pair-weight-min 0.25 --contrastive-require-pair-pass-gate --contrastive-use-pair-weights --contrastive-stratified-sampling --contrastive-stratify-step-bucket-size 2 --contrastive-stratify-include-no-corruption --posthoc-calibration temperature --checkpoint-selection-metric posthoc_brier}"
+      C2_EVAL_EXTRA_ARGS_DEFAULT="${C2_EVAL_EXTRA_ARGS_DEFAULT:---target-source from_run --target-source-missing-policy from_run --posthoc-calibration from_run}"
+      D3_TARGETS="${D3_TARGETS:-q_mean_smoothed}"
+      ;;
+    D5_STRATEGYQA_FULL_MC_CTRL)
+      GROUP_TITLE="Phase D5 StrategyQA Full (MC Target, No PRM Pair Gate)"
+      GROUP_INTENTION="Full-data control for method correction with MC-only supervision."
+      GROUP_OBSERVE="Provides full-data reference before enabling PRM pair gate."
+      GROUP_EXPECT="Used as paired control against D5 full pair-gated run."
+      GROUP_DATASET="strategyqa"
+      TRAIN_INPUT_JSONL="${TRAIN_INPUT_JSONL:-assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl}"
+      EVAL_INPUT_JSONL="${EVAL_INPUT_JSONL:-assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/validation.jsonl}"
+      TRAIN_MAX_SAMPLES="${TRAIN_MAX_SAMPLES:-}"
+      EVAL_MAX_SAMPLES="${EVAL_MAX_SAMPLES:-}"
+      ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-192}"
+      ROLLOUT_COUNT="${ROLLOUT_COUNT:-16}"
+      ROLLOUT_MAX_NEW_TOKENS="${ROLLOUT_MAX_NEW_TOKENS:-128}"
+      C2_TRAIN_BATCH_SIZE="${C2_TRAIN_BATCH_SIZE:-192}"
+      C2_EVAL_BATCH_SIZE="${C2_EVAL_BATCH_SIZE:-192}"
+      C2_LR="${C2_LR:-1e-4}"
+      C2_EPOCHS="${C2_EPOCHS:-12}"
+      TEACHER_TRAIN_SCORES="${TEACHER_TRAIN_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_full_mcorr4_c2_strategyqa_quality_first_full_c1_train__b7a8789f1974/teacher_prefix_scores.jsonl}"
+      TEACHER_EVAL_SCORES="${TEACHER_EVAL_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_c2_strategyqa_quality_first_c1_eval__f608255f810d/teacher_prefix_scores.jsonl}"
+      TEACHER_FUSE_MODE="${TEACHER_FUSE_MODE:-none}"
+      TEACHER_FUSION_LAMBDA="${TEACHER_FUSION_LAMBDA:-0.5}"
+      TEACHER_CONF_CI_REF="${TEACHER_CONF_CI_REF:-0.30}"
+      TEACHER_DISAGREE_THRESH="${TEACHER_DISAGREE_THRESH:-0.25}"
+      TEACHER_MIN_COVERAGE="${TEACHER_MIN_COVERAGE:-0.55}"
+      C1_PREP_EXTRA_ARGS_DEFAULT="${C1_PREP_EXTRA_ARGS_DEFAULT:---corruption-selection-policy cqr_balanced --max-corruptions-per-prefix 4 --min-non-step-drop-per-prefix 1 --max-step-drop-per-prefix 1 --enable-negation-flip --enable-comparator-flip --enable-condition-reversal --enable-entity-substitution --build-pair-quality --pair-rollout-count 16 --target-alpha 1.0 --target-beta 1.0 --target-ci-z 1.96 --target-weight-floor 0.1 --target-weight-gamma 1.0 --pair-delta-q-min 0.20 --pair-z-min 0.6 --rollout-two-stage --rollout-stage1-count 8 --rollout-stage2-count 24 --rollout-uncertain-band 0.2 --rollout-uncertain-ci-width 0.3}"
+      C2_TRAIN_EXTRA_ARGS_DEFAULT="${C2_TRAIN_EXTRA_ARGS_DEFAULT:---train-mode two_stage --two-stage-ranking-ratio 0.45 --contrastive-max-corruptions-per-prefix 4 --use-contrastive-loss --calibration-loss bce_mse --calibration-bce-weight 1.0 --calibration-mse-weight 0.5 --calibration-sample-weighting q_weight_parseable --calibration-weight-floor 0.1 --calibration-weight-gamma 1.0 --lambda-contrastive 0.08 --contrastive-margin 0.02 --contrastive-pair-filter label_quality --contrastive-label-delta-q-min 0.20 --contrastive-label-z-min 0.6 --contrastive-label-pair-weight-min 0.25 --contrastive-require-pair-pass-gate --contrastive-use-pair-weights --contrastive-stratified-sampling --contrastive-stratify-step-bucket-size 2 --contrastive-stratify-include-no-corruption --posthoc-calibration temperature --checkpoint-selection-metric posthoc_brier}"
+      C2_EVAL_EXTRA_ARGS_DEFAULT="${C2_EVAL_EXTRA_ARGS_DEFAULT:---target-source from_run --target-source-missing-policy from_run --posthoc-calibration from_run}"
+      D3_TARGETS="${D3_TARGETS:-q_mean_smoothed}"
+      ;;
+    D5_STRATEGYQA_FULL_MC_PRM_PAIR_GATE)
+      GROUP_TITLE="Phase D5 StrategyQA Full (MC Target + PRM Pair Gate)"
+      GROUP_INTENTION="Full-data method-correction main arm using PRM only as pair gate (not direct q supervision)."
+      GROUP_OBSERVE="Primary promotion candidate after smoke confirms pair-gate gain."
+      GROUP_EXPECT="Should outperform D5 full control on corruption ordering while preserving calibration competitiveness."
+      GROUP_DATASET="strategyqa"
+      TRAIN_INPUT_JSONL="${TRAIN_INPUT_JSONL:-assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl}"
+      EVAL_INPUT_JSONL="${EVAL_INPUT_JSONL:-assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/validation.jsonl}"
+      TRAIN_MAX_SAMPLES="${TRAIN_MAX_SAMPLES:-}"
+      EVAL_MAX_SAMPLES="${EVAL_MAX_SAMPLES:-}"
+      ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-192}"
+      ROLLOUT_COUNT="${ROLLOUT_COUNT:-16}"
+      ROLLOUT_MAX_NEW_TOKENS="${ROLLOUT_MAX_NEW_TOKENS:-128}"
+      C2_TRAIN_BATCH_SIZE="${C2_TRAIN_BATCH_SIZE:-192}"
+      C2_EVAL_BATCH_SIZE="${C2_EVAL_BATCH_SIZE:-192}"
+      C2_LR="${C2_LR:-1e-4}"
+      C2_EPOCHS="${C2_EPOCHS:-12}"
+      TEACHER_TRAIN_SCORES="${TEACHER_TRAIN_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_full_mcorr4_c2_strategyqa_quality_first_full_c1_train__b7a8789f1974/teacher_prefix_scores.jsonl}"
+      TEACHER_EVAL_SCORES="${TEACHER_EVAL_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_c2_strategyqa_quality_first_c1_eval__f608255f810d/teacher_prefix_scores.jsonl}"
+      TEACHER_TRAIN_CORR_SCORES="${TEACHER_TRAIN_CORR_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_full_mcorr4_c2_strategyqa_quality_first_full_c1_train__b7a8789f1974/teacher_corruption_scores.jsonl}"
+      TEACHER_EVAL_CORR_SCORES="${TEACHER_EVAL_CORR_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_c2_strategyqa_quality_first_c1_eval__f608255f810d/teacher_corruption_scores.jsonl}"
+      TEACHER_FUSE_MODE="${TEACHER_FUSE_MODE:-none}"
+      TEACHER_FUSION_LAMBDA="${TEACHER_FUSION_LAMBDA:-0.5}"
+      TEACHER_CONF_CI_REF="${TEACHER_CONF_CI_REF:-0.30}"
+      TEACHER_DISAGREE_THRESH="${TEACHER_DISAGREE_THRESH:-0.25}"
+      TEACHER_MIN_COVERAGE="${TEACHER_MIN_COVERAGE:-0.55}"
+      C1_PREP_EXTRA_ARGS_DEFAULT="${C1_PREP_EXTRA_ARGS_DEFAULT:---corruption-selection-policy cqr_balanced --max-corruptions-per-prefix 4 --min-non-step-drop-per-prefix 1 --max-step-drop-per-prefix 1 --enable-negation-flip --enable-comparator-flip --enable-condition-reversal --enable-entity-substitution --build-pair-quality --pair-rollout-count 16 --target-alpha 1.0 --target-beta 1.0 --target-ci-z 1.96 --target-weight-floor 0.1 --target-weight-gamma 1.0 --pair-delta-q-min 0.20 --pair-z-min 0.6 --rollout-two-stage --rollout-stage1-count 8 --rollout-stage2-count 24 --rollout-uncertain-band 0.2 --rollout-uncertain-ci-width 0.3 --pair-consensus-enable --pair-consensus-teacher-delta-q-min 0.05 --pair-consensus-weight-boost 1.25 --pair-consensus-fail-weight-scale 0.20 --no-pair-consensus-require-teacher-coverage}"
+      C2_TRAIN_EXTRA_ARGS_DEFAULT="${C2_TRAIN_EXTRA_ARGS_DEFAULT:---train-mode two_stage --two-stage-ranking-ratio 0.45 --contrastive-max-corruptions-per-prefix 4 --use-contrastive-loss --calibration-loss bce_mse --calibration-bce-weight 1.0 --calibration-mse-weight 0.5 --calibration-sample-weighting q_weight_parseable --calibration-weight-floor 0.1 --calibration-weight-gamma 1.0 --lambda-contrastive 0.08 --contrastive-margin 0.02 --contrastive-pair-filter label_quality --contrastive-label-delta-q-min 0.20 --contrastive-label-z-min 0.6 --contrastive-label-pair-weight-min 0.25 --contrastive-require-pair-pass-gate --contrastive-use-pair-weights --contrastive-stratified-sampling --contrastive-stratify-step-bucket-size 2 --contrastive-stratify-include-no-corruption --posthoc-calibration temperature --checkpoint-selection-metric posthoc_brier}"
+      C2_EVAL_EXTRA_ARGS_DEFAULT="${C2_EVAL_EXTRA_ARGS_DEFAULT:---target-source from_run --target-source-missing-policy from_run --posthoc-calibration from_run}"
+      D3_TARGETS="${D3_TARGETS:-q_mean_smoothed}"
+      ;;
+    D6_STRATEGYQA_SMOKE_RANKING_CTRL)
+      GROUP_TITLE="Phase D6 StrategyQA Smoke (Ranking-First MC Control)"
+      GROUP_INTENTION="Directly address objective-mismatch risk: use MC targets, ranking-only optimization, and ranking-based checkpoint selection."
+      GROUP_OBSERVE="Reference arm for D6 pair-discrimination gains without PRM pair gate."
+      GROUP_EXPECT="Compared with D5 MC control, this should improve corr_pair_acc/corr_auc consistency by aligning training and selection to ranking objectives."
+      GROUP_DATASET="strategyqa"
+      TRAIN_INPUT_JSONL="${TRAIN_INPUT_JSONL:-assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl}"
+      EVAL_INPUT_JSONL="${EVAL_INPUT_JSONL:-assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/validation.jsonl}"
+      TRAIN_MAX_SAMPLES="${TRAIN_MAX_SAMPLES:-256}"
+      EVAL_MAX_SAMPLES="${EVAL_MAX_SAMPLES:-128}"
+      ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-192}"
+      ROLLOUT_COUNT="${ROLLOUT_COUNT:-16}"
+      ROLLOUT_MAX_NEW_TOKENS="${ROLLOUT_MAX_NEW_TOKENS:-128}"
+      C2_TRAIN_BATCH_SIZE="${C2_TRAIN_BATCH_SIZE:-192}"
+      C2_EVAL_BATCH_SIZE="${C2_EVAL_BATCH_SIZE:-192}"
+      C2_LR="${C2_LR:-1e-4}"
+      C2_EPOCHS="${C2_EPOCHS:-8}"
+      # D6 MC control must remain teacher-free in C1 fusion path.
+      TEACHER_TRAIN_SCORES="${TEACHER_TRAIN_SCORES:-}"
+      TEACHER_EVAL_SCORES="${TEACHER_EVAL_SCORES:-}"
+      TEACHER_TRAIN_CORR_SCORES="${TEACHER_TRAIN_CORR_SCORES:-}"
+      TEACHER_EVAL_CORR_SCORES="${TEACHER_EVAL_CORR_SCORES:-}"
+      TEACHER_FUSE_MODE="${TEACHER_FUSE_MODE:-none}"
+      TEACHER_FUSION_LAMBDA="${TEACHER_FUSION_LAMBDA:-0.5}"
+      TEACHER_CONF_CI_REF="${TEACHER_CONF_CI_REF:-0.30}"
+      TEACHER_DISAGREE_THRESH="${TEACHER_DISAGREE_THRESH:-0.25}"
+      TEACHER_MIN_COVERAGE="${TEACHER_MIN_COVERAGE:-0.0}"
+      C1_PREP_EXTRA_ARGS_DEFAULT="${C1_PREP_EXTRA_ARGS_DEFAULT:---corruption-selection-policy cqr_balanced --max-corruptions-per-prefix 4 --min-non-step-drop-per-prefix 1 --max-step-drop-per-prefix 1 --enable-negation-flip --enable-comparator-flip --enable-condition-reversal --enable-entity-substitution --build-pair-quality --pair-rollout-count 16 --target-alpha 1.0 --target-beta 1.0 --target-ci-z 1.96 --target-weight-floor 0.1 --target-weight-gamma 1.0 --pair-delta-q-min 0.20 --pair-z-min 0.6 --rollout-two-stage --rollout-stage1-count 8 --rollout-stage2-count 24 --rollout-uncertain-band 0.2 --rollout-uncertain-ci-width 0.3}"
+      C2_TRAIN_EXTRA_ARGS_DEFAULT="${C2_TRAIN_EXTRA_ARGS_DEFAULT:---train-mode ranking_only --use-contrastive-loss --calibration-loss bce_mse --calibration-bce-weight 1.0 --calibration-mse-weight 0.5 --calibration-sample-weighting q_weight_parseable --calibration-weight-floor 0.1 --calibration-weight-gamma 1.0 --lambda-contrastive 0.10 --contrastive-margin 0.02 --contrastive-pair-filter label_quality --contrastive-label-delta-q-min 0.20 --contrastive-label-z-min 0.6 --contrastive-label-pair-weight-min 0.30 --contrastive-require-pair-pass-gate --contrastive-use-pair-weights --contrastive-stratified-sampling --contrastive-stratify-step-bucket-size 2 --contrastive-stratify-include-no-corruption --checkpoint-selection-metric corr_auc --posthoc-calibration none}"
+      C2_EVAL_EXTRA_ARGS_DEFAULT="${C2_EVAL_EXTRA_ARGS_DEFAULT:---target-source from_run --target-source-missing-policy from_run --posthoc-calibration none}"
+      D3_TARGETS="${D3_TARGETS:-q_mean_smoothed}"
+      ;;
+    D6_STRATEGYQA_SMOKE_RANKING_PRM_GATE)
+      GROUP_TITLE="Phase D6 StrategyQA Smoke (Ranking-First + PRM Pair Gate)"
+      GROUP_INTENTION="Ranking-first main arm: keep MC target, use PRM only to strengthen pair-quality gating in C1."
+      GROUP_OBSERVE="Direct A/B against D6 ranking control to measure PRM gate benefit under the same ranking objective."
+      GROUP_EXPECT="corr_pair_acc/corr_auc should improve over D6 control if teacher-gated pairs add real ranking signal."
+      GROUP_DATASET="strategyqa"
+      TRAIN_INPUT_JSONL="${TRAIN_INPUT_JSONL:-assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/train.jsonl}"
+      EVAL_INPUT_JSONL="${EVAL_INPUT_JSONL:-assets/artifacts/phase_a_prepared/strategyqa/16f7dd639f3e/validation.jsonl}"
+      TRAIN_MAX_SAMPLES="${TRAIN_MAX_SAMPLES:-256}"
+      EVAL_MAX_SAMPLES="${EVAL_MAX_SAMPLES:-128}"
+      ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-192}"
+      ROLLOUT_COUNT="${ROLLOUT_COUNT:-16}"
+      ROLLOUT_MAX_NEW_TOKENS="${ROLLOUT_MAX_NEW_TOKENS:-128}"
+      C2_TRAIN_BATCH_SIZE="${C2_TRAIN_BATCH_SIZE:-192}"
+      C2_EVAL_BATCH_SIZE="${C2_EVAL_BATCH_SIZE:-192}"
+      C2_LR="${C2_LR:-1e-4}"
+      C2_EPOCHS="${C2_EPOCHS:-8}"
+      TEACHER_TRAIN_SCORES="${TEACHER_TRAIN_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_full_mcorr4_c2_strategyqa_quality_first_full_c1_train__b7a8789f1974/teacher_prefix_scores.jsonl}"
+      TEACHER_EVAL_SCORES="${TEACHER_EVAL_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_c2_strategyqa_quality_first_c1_eval__f608255f810d/teacher_prefix_scores.jsonl}"
+      TEACHER_TRAIN_CORR_SCORES="${TEACHER_TRAIN_CORR_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_full_mcorr4_c2_strategyqa_quality_first_full_c1_train__b7a8789f1974/teacher_corruption_scores.jsonl}"
+      TEACHER_EVAL_CORR_SCORES="${TEACHER_EVAL_CORR_SCORES:-assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_c2_strategyqa_quality_first_c1_eval__f608255f810d/teacher_corruption_scores.jsonl}"
+      TEACHER_FUSE_MODE="${TEACHER_FUSE_MODE:-none}"
+      TEACHER_FUSION_LAMBDA="${TEACHER_FUSION_LAMBDA:-0.5}"
+      TEACHER_CONF_CI_REF="${TEACHER_CONF_CI_REF:-0.30}"
+      TEACHER_DISAGREE_THRESH="${TEACHER_DISAGREE_THRESH:-0.25}"
+      TEACHER_MIN_COVERAGE="${TEACHER_MIN_COVERAGE:-0.70}"
+      C1_PREP_EXTRA_ARGS_DEFAULT="${C1_PREP_EXTRA_ARGS_DEFAULT:---corruption-selection-policy cqr_balanced --max-corruptions-per-prefix 4 --min-non-step-drop-per-prefix 1 --max-step-drop-per-prefix 1 --enable-negation-flip --enable-comparator-flip --enable-condition-reversal --enable-entity-substitution --build-pair-quality --pair-rollout-count 16 --target-alpha 1.0 --target-beta 1.0 --target-ci-z 1.96 --target-weight-floor 0.1 --target-weight-gamma 1.0 --pair-delta-q-min 0.20 --pair-z-min 0.6 --rollout-two-stage --rollout-stage1-count 8 --rollout-stage2-count 24 --rollout-uncertain-band 0.2 --rollout-uncertain-ci-width 0.3 --pair-consensus-enable --pair-consensus-teacher-delta-q-min 0.05 --pair-consensus-weight-boost 1.25 --pair-consensus-fail-weight-scale 0.20 --pair-consensus-require-teacher-coverage}"
+      C2_TRAIN_EXTRA_ARGS_DEFAULT="${C2_TRAIN_EXTRA_ARGS_DEFAULT:---train-mode ranking_only --use-contrastive-loss --calibration-loss bce_mse --calibration-bce-weight 1.0 --calibration-mse-weight 0.5 --calibration-sample-weighting q_weight_parseable --calibration-weight-floor 0.1 --calibration-weight-gamma 1.0 --lambda-contrastive 0.10 --contrastive-margin 0.02 --contrastive-pair-filter label_quality --contrastive-label-delta-q-min 0.20 --contrastive-label-z-min 0.6 --contrastive-label-pair-weight-min 0.30 --contrastive-require-pair-pass-gate --contrastive-use-pair-weights --contrastive-stratified-sampling --contrastive-stratify-step-bucket-size 2 --contrastive-stratify-include-no-corruption --checkpoint-selection-metric corr_auc --posthoc-calibration none}"
+      C2_EVAL_EXTRA_ARGS_DEFAULT="${C2_EVAL_EXTRA_ARGS_DEFAULT:---target-source from_run --target-source-missing-policy from_run --posthoc-calibration none}"
+      D3_TARGETS="${D3_TARGETS:-q_mean_smoothed}"
+      ;;
     *)
       echo "ERROR: Unknown ACTIVE_PHASE_D_GROUP=$ACTIVE_PHASE_D_GROUP"
-      echo "Supported groups: D4_STRATEGYQA_SMOKE_3WAY, D4_STRATEGYQA_SMOKE_3WAY_HQ, D4_STRATEGYQA_FULL_3WAY_HQ"
+      echo "Supported groups: D4_STRATEGYQA_SMOKE_3WAY, D4_STRATEGYQA_SMOKE_3WAY_HQ, D4_STRATEGYQA_FULL_3WAY_HQ, D5_STRATEGYQA_SMOKE_MC_CTRL, D5_STRATEGYQA_SMOKE_MC_PRM_PAIR_GATE, D5_STRATEGYQA_FULL_MC_CTRL, D5_STRATEGYQA_FULL_MC_PRM_PAIR_GATE, D6_STRATEGYQA_SMOKE_RANKING_CTRL, D6_STRATEGYQA_SMOKE_RANKING_PRM_GATE"
       exit 1
       ;;
   esac
@@ -279,13 +463,19 @@ run_c1_prepare() {
     --dtype bfloat16
     --device-map auto
     --require-cuda
-    --teacher-prefix-scores-jsonl "$teacher_scores"
-    --teacher-fuse-mode "$TEACHER_FUSE_MODE"
-    --teacher-fusion-lambda "$TEACHER_FUSION_LAMBDA"
-    --teacher-confidence-ci-ref "$TEACHER_CONF_CI_REF"
-    --teacher-disagree-threshold "$TEACHER_DISAGREE_THRESH"
-    --teacher-min-coverage "$TEACHER_MIN_COVERAGE"
   )
+  # D6 safety: teacher arguments are only passed when teacher files are
+  # explicitly configured. This keeps MC-only control arms truly teacher-free.
+  if [[ -n "$teacher_scores" ]]; then
+    cmd+=(
+      --teacher-prefix-scores-jsonl "$teacher_scores"
+      --teacher-fuse-mode "$TEACHER_FUSE_MODE"
+      --teacher-fusion-lambda "$TEACHER_FUSION_LAMBDA"
+      --teacher-confidence-ci-ref "$TEACHER_CONF_CI_REF"
+      --teacher-disagree-threshold "$TEACHER_DISAGREE_THRESH"
+      --teacher-min-coverage "$TEACHER_MIN_COVERAGE"
+    )
+  fi
   if [[ -n "$max_samples" ]]; then
     cmd+=(--max-samples "$max_samples")
   fi
@@ -411,11 +601,14 @@ C1_EVAL_RUN_NAME="${RUN_NAME}_d2_c1_eval"
   log_line "Group run start"
 } | tee "$SUITE_LOG_FILE"
 
-if [[ ! -f "$TEACHER_TRAIN_SCORES" ]]; then
+# D6 safety gate:
+# - teacher files are optional for MC-only control groups.
+# - when configured, they must be complete and consistent.
+if [[ -n "${TEACHER_TRAIN_SCORES:-}" && ! -f "$TEACHER_TRAIN_SCORES" ]]; then
   echo "ERROR: Missing teacher score file: $TEACHER_TRAIN_SCORES" >&2
   exit 1
 fi
-if [[ ! -f "$TEACHER_EVAL_SCORES" ]]; then
+if [[ -n "${TEACHER_EVAL_SCORES:-}" && ! -f "$TEACHER_EVAL_SCORES" ]]; then
   echo "ERROR: Missing teacher score file: $TEACHER_EVAL_SCORES" >&2
   exit 1
 fi
@@ -426,6 +619,20 @@ fi
 if [[ -n "${TEACHER_EVAL_CORR_SCORES:-}" && ! -f "$TEACHER_EVAL_CORR_SCORES" ]]; then
   echo "ERROR: Missing teacher corruption score file: $TEACHER_EVAL_CORR_SCORES" >&2
   exit 1
+fi
+if [[ -z "${TEACHER_TRAIN_SCORES:-}" && -n "${TEACHER_TRAIN_CORR_SCORES:-}" ]]; then
+  echo "ERROR: TEACHER_TRAIN_CORR_SCORES is set but TEACHER_TRAIN_SCORES is empty." >&2
+  exit 1
+fi
+if [[ -z "${TEACHER_EVAL_SCORES:-}" && -n "${TEACHER_EVAL_CORR_SCORES:-}" ]]; then
+  echo "ERROR: TEACHER_EVAL_CORR_SCORES is set but TEACHER_EVAL_SCORES is empty." >&2
+  exit 1
+fi
+if [[ -z "${TEACHER_TRAIN_SCORES:-}" || -z "${TEACHER_EVAL_SCORES:-}" ]]; then
+  if [[ "${TEACHER_FUSE_MODE:-none}" != "none" ]]; then
+    echo "ERROR: teacher_fuse_mode=${TEACHER_FUSE_MODE} requires train/eval teacher prefix scores." >&2
+    exit 1
+  fi
 fi
 
 run_c1_prepare "train" "$TRAIN_INPUT_JSONL" "$C1_TRAIN_RUN_NAME" "${TRAIN_MAX_SAMPLES:-}" "$TEACHER_TRAIN_SCORES" "${TEACHER_TRAIN_CORR_SCORES:-}"

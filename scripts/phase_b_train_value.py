@@ -137,6 +137,7 @@ class TrainConfig:
     external_pair_domain_filter: str | None
     external_pair_min_confidence: float
     external_pair_use_confidence_weights: bool
+    external_pair_only: bool
     target_source: str
     target_source_missing_policy: str
     learning_rate: float
@@ -323,6 +324,15 @@ def _build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Use pair_confidence as per-pair sample weights in external ranking loss.",
+    )
+    parser.add_argument(
+        "--external-pair-only",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Disable internal C1 clean-vs-corrupt contrastive updates and train "
+            "ranking from external pairs only."
+        ),
     )
     parser.add_argument(
         "--target-source",
@@ -556,10 +566,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--checkpoint-selection-metric",
-        choices=["raw_brier", "posthoc_brier"],
+        choices=["raw_brier", "posthoc_brier", "corr_pair_acc", "corr_auc", "ranking_score"],
         default="raw_brier",
         help=(
             "Metric used for best-checkpoint selection. "
+            "`raw_brier`/`posthoc_brier` are calibration-driven (lower is better); "
+            "`corr_pair_acc`/`corr_auc`/`ranking_score` are ranking-driven (higher is better). "
             "`posthoc_brier` requires post-hoc calibration enabled."
         ),
     )
@@ -656,6 +668,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--external-pair-weight > 0 requires --external-pair-jsonl")
     if args.external_pair_jsonl is not None and not Path(args.external_pair_jsonl).exists():
         raise FileNotFoundError(f"External pair JSONL not found: {args.external_pair_jsonl}")
+    if bool(args.external_pair_only) and args.external_pair_weight <= 0.0:
+        raise ValueError("--external-pair-only requires --external-pair-weight > 0")
     if args.target_source not in {"q_mean_smoothed", "q_teacher", "q_fused"}:
         raise ValueError("--target-source has an unsupported value")
     if args.per_device_train_batch_size <= 0 or args.per_device_eval_batch_size <= 0:
@@ -714,6 +728,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if args.train_mode == "ranking_only" and not args.use_contrastive_loss:
         raise ValueError("--train-mode=ranking_only requires --use-contrastive-loss")
+    if bool(args.external_pair_only) and not bool(args.use_contrastive_loss):
+        raise ValueError("--external-pair-only requires --use-contrastive-loss")
     if args.train_mode == "two_stage" and not args.use_contrastive_loss:
         raise ValueError("--train-mode=two_stage requires --use-contrastive-loss")
     if args.checkpoint_selection_metric == "posthoc_brier" and args.posthoc_calibration == "none":
@@ -820,6 +836,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
         external_pair_min_confidence=float(args.external_pair_min_confidence),
         external_pair_use_confidence_weights=bool(args.external_pair_use_confidence_weights),
+        external_pair_only=bool(args.external_pair_only),
         target_source=str(args.target_source),
         target_source_missing_policy=str(args.target_source_missing_policy),
         learning_rate=float(args.learning_rate),
@@ -938,6 +955,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"external_pair_dom : {args.external_pair_domain_filter if args.external_pair_domain_filter else '<all>'}")
     print(f"external_pair_minc: {args.external_pair_min_confidence}")
     print(f"external_pair_conf: {args.external_pair_use_confidence_weights}")
+    print(f"external_pair_only: {bool(args.external_pair_only)}")
     print(f"external_num_pairs: {len(external_pairs)}")
     print(f"posthoc_calib     : {args.posthoc_calibration}")
     print(f"ckpt_metric       : {args.checkpoint_selection_metric}")
@@ -1366,7 +1384,15 @@ def main(argv: list[str] | None = None) -> int:
 
     train_curve: list[dict[str, Any]] = []
     train_target_mean = float(train_cache["targets"].mean().item())
-    best_eval_selection_brier = float("inf")
+    # D6: best-checkpoint selection can be calibration-driven (lower is better)
+    # or ranking-driven (higher is better). Determine direction once and keep it
+    # fixed for this run to avoid silent metric-direction drift.
+    selection_higher_is_better = _checkpoint_metric_higher_is_better(
+        str(args.checkpoint_selection_metric)
+    )
+    best_eval_selection_value = (
+        float("-inf") if selection_higher_is_better else float("inf")
+    )
     best_eval_metrics: dict[str, Any] | None = None
     best_eval_scored: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = None
 
@@ -1423,6 +1449,7 @@ def main(argv: list[str] | None = None) -> int:
             max_steps=(args.max_steps if args.max_steps > 0 else None),
             calibration_enabled=bool(stage_calibration_enabled),
             contrastive_enabled=bool(stage_contrastive_enabled),
+            enable_internal_contrastive=(not bool(args.external_pair_only)),
         )
         global_step = int(epoch_stats["global_step"])
         epoch_idx += 1
@@ -1458,12 +1485,22 @@ def main(argv: list[str] | None = None) -> int:
         train_curve.append(curve_row)
         _append_jsonl(train_curve_path, curve_row)
 
-        current_eval_brier = _resolve_checkpoint_brier(
+        current_selection_value, current_higher_is_better = _resolve_checkpoint_selection_value(
             eval_metrics=eval_metrics,
             checkpoint_selection_metric=args.checkpoint_selection_metric,
         )
-        if current_eval_brier < best_eval_selection_brier:
-            best_eval_selection_brier = float(current_eval_brier)
+        if current_higher_is_better != selection_higher_is_better:
+            raise RuntimeError(
+                "Checkpoint-selection metric direction changed within one run, "
+                "which should be impossible."
+            )
+        is_better = (
+            current_selection_value > best_eval_selection_value
+            if selection_higher_is_better
+            else current_selection_value < best_eval_selection_value
+        )
+        if is_better:
+            best_eval_selection_value = float(current_selection_value)
             best_eval_metrics = eval_metrics
             best_eval_scored = (eval_prefix_scores, eval_corruption_scores)
             if args.save_best_state:
@@ -1474,7 +1511,8 @@ def main(argv: list[str] | None = None) -> int:
                     extra_state={
                         "epoch": epoch_idx,
                         "global_step": global_step,
-                        "eval_selection_brier": best_eval_selection_brier,
+                        "eval_selection_metric": str(args.checkpoint_selection_metric),
+                        "eval_selection_value": float(best_eval_selection_value),
                     },
                 )
                 _write_posthoc_calibration_payload(
@@ -1535,12 +1573,19 @@ def main(argv: list[str] | None = None) -> int:
         "external_pair_stats": external_pair_stats,
         "external_pair_weight": float(args.external_pair_weight),
         "external_pair_source_balance": str(args.external_pair_source_balance),
+        "external_pair_only": bool(args.external_pair_only),
         "feature_cache": feature_cache_stats,
         "target_source_stats": {
             "train": train_target_source_stats,
             "eval": eval_target_source_stats,
         },
-        "best_eval_selection_brier": float(best_eval_selection_brier),
+        # Backward-compatible field names are kept for downstream readers.
+        "best_eval_selection_value": float(best_eval_selection_value),
+        "best_eval_selection_brier": (
+            float(best_eval_selection_value)
+            if str(args.checkpoint_selection_metric) in {"raw_brier", "posthoc_brier"}
+            else None
+        ),
         "checkpoint_selection_metric": str(args.checkpoint_selection_metric),
         "adaptive_loss_state": (
             {
@@ -1587,6 +1632,7 @@ def main(argv: list[str] | None = None) -> int:
         "external_pair_stats": external_pair_stats,
         "external_pair_weight": float(args.external_pair_weight),
         "external_pair_source_balance": str(args.external_pair_source_balance),
+        "external_pair_only": bool(args.external_pair_only),
         "teacher_coverage_ratio_train": float(train_target_source_stats["teacher_available_ratio"]),
         "teacher_coverage_ratio_eval": float(eval_target_source_stats["teacher_available_ratio"]),
         "teacher_disagreement_ratio_train": float(train_target_source_stats["teacher_disagree_ratio"]),
@@ -1649,6 +1695,7 @@ def main(argv: list[str] | None = None) -> int:
                 "external_pairs": len(external_pairs),
                 "external_pair_weight": float(args.external_pair_weight),
                 "external_pair_source_balance": str(args.external_pair_source_balance),
+                "external_pair_only": bool(args.external_pair_only),
             },
         ),
         encoding="utf-8",
@@ -1668,7 +1715,11 @@ def main(argv: list[str] | None = None) -> int:
     if selected_eval_metrics.get("calibration_posthoc") is not None:
         print(f"selected_post_bri : {selected_eval_metrics['calibration_posthoc']['brier_score']:.6f}")
     print(f"selected_criterion: {args.checkpoint_selection_metric}")
-    print(f"selected_brier    : {_resolve_checkpoint_brier(eval_metrics=selected_eval_metrics, checkpoint_selection_metric=args.checkpoint_selection_metric):.6f}")
+    selected_metric_value, _ = _resolve_checkpoint_selection_value(
+        eval_metrics=selected_eval_metrics,
+        checkpoint_selection_metric=args.checkpoint_selection_metric,
+    )
+    print(f"selected_metric_v : {float(selected_metric_value):.6f}")
     print(f"selected_pearson  : {selected_eval_metrics['calibration']['pearson']:.6f}")
     print(
         "teacher_cov_train : "
@@ -1693,9 +1744,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"adaptive_logvar_t : {float(adaptive_loss_state['log_var_contrastive'].detach().cpu().item()):.6f}")
     if selected_eval_metrics.get("corruption") is not None:
         print(f"corr_pair_acc     : {selected_eval_metrics['corruption']['pair_accuracy']:.6f}")
-        print(f"corr_auc          : {selected_eval_metrics['corruption']['auc_clean_vs_corrupt']:.6f}")
+    print(f"corr_auc          : {selected_eval_metrics['corruption']['auc_clean_vs_corrupt']:.6f}")
     print(f"external_pairs    : {len(external_pairs)}")
     print(f"external_pair_w   : {float(args.external_pair_weight):.4f}")
+    print(f"external_pair_only: {bool(args.external_pair_only)}")
     print(f"train_metrics     : {train_metrics_path}")
     print(f"eval_metrics      : {eval_metrics_path}")
     print(f"manifest          : {manifest_path}")
@@ -1957,6 +2009,7 @@ def _run_one_train_epoch(
     max_steps: int | None,
     calibration_enabled: bool = True,
     contrastive_enabled: bool = True,
+    enable_internal_contrastive: bool = True,
 ) -> dict[str, Any]:
     """Train the head for one epoch over cached feature tensors."""
     value_head.train()
@@ -2022,7 +2075,7 @@ def _run_one_train_epoch(
         loss_ctr = torch_module.zeros((), device=clean_features.device)
         loss_ctr_external = torch_module.zeros((), device=clean_features.device)
         used_ctr_pairs = False
-        if contrastive_enabled and lambda_contrastive > 0.0:
+        if enable_internal_contrastive and contrastive_enabled and lambda_contrastive > 0.0:
             # 对比分支先过 pair filter，再算 margin loss，尽量抑制噪声 pair。
             sample_mask = train_cache["has_primary_corruption"][batch_indices]
             sample_mask = _apply_contrastive_pair_filter(
@@ -2522,21 +2575,58 @@ def _compose_total_loss(
     return total, effective_ctr_weight
 
 
-def _resolve_checkpoint_brier(
+def _checkpoint_metric_higher_is_better(checkpoint_selection_metric: str) -> bool:
+    """Return whether the selection metric should be maximized."""
+    return checkpoint_selection_metric in {"corr_pair_acc", "corr_auc", "ranking_score"}
+
+
+def _resolve_checkpoint_selection_value(
     *,
     eval_metrics: dict[str, Any],
     checkpoint_selection_metric: str,
-) -> float:
-    """Resolve which Brier score drives best-checkpoint selection."""
+) -> tuple[float, bool]:
+    """Resolve checkpoint selection value and optimization direction.
+
+    Returns
+    -------
+    tuple[float, bool]
+        `(selection_value, higher_is_better)`.
+    """
     if checkpoint_selection_metric == "raw_brier":
-        return float(eval_metrics["calibration"]["brier_score"])
+        return float(eval_metrics["calibration"]["brier_score"]), False
     if checkpoint_selection_metric == "posthoc_brier":
         posthoc = eval_metrics.get("calibration_posthoc")
         if posthoc is None:
             raise ValueError(
                 "Checkpoint selection requested posthoc_brier, but no post-hoc calibration metrics are available"
             )
-        return float(posthoc["brier_score"])
+        return float(posthoc["brier_score"]), False
+    corruption = eval_metrics.get("corruption") or {}
+    if checkpoint_selection_metric == "corr_pair_acc":
+        pair_acc = corruption.get("pair_accuracy")
+        if pair_acc is None:
+            raise ValueError(
+                "Checkpoint selection requested corr_pair_acc, "
+                "but corruption.pair_accuracy is unavailable"
+            )
+        return float(pair_acc), True
+    if checkpoint_selection_metric == "corr_auc":
+        auc = corruption.get("auc_clean_vs_corrupt")
+        if auc is None:
+            raise ValueError(
+                "Checkpoint selection requested corr_auc, "
+                "but corruption.auc_clean_vs_corrupt is unavailable"
+            )
+        return float(auc), True
+    if checkpoint_selection_metric == "ranking_score":
+        pair_acc = corruption.get("pair_accuracy")
+        auc = corruption.get("auc_clean_vs_corrupt")
+        if pair_acc is None or auc is None:
+            raise ValueError(
+                "Checkpoint selection requested ranking_score, but one of "
+                "corruption.pair_accuracy / corruption.auc_clean_vs_corrupt is unavailable"
+            )
+        return float((float(pair_acc) + float(auc)) / 2.0), True
     raise ValueError(f"Unsupported checkpoint_selection_metric: {checkpoint_selection_metric!r}")
 
 

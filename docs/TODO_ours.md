@@ -174,7 +174,8 @@ Workstream checklist:
   - top-k corruption candidates per prefix (`--contrastive-max-corruptions-per-prefix`),
   - C2 stage scheduler (`--train-mode two_stage`).
 - [ ] D4: Run four-way ablation on StrategyQA smoke then full (new HQ groups pending full rerun confirmation)
-- [ ] D5: Evaluate promotion gates and decide whether to resume BCR-lite/ABR-lite
+- [ ] D5: Method-corrected matrix (MC target + PRM pair gate) smoke + full
+- [ ] D6: Evaluate promotion gates on D5 and decide whether to resume BCR-lite/ABR-lite
 
 Promotion gates:
 1. calibration gate:
@@ -186,6 +187,23 @@ If either gate fails:
 1. increase pair quality (higher-margin pairs, selective rollout top-up),
 2. run control teacher ablation before architecture expansion,
 3. do not start router RL.
+
+### 0.5.1 D5 Method-Correction Tasks (2026-03-05)
+
+- [x] Clarify diagnosis in docs:
+  - PRM direct-target route downgraded to ablation.
+- [x] Add runnable D5 groups in `scripts/run_phase_d_teacher_suite.sh`:
+  - `D5_STRATEGYQA_SMOKE_MC_CTRL`
+  - `D5_STRATEGYQA_SMOKE_MC_PRM_PAIR_GATE`
+  - `D5_STRATEGYQA_FULL_MC_CTRL`
+  - `D5_STRATEGYQA_FULL_MC_PRM_PAIR_GATE`
+- [x] Add one-click control bundle groups in `scripts/run_phase_cd_control_suite.sh`:
+  - `CD_METHOD_FIX_LIGHT`
+  - `CD_METHOD_FIX_FULL`
+- [x] Update unified report parser to ingest D5 logs:
+  - `scripts/phase_cd_compare_report.py`
+- [ ] Run D5 smoke pair (ctrl vs pair-gate) and publish first delta report.
+- [ ] Run D5 full pair (ctrl vs pair-gate) for promotion-grade decision.
 
 ---
 

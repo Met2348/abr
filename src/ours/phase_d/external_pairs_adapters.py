@@ -1,4 +1,17 @@
-"""Source adapters for building canonical Phase D external pair artifacts."""
+"""Source adapters for building canonical Phase D external pair artifacts.
+
+Why this file exists
+--------------------
+External process-supervision datasets use heterogeneous schemas. This module
+adapts those raw formats into one canonical `(prompt, chosen, rejected)` pair
+contract so Phase D can train/evaluate with deterministic behavior.
+
+What this file contains
+-----------------------
+1. Direct pair loaders (for example R-PRM, PRMBench preview).
+2. Step-label converters (for example Math-Shepherd, RLHFlow, PRM800K).
+3. Shared quality filters to prevent degenerate pair artifacts.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +20,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 from .external_pairs import ExternalPairRecord
 
@@ -187,6 +200,44 @@ def load_math_shepherd_pairs(
     return rows
 
 
+def load_prm800k_pairs(
+    *,
+    path: Path,
+    config: PairBuildConfig,
+    max_pairs: int | None = None,
+) -> list[ExternalPairRecord]:
+    """Convert PRM800K records into canonical pair candidates.
+
+    Notes
+    -----
+    PRM800K releases have multiple community mirrors and schema variants.
+    This loader intentionally supports several common shapes and gracefully
+    skips rows that cannot be parsed into explicit `+/-` step labels.
+    """
+    config.validate()
+    files = _collect_prm800k_files(path)
+    rows: list[ExternalPairRecord] = []
+    for file_path in files:
+        for row_idx, payload in enumerate(_iter_json_records(file_path), start=1):
+            prompt = _extract_prm800k_prompt(payload)
+            step_labels = _extract_step_labels_from_prm800k_payload(payload)
+            converted = _convert_step_labels_to_pairs(
+                prompt_text=f"{prompt}\n\n",
+                step_labels=step_labels,
+                source_tag="prm800k",
+                domain_tag="general_math",
+                config=config,
+                base_metadata={
+                    "source_file": str(file_path),
+                    "source_row_index": int(row_idx),
+                },
+            )
+            rows.extend(converted)
+            if max_pairs is not None and len(rows) >= int(max_pairs):
+                return rows[: int(max_pairs)]
+    return rows
+
+
 def load_rlhflow_pairs(
     *,
     mistral_root: Path | None,
@@ -316,6 +367,62 @@ def _iter_parquet_rows(
                 yield payload
 
 
+def _collect_prm800k_files(path: Path) -> list[Path]:
+    """Resolve PRM800K input path into concrete JSON/JSONL files."""
+    if not path.exists():
+        raise FileNotFoundError(f"PRM800K path not found: {path}")
+    if path.is_file():
+        return [path]
+
+    files = sorted(path.rglob("*.jsonl")) + sorted(path.rglob("*.json"))
+    if not files:
+        raise FileNotFoundError(f"No JSON/JSONL files found under PRM800K path: {path}")
+    return files
+
+
+def _iter_json_records(path: Path) -> Iterator[dict[str, Any]]:
+    """Yield JSON object rows from JSONL or JSON files.
+
+    Supported JSON structures:
+    1. JSONL: one dict per line.
+    2. JSON list: `[ {...}, {...} ]`
+    3. JSON dict with list payload under common keys such as `data`, `records`,
+       or `examples`.
+    """
+    suffix = path.suffix.lower()
+    if suffix == ".jsonl":
+        with path.open("r", encoding="utf-8") as handle:
+            for line_no, raw in enumerate(handle, start=1):
+                text = raw.strip()
+                if not text:
+                    continue
+                payload = json.loads(text)
+                if isinstance(payload, dict):
+                    yield payload
+                else:
+                    raise TypeError(f"{path}:{line_no} must be a JSON object")
+        return
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(payload, list):
+        for row in payload:
+            if isinstance(row, dict):
+                yield row
+        return
+    if isinstance(payload, dict):
+        for key in ("data", "records", "examples", "rows"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                for row in value:
+                    if isinstance(row, dict):
+                        yield row
+                return
+        # Some mirrors store one sample per JSON file.
+        yield payload
+        return
+    raise TypeError(f"Unsupported JSON payload type in {path}: {type(payload)!r}")
+
+
 def _extract_problem_prefix(text: str) -> str:
     """Extract question/problem prefix before step markers."""
     normalized = " ".join(str(text).replace("\r", "\n").split())
@@ -323,6 +430,29 @@ def _extract_problem_prefix(text: str) -> str:
     if not match:
         return normalized[:512]
     return match[0].strip()[:512]
+
+
+def _extract_prm800k_prompt(payload: dict[str, Any]) -> str:
+    """Extract a question/prompt string from one PRM800K row."""
+    for key in ("question", "problem", "prompt", "input", "query"):
+        value = payload.get(key)
+        text = _coerce_question_text(value)
+        if text:
+            return text[:1024]
+    # Fallback to empty prompt to keep deterministic behavior.
+    return ""
+
+
+def _coerce_question_text(value: Any) -> str:
+    """Coerce mixed question payloads into one plain string."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("problem", "question", "prompt", "text", "input"):
+            nested = value.get(key)
+            if isinstance(nested, str) and nested.strip():
+                return nested.strip()
+    return ""
 
 
 def _extract_step_labels_from_math_shepherd(label_text: str) -> list[tuple[str, str]]:
@@ -341,6 +471,94 @@ def _extract_step_labels_from_math_shepherd(label_text: str) -> list[tuple[str, 
             continue
         rows.append((step_text, label))
     return rows
+
+
+def _extract_step_labels_from_prm800k_payload(payload: dict[str, Any]) -> list[tuple[str, str]]:
+    """Extract `(step_text, +/-)` rows from one PRM800K-like payload."""
+    # Path A: textual `label` with "Step ... +/-" format.
+    raw_label = payload.get("label")
+    if isinstance(raw_label, str):
+        parsed = _extract_step_labels_from_suffix_text(raw_label)
+        if parsed:
+            return parsed
+
+    # Path B: explicit step container under common fields.
+    step_candidates: list[Any] = []
+    if isinstance(payload.get("steps"), list):
+        step_candidates.extend(list(payload["steps"]))
+    label_obj = payload.get("label")
+    if isinstance(label_obj, dict):
+        if isinstance(label_obj.get("steps"), list):
+            step_candidates.extend(list(label_obj.get("steps")))
+        if isinstance(label_obj.get("process"), list):
+            step_candidates.extend(list(label_obj.get("process")))
+    if isinstance(payload.get("process"), list):
+        step_candidates.extend(list(payload["process"]))
+
+    rows: list[tuple[str, str]] = []
+    for step in step_candidates:
+        parsed = _extract_one_step_label(step)
+        if parsed is None:
+            continue
+        rows.append(parsed)
+    return rows
+
+
+def _extract_step_labels_from_suffix_text(text: str) -> list[tuple[str, str]]:
+    """Parse lines like `Step 2: ... +` or `Step 3: ... -`."""
+    rows: list[tuple[str, str]] = []
+    lines = [line.strip() for line in str(text).replace("\r", "\n").split("\n")]
+    for line in lines:
+        if not line:
+            continue
+        match = re.match(r"^(Step\s+\d+\s*:\s*.*?)(?:\s+([+-]))\s*$", line)
+        if not match:
+            continue
+        step_text = str(match.group(1)).strip()
+        sign = str(match.group(2)).strip()
+        if sign in {"+", "-"}:
+            rows.append((step_text, sign))
+    return rows
+
+
+def _extract_one_step_label(step: Any) -> tuple[str, str] | None:
+    """Extract one `(step_text, +/-)` tuple from mixed step payload formats."""
+    if isinstance(step, str):
+        # String-only step cannot infer correctness label.
+        return None
+    if not isinstance(step, dict):
+        return None
+
+    text = ""
+    for key in ("text", "content", "step", "completion", "output"):
+        value = step.get(key)
+        if isinstance(value, str) and value.strip():
+            text = value.strip()
+            break
+    if text == "":
+        return None
+
+    sign = _parse_sign_value(
+        step.get("label", step.get("rating", step.get("is_correct", step.get("correct", step.get("value")))))
+    )
+    if sign is None:
+        return None
+    return text, sign
+
+
+def _parse_sign_value(value: Any) -> str | None:
+    """Map mixed label/rating payloads to `+` or `-`."""
+    if isinstance(value, bool):
+        return "+" if value else "-"
+    if isinstance(value, (int, float)):
+        return "+" if float(value) > 0 else "-"
+    if isinstance(value, str):
+        norm = value.strip().lower()
+        if norm in {"+", "correct", "true", "yes", "good", "positive", "1"}:
+            return "+"
+        if norm in {"-", "incorrect", "false", "no", "bad", "negative", "0"}:
+            return "-"
+    return None
 
 
 def _extract_step_labels_from_conversations(conversations: list[dict[str, Any]]) -> list[tuple[str, str]]:
