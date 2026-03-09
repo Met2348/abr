@@ -168,6 +168,33 @@ def contrastive_margin_loss(
     return _weighted_mean(raw, sample_weights=sample_weights, torch_module=torch_module)
 
 
+def anti_saturation_logit_penalty(
+    logits: Any,
+    *,
+    logit_threshold: float,
+    torch_module: Any,
+):
+    """Penalize over-confident logits outside a safe band.
+
+    Why this loss exists
+    --------------------
+    In D6-T ranking runs we observed occasional seed-level collapse where both
+    chosen and rejected scores saturate near 1.0. That makes margins tiny and
+    pair ranking unstable. This penalty keeps logits in a softer range:
+
+    `penalty = mean(relu(abs(logit) - threshold)^2)`
+
+    A value of `threshold=4.0` roughly corresponds to sigmoid outputs around
+    `[0.018, 0.982]`, which is still confident but avoids hard saturation.
+    """
+    if logits.numel() == 0:
+        raise ValueError("anti_saturation_logit_penalty expects a non-empty tensor")
+    if float(logit_threshold) <= 0.0:
+        raise ValueError("`logit_threshold` must be > 0")
+    overflow = torch_module.relu(torch_module.abs(logits) - float(logit_threshold))
+    return torch_module.mean(overflow * overflow)
+
+
 def bellman_consistency_loss(
     current_scores: Any,
     next_scores_stopgrad: Any,
@@ -219,5 +246,7 @@ def _weighted_mean(
         )
     if bool((sample_weights < 0).any().item()):
         raise ValueError("`sample_weights` must be non-negative")
+    # 中文：即使过滤后所有权重都变成 0，也不允许出现 NaN。
+    # 这里返回 0 附近的稳定值，比把整个 epoch 训练炸掉更容易诊断。
     denom = torch_module.sum(sample_weights).clamp_min(1e-8)
     return torch_module.sum(values * sample_weights) / denom

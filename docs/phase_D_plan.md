@@ -6,6 +6,8 @@ Date baseline: 2026-03-03.
 
 Methodology correction update: 2026-03-05.
 
+Strategic benchmark-scope correction: 2026-03-10.
+
 ## 0. Document Governance (Source of Truth)
 
 Primary execution document:
@@ -200,6 +202,68 @@ treated as a direction-lock for D6 and later phases.
 3. Use calibration as guardrail, not as primary success proxy.
 4. Only after ranking gates pass, resume ABR/BCR downstream expansion.
 
+## 1.4 Strategic Pivot: Benchmark Scope Correction (2026-03-10)
+
+This section is now authoritative for what Phase D is trying to prove.
+
+### A. New empirical facts that forced the pivot
+
+1. `DT2_MATH_SHEPHERD_SEED3_STABLE`
+   - proved the ranking branch is learnable on high-quality external same-question triplets.
+2. `DT2_MATH_SHEPHERD_SEED3_STABLE_C1_TRANSFER`
+   - proved that direct transfer back to StrategyQA remains near-random.
+3. `DT3_PRM800K_SEED3_STABLE`
+   - proved `PRM800K` under the current adapter is a stable weak source, not a hidden strong source.
+4. `DB3_STRATEGYQA_BRIDGE_FULL_RANK_SEED3`
+   - proved bridge-style ranking-only continue training can improve StrategyQA in-domain corruption ranking.
+5. `DB4_STRATEGYQA_BRIDGE_FULL_JOINT_SEED3`
+   - proved better calibration can still harm ranking, so the main object is not well described by scalar regression alone.
+
+### B. New dataset-level diagnosis
+
+1. Public StrategyQA resources do not provide PRM-grade process supervision.
+2. Available public fields are mainly:
+   - question,
+   - final yes/no answer,
+   - decomposition,
+   - evidence paragraphs.
+3. What is missing for value-head training:
+   - per-step quality labels,
+   - high-quality chosen/rejected process pairs,
+   - verifier-style step correctness targets.
+4. Therefore continuing to use StrategyQA as the primary supervised benchmark
+   risks a `garbage in, garbage out` failure mode.
+
+### C. Updated Phase D benchmark policy
+
+1. StrategyQA is downgraded from:
+   - primary supervised benchmark
+   to:
+   - downstream transfer / bridge / OOD benchmark.
+2. Main supervised benchmark track becomes:
+   - training / supervision:
+     - `Math-Shepherd`
+     - `PRM800K`
+   - evaluation:
+     - `ProcessBench`
+     - `PRMBench`
+3. Optional future non-math logic validation track:
+   - `ProofWriter`
+   - `EntailmentBank`
+   - `FOLIO`
+   - `FoVer`
+
+### D. Execution implications
+
+1. Existing StrategyQA results remain important, but their role changes:
+   - `DT2/DT3/DB3/DB4` become methodology evidence and transfer evidence.
+2. Promotion of the value-head method should first be decided on PRM-grade
+   benchmarks, then checked for transfer back to StrategyQA.
+3. Future Phase D engineering should prioritize:
+   - dataset adapters for the new primary benchmarks,
+   - benchmark-specific suites and promotion gates,
+   - transfer evaluation back to StrategyQA only after primary validation passes.
+
 ## 2. Phase C Closeout (What Is Done, What Remains)
 
 ### 2.1 Completed in Phase C
@@ -232,11 +296,12 @@ Interpretation: Phase C is not a dead end; it is a successful infrastructure pha
 
 ## 3. Phase D Objective
 
-Use external PRM teachers to improve value supervision quality while preserving the existing in-house C1/C2 pipeline and ABR research identity.
+Use external PRM-quality supervision to validate ranking-based value learning on benchmarks that genuinely support process supervision, while preserving the existing in-house C1/C2 pipeline and ABR research identity.
 
 Core objective:
 - improve label quality first,
-- then re-evaluate whether value head becomes routing-usable.
+- then re-evaluate whether value head becomes routing-usable,
+- and only then test transfer back to StrategyQA.
 
 ## 4. Phase D Scope and Non-Goals
 
@@ -1569,6 +1634,32 @@ Purpose:
      ranking signal (`good prefix > bad prefix`).
 2. Decouple this proof from current StrategyQA/GSM8K weak-label bottlenecks.
 
+Status update (2026-03-06):
+1. `DT2_MATH_SHEPHERD_SEED3_STABLE` has now passed this branch gate.
+2. Confirmed metrics:
+   - `mean_pair_acc=0.8154`
+   - `mean_auc=0.7857`
+   - `std_pair_acc=0.0075`
+   - `std_auc=0.0086`
+3. Interpretation:
+   - the D6-T branch is no longer blocked by seed instability under the stable DT2 recipe,
+   - the next branch-critical questions are now:
+     - transfer back to StrategyQA in-domain corruption metrics,
+     - robustness under mixed-source external pair training.
+4. Additional strict diagnosis (2026-03-07):
+   - `DT4_MIXED_MS_PRM800K_SEED3_STABLE` only passes marginally.
+   - Source-level held-out metrics show:
+     - `math_shepherd`: clearly useful,
+     - `prm800k`: near-random under current adapter/training recipe.
+   - Therefore `DT4` should currently be interpreted as:
+     - "the stable recipe survives some source mixing because Math-Shepherd still dominates the usable signal",
+     - not:
+     - "multi-source external supervision is solved".
+5. Transfer evidence status:
+   - the earlier run `phase_d6t_transfer_0306_2236` is invalid as transfer evidence,
+   - because `C1 standalone eval` did not actually execute (`c1_eval_run_dir=null` for all seeds),
+   - this was traced to a suite config bug and has now been fixed.
+
 ### 19.1 Hypothesis and pass criteria
 
 Hypothesis:
@@ -1683,6 +1774,110 @@ If `DT2` passes and `DT4` passes:
 If `DT2` passes but `DT4` fails:
 1. keep single-source high-quality data path for short-term progress,
 2. postpone mixed-source expansion until shift-control improves.
+
+Immediate next execution after the 2026-03-06 DT2 stable pass:
+1. re-run `DT2_MATH_SHEPHERD_SEED3_STABLE_C1_TRANSFER`
+   - goal:
+     - test whether external ranking learnability transfers to our C1 corruption metrics,
+     - now with `RUN_C1_STANDALONE_EVAL` force-enabled in the suite.
+2. run `DT3_PRM800K_SEED3_STABLE`
+   - goal:
+     - isolate whether `PRM800K` itself is learnable under the stable DT2 recipe,
+     - decide whether `DT4` weakness is a real source-quality problem.
+3. keep `DT4_MIXED_MS_PRM800K_SEED3_STABLE` as the mixed-source reference point
+   - current reading:
+     - partial pass only,
+     - useful as comparison, not yet as a promotion-level positive result.
+
+Immediate next execution after the 2026-03-07 transfer/prm800k audit:
+1. `DT2_MATH_SHEPHERD_SEED3_STABLE_C1_TRANSFER` result is now valid and negative:
+   - external held-out is strong,
+   - in-domain C1 transfer remains near-random.
+2. `DT3_PRM800K_SEED3_STABLE` is now valid and weak:
+   - current adapter path is not strong enough for mainline promotion.
+3. Therefore the next official path is `Bridge`, not more direct-transfer LR search:
+   - stage-1:
+     - external Math-Shepherd ranking pretrain,
+   - stage-2:
+     - warm-start the same value head on StrategyQA in-domain CQR/C1 data,
+   - decision target:
+     - whether this bridge can recover in-domain `corr_pair_acc` / `corr_auc`.
+
+### 19.8A Bridge branch (new mainline after transfer audit)
+
+Bridge goal:
+1. Separate "can learn external ranking" from "can use that ranking on our task".
+2. Test whether a small same-head warm-start is enough to carry useful ranking
+   geometry into StrategyQA corruption discrimination.
+
+Bridge implementation contract:
+1. Stage-1 must reuse the stable DT2 Math-Shepherd recipe.
+2. Stage-2 must reuse existing StrategyQA CQR/C1 artifacts.
+3. Only the value-head weights are transferred:
+   - no optimizer state restore,
+   - no backbone finetune,
+   - no adapter change.
+4. Stage-2 checkpoint selection stays in-domain and ranking-led:
+   - default `corr_auc`.
+
+Bridge suite groups:
+1. `DB1_STRATEGYQA_BRIDGE_SMOKE_RANK`
+   - one-seed smoke,
+   - stage-2 ranking-only,
+   - purpose: wiring validation.
+2. `DB2_STRATEGYQA_BRIDGE_SMOKE_JOINT`
+   - one-seed smoke,
+   - stage-2 joint CQR-style continue training,
+   - purpose: check whether calibration auxiliary is still compatible after warm-start.
+3. `DB3_STRATEGYQA_BRIDGE_FULL_RANK_SEED3`
+   - main evaluation,
+   - stage-2 ranking-only,
+   - 3 seeds.
+4. `DB4_STRATEGYQA_BRIDGE_FULL_JOINT_SEED3`
+   - main comparison,
+   - stage-2 joint objective,
+   - 3 seeds.
+
+Current implementation status:
+1. `scripts/run_phase_d_bridge_suite.sh` is implemented.
+2. `scripts/phase_b_train_value.py` now supports:
+   - `--init-value-head-path`
+   - for stage-2 warm-start from stage-1 `best_value_head.pt`.
+3. Bridge smoke was executed successfully:
+   - `phase_d_bridge_devsmoke2`
+   - confirmed:
+     - pair prep,
+     - stage-1 train,
+     - stage-1 external eval,
+     - stage-2 warm-start,
+     - final summary.
+
+Bridge commands:
+```bash
+# DB1: smoke, ranking-only bridge
+ACTIVE_PHASE_DBR_GROUP=DB1_STRATEGYQA_BRIDGE_SMOKE_RANK \
+RUN_PREFIX=phase_d_bridge_smoke_rank_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_d_bridge_suite.sh
+
+# DB2: smoke, joint bridge
+ACTIVE_PHASE_DBR_GROUP=DB2_STRATEGYQA_BRIDGE_SMOKE_JOINT \
+RUN_PREFIX=phase_d_bridge_smoke_joint_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_d_bridge_suite.sh
+
+# DB3: full seed-3 ranking bridge
+ACTIVE_PHASE_DBR_GROUP=DB3_STRATEGYQA_BRIDGE_FULL_RANK_SEED3 \
+RUN_PREFIX=phase_d_bridge_full_rank_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_d_bridge_suite.sh
+
+# DB4: full seed-3 joint bridge
+ACTIVE_PHASE_DBR_GROUP=DB4_STRATEGYQA_BRIDGE_FULL_JOINT_SEED3 \
+RUN_PREFIX=phase_d_bridge_full_joint_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_d_bridge_suite.sh
+```
 
 ### 19.8 Concrete execution checklist (D6T-0 -> D6T-5)
 

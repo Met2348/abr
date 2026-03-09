@@ -55,31 +55,46 @@ New BCR/ABR implementation work should go to new Phase B+ scripts/modules.
 
 ---
 
-## 0.2 Current Real Priorities (2026-03-03, Phase D Kickoff)
+## 0.2 Current Real Priorities (2026-03-10, Strategic Pivot)
 
 This is the operational priority list now. Earlier generic checklists below should
 be read in this order.
 
-1. Freeze Phase B PEFT conclusions:
-   - StrategyQA PEFT is stable and positive.
-   - GSM8K full long-CoT PEFT suffers late-run drift and should use checkpoint selection, not final-checkpoint reporting.
-2. Phase D (official active track): external-PRM-supported value supervision.
-   - add teacher sidecar scoring on existing C1 artifacts,
-   - fuse `q_mc` and `q_teacher` into `q_fused`,
-   - re-train C2 with explicit target-source ablations (`mc`, `teacher`, `fused`).
-3. Promote only if both gates pass:
-   - calibration beats trivial baseline reproducibly,
-   - corruption ordering becomes clearly above random.
-4. Only after promotion gate:
-   - restart BCR-lite (`L_sft + lambda_B * L_Bellman`),
+1. Freeze the newest StrategyQA conclusions correctly:
+   - `DB3` is a real positive bridge result (`corr_pair_acc/corr_auc` both improve),
+   - `DB4` is the key counterexample showing calibration can fight ranking,
+   - these are now methodology/transfer evidence, not proof that StrategyQA is the right primary supervised benchmark.
+2. Official mainline is no longer "train value head mainly on StrategyQA".
+   - Reason:
+     - StrategyQA lacks public PRM-grade step-quality supervision,
+     - continuing to use it as the main supervised benchmark risks `garbage in, garbage out`.
+3. New primary benchmark track:
+   - training / supervision:
+     - `Math-Shepherd`
+     - `PRM800K`
+   - evaluation:
+     - `ProcessBench`
+     - `PRMBench`
+4. StrategyQA remains in scope, but only as:
+   - bridge continue-training target,
+   - downstream transfer benchmark,
+   - OOD stress test.
+5. Only after the value-head/ranking method is validated on the new primary benchmarks:
+   - resume BCR-lite,
    - then ABR-lite router,
    - then router-only RL.
 
 Immediate no-go rules:
-1. No router RL on GSM8K first.
-2. No joint LM/value/router RL as the first RL experiment.
-3. No naive clipped short-CoT supervision reuse for GSM8K.
+1. No more "StrategyQA first" assumption for value-head mainline validation.
+2. No router RL before the new primary benchmark track passes ranking gates.
+3. No joint LM/value/router RL as the first RL experiment.
 4. No final-checkpoint reporting on GSM8K when checkpoint sweep data exists.
+
+Override note:
+1. Later occurrences of "StrategyQA first" in this file are historical design
+   context from early Phase C/D planning.
+2. Unless a section explicitly says "transfer" or "downstream evaluation",
+   the new 2026-03-10 benchmark policy wins.
 
 ---
 
@@ -176,6 +191,10 @@ Workstream checklist:
 - [ ] D4: Run four-way ablation on StrategyQA smoke then full (new HQ groups pending full rerun confirmation)
 - [ ] D5: Method-corrected matrix (MC target + PRM pair gate) smoke + full
 - [ ] D6: Evaluate promotion gates on D5 and decide whether to resume BCR-lite/ABR-lite
+- [ ] D7: Benchmark migration
+  - freeze StrategyQA as transfer-only for value-head validation,
+  - make `Math-Shepherd + PRM800K` the main supervised track,
+  - wire `ProcessBench + PRMBench` as the main external evaluation gate.
 
 Promotion gates:
 1. calibration gate:

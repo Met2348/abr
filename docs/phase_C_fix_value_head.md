@@ -12,6 +12,18 @@
 > 2. 将“PRM 直接作为 `q_teacher/q_fused` 主监督”降级为消融路径；
 > 3. 新主线改为：`MC target + PRM pair-quality gate`（PRM主要做排序/筛选信号）。
 
+> 状态更新（2026-03-10，战略重定向）：
+> 1. `DB3`/`DB4` 已证明：
+>    - ranking-only bridge 在 StrategyQA 上可以产生真实增益，
+>    - 但 scalar/joint calibration 目标会系统性伤害 ranking。
+> 2. 联网调研结论：
+>    - StrategyQA 没有公开的 PRM 级逐步推理质量标注，
+>    - 因而不再适合作为 value head 主监督 benchmark。
+> 3. 本文档从此定位为：
+>    - Phase C/StrategyQA 失败模式与修复尝试的历史诊断备忘，
+>    - 供后续做消融和方法论回顾使用；
+>    当前主验证应迁移到具备高质量步骤监督的数据集。
+
 ---
 
 ## 0.5 关键纠偏结论（2026-03-05）

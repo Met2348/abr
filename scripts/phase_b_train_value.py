@@ -45,6 +45,7 @@ python -u scripts/phase_b_train_value.py \
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import random
@@ -111,6 +112,7 @@ from ours.phase_b.value_head import (  # noqa: E402
     write_value_head_config_json,
 )
 from ours.phase_b.value_losses import (  # noqa: E402
+    anti_saturation_logit_penalty,
     binary_cross_entropy_calibration_loss,
     contrastive_margin_loss,
     mean_squared_calibration_loss,
@@ -134,6 +136,7 @@ class TrainConfig:
     external_pair_weight: float
     external_pair_max_train_samples: int | None
     external_pair_source_balance: str
+    external_pair_permutation_mode: str
     external_pair_domain_filter: str | None
     external_pair_min_confidence: float
     external_pair_use_confidence_weights: bool
@@ -157,6 +160,8 @@ class TrainConfig:
     calibration_sample_weighting: str
     calibration_weight_floor: float
     calibration_weight_gamma: float
+    anti_saturation_weight: float
+    anti_saturation_logit_threshold: float
     lambda_contrastive: float
     contrastive_margin: float
     contrastive_pair_filter: str
@@ -186,10 +191,12 @@ class TrainConfig:
     dtype: str
     device_map: str
     require_cuda: bool
+    strict_determinism: bool
     logging_steps: int
     feature_cache_root: str
     feature_cache_mode: str
     feature_cache_lock_timeout_sec: float
+    init_value_head_path: str | None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable config payload."""
@@ -211,6 +218,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run output root for C2 training artifacts.",
     )
     parser.add_argument("--run-name", default="phase_c_value")
+    parser.add_argument(
+        "--init-value-head-path",
+        type=Path,
+        default=None,
+        help=(
+            "Optional warm-start checkpoint for the small value head itself. "
+            "This is the key hook for bridge experiments: stage-1 can learn on "
+            "external triplets, then stage-2 continues on in-domain C1/CQR pairs "
+            "from the saved `best_value_head.pt`."
+        ),
+    )
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument("--max-eval-samples", type=int, default=None)
     parser.add_argument("--max-corruption-variants-eval", type=int, default=None)
@@ -303,6 +321,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Sampling policy for external pairs. "
             "`uniform` does round-robin across source_tag buckets."
+        ),
+    )
+    parser.add_argument(
+        "--external-pair-permutation-mode",
+        choices=["random", "stable_hash"],
+        default="random",
+        help=(
+            "How to permute external pairs inside each epoch. "
+            "`random` follows seed-dependent shuffling; "
+            "`stable_hash` uses pair_id-hash deterministic ordering to reduce seed variance."
         ),
     )
     parser.add_argument(
@@ -441,6 +469,24 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="Optional exponent applied to calibration sample weights after floor-clamp.",
+    )
+    parser.add_argument(
+        "--anti-saturation-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight for anti-saturation regularization on value-head logits. "
+            "0 disables this branch."
+        ),
+    )
+    parser.add_argument(
+        "--anti-saturation-logit-threshold",
+        type=float,
+        default=4.0,
+        help=(
+            "Safe-band threshold for anti-saturation penalty. "
+            "Penalty applies on relu(|logit|-threshold)^2."
+        ),
     )
     parser.add_argument("--lambda-contrastive", type=float, default=1.0)
     parser.add_argument("--contrastive-margin", type=float, default=0.1)
@@ -626,12 +672,107 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Fail fast if CUDA is unavailable for the frozen-backbone encoding stage.",
     )
     parser.add_argument(
+        "--strict-determinism",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Enable stricter deterministic backend settings "
+            "(deterministic kernels, disable cudnn benchmark, disable TF32). "
+            "Useful for seed-stability diagnosis."
+        ),
+    )
+    parser.add_argument(
         "--save-best-state",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Persist the best eval-Brier checkpoint separately from the final head.",
     )
     return parser
+
+
+def _initialize_value_head_from_checkpoint(
+    *,
+    value_head: Any,
+    current_config: ValueHeadConfig,
+    checkpoint_path: Path | None,
+) -> dict[str, Any] | None:
+    """Warm-start the current value head from an earlier saved checkpoint.
+
+    This is the bridge hook for Phase D:
+    1. Stage-1 learns ranking on external triplets.
+    2. Stage-2 reuses the learned head weights and continues on in-domain
+       StrategyQA C1/CQR supervision.
+
+    We do not restore optimizer/scheduler state here. The point is to transfer
+    the head parameters, not to resume one interrupted run.
+    """
+    if checkpoint_path is None:
+        return None
+    resolved = Path(checkpoint_path)
+    init_head, init_config, init_extra = load_value_head_checkpoint(resolved, map_location="cpu")
+    if int(init_config.hidden_size) != int(current_config.hidden_size):
+        raise ValueError(
+            "Warm-start checkpoint hidden_size mismatch: "
+            f"checkpoint={init_config.hidden_size}, current={current_config.hidden_size}"
+        )
+    if str(init_config.pooling) != str(current_config.pooling):
+        raise ValueError(
+            "Warm-start checkpoint pooling mismatch: "
+            f"checkpoint={init_config.pooling!r}, current={current_config.pooling!r}"
+        )
+    incompatible = value_head.load_state_dict(init_head.state_dict(), strict=True)
+    missing = list(getattr(incompatible, "missing_keys", []))
+    unexpected = list(getattr(incompatible, "unexpected_keys", []))
+    if missing or unexpected:
+        raise RuntimeError(
+            "Warm-start checkpoint could not be loaded cleanly: "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+    return {
+        "path": str(resolved),
+        "checkpoint_config": init_config.to_dict(),
+        "checkpoint_extra_state": init_extra,
+        "config_mismatch_notes": {
+            # dropout/init_std do not change tensor shapes, so we allow them but
+            # persist the difference for later debugging and report writing.
+            "dropout_prob_changed": (
+                float(init_config.dropout_prob) != float(current_config.dropout_prob)
+            ),
+            "init_std_changed": float(init_config.init_std) != float(current_config.init_std),
+        },
+    }
+
+
+def _filter_corruptions_to_loaded_eval_examples(
+    *,
+    eval_examples: list[ValueSupervisionExample],
+    eval_corruptions: list[CorruptionVariant],
+    max_variants: int | None,
+) -> tuple[list[CorruptionVariant], dict[str, int]]:
+    """Keep only corruption rows whose clean prefix still exists in eval examples.
+
+    Why this matters:
+    - `--max-eval-samples` truncates the clean eval prefix table.
+    - Corruption artifacts are stored separately and therefore do not
+      automatically follow that truncation.
+    - If we do not realign them here, later evaluation will try to look up a
+      clean prefix score that was never computed and crash with `KeyError`.
+    """
+    allowed_prefix_ids = {str(example.prefix_id) for example in eval_examples}
+    filtered = [
+        variant
+        for variant in eval_corruptions
+        if str(variant.clean_prefix_id) in allowed_prefix_ids
+    ]
+    stats = {
+        "before_alignment": int(len(eval_corruptions)),
+        "after_alignment": int(len(filtered)),
+        "dropped_for_missing_clean_prefix": int(len(eval_corruptions) - len(filtered)),
+    }
+    if max_variants is not None:
+        filtered = filtered[: int(max_variants)]
+    stats["after_max_variants"] = int(len(filtered))
+    return filtered, stats
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -716,6 +857,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--calibration-weight-floor must be <= 1")
     if args.calibration_weight_gamma <= 0.0:
         raise ValueError("--calibration-weight-gamma must be > 0")
+    if args.anti_saturation_weight < 0.0:
+        raise ValueError("--anti-saturation-weight must be >= 0")
+    if args.anti_saturation_logit_threshold <= 0.0:
+        raise ValueError("--anti-saturation-logit-threshold must be > 0")
     if args.calibration_loss == "bce_mse" and (
         args.calibration_mse_weight == 0.0 and args.calibration_bce_weight == 0.0
     ):
@@ -770,6 +915,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     eval_corruptions, _ = load_corruption_variants(
         args.eval_dir,
+        max_variants=None,
+    )
+    eval_corruptions, eval_corruption_alignment_stats = _filter_corruptions_to_loaded_eval_examples(
+        eval_examples=eval_examples,
+        eval_corruptions=eval_corruptions,
         max_variants=args.max_corruption_variants_eval,
     )
     assert_phase_c_compatibility(train_manifest, eval_manifest)
@@ -792,6 +942,9 @@ def main(argv: list[str] | None = None) -> int:
     external_pair_stats: dict[str, Any] | None = None
     external_domain_filter = _parse_csv_allow_list(str(args.external_pair_domain_filter))
     if args.external_pair_jsonl is not None:
+        # 中文：external pair 是 D 阶段从外部数据构造的排序监督。
+        # 这里先在 CPU 侧做 domain/confidence 过滤，避免后面把一堆无效 pair
+        # 也编码进 cache，白白消耗显存和编码时间。
         external_pairs, external_pair_stats = load_external_pair_jsonl(
             Path(args.external_pair_jsonl),
             max_samples=args.external_pair_max_train_samples,
@@ -799,6 +952,8 @@ def main(argv: list[str] | None = None) -> int:
             allowed_domains=external_domain_filter,
         )
         if args.external_pair_weight > 0.0 and not external_pairs:
+            # 中文：这是典型配置错误，例如 min_confidence 设太高。
+            # 必须在训练开始前显式失败，不能悄悄退化成“无 external pair”训练。
             raise ValueError(
                 "External pair branch was enabled, but no external pairs survived filtering"
             )
@@ -814,7 +969,14 @@ def main(argv: list[str] | None = None) -> int:
     torch, AutoModelForCausalLM, AutoTokenizer = _import_runtime_deps()
     if args.require_cuda and not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for C2 encoding, but no GPU is visible")
-    _set_seed(args.seed, torch)
+    _set_seed(
+        args.seed,
+        torch,
+        strict_determinism=bool(args.strict_determinism),
+    )
+    # 中文：seed 设置放在所有随机行为之前。
+    # 尤其 D6-T 里我们在追查 seed 方差问题，若这里顺序错了，会让“同 seed 复现”
+    # 变成假象，结果难以解释。
 
     train_cfg = TrainConfig(
         max_length=int(args.max_length),
@@ -831,6 +993,7 @@ def main(argv: list[str] | None = None) -> int:
             else None
         ),
         external_pair_source_balance=str(args.external_pair_source_balance),
+        external_pair_permutation_mode=str(args.external_pair_permutation_mode),
         external_pair_domain_filter=(
             ",".join(sorted(external_domain_filter)) if external_domain_filter else None
         ),
@@ -856,6 +1019,8 @@ def main(argv: list[str] | None = None) -> int:
         calibration_sample_weighting=str(args.calibration_sample_weighting),
         calibration_weight_floor=float(args.calibration_weight_floor),
         calibration_weight_gamma=float(args.calibration_weight_gamma),
+        anti_saturation_weight=float(args.anti_saturation_weight),
+        anti_saturation_logit_threshold=float(args.anti_saturation_logit_threshold),
         lambda_contrastive=float(args.lambda_contrastive if args.use_contrastive_loss else 0.0),
         contrastive_margin=float(args.contrastive_margin),
         contrastive_pair_filter=str(args.contrastive_pair_filter),
@@ -887,14 +1052,20 @@ def main(argv: list[str] | None = None) -> int:
         dtype=str(args.dtype),
         device_map=str(args.device_map),
         require_cuda=bool(args.require_cuda),
+        strict_determinism=bool(args.strict_determinism),
         logging_steps=int(args.logging_steps),
         feature_cache_root=str(args.feature_cache_root),
         feature_cache_mode=str(args.feature_cache_mode),
         feature_cache_lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
+        init_value_head_path=(
+            str(args.init_value_head_path) if args.init_value_head_path is not None else None
+        ),
     )
 
     run_dir = args.output_root / f"{args.run_name}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     run_dir.mkdir(parents=True, exist_ok=True)
+    # 中文：所有中间/最终产物都显式落盘到 run_dir，避免只靠控制台输出复盘实验。
+    # 这也是后续 suite 汇总、门控脚本和对比诊断能工作的前提。
     manifest_path = run_dir / "manifest.json"
     train_metrics_path = run_dir / "train_metrics.json"
     eval_metrics_path = run_dir / "eval_metrics.json"
@@ -917,6 +1088,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"run_dir           : {run_dir}")
     print(f"model_path        : {model_path}")
     print(f"adapter_path      : {adapter_path if adapter_path is not None else '<none>'}")
+    print(
+        f"init_value_head   : {args.init_value_head_path if args.init_value_head_path is not None else '<none>'}"
+    )
     print(f"train_mode        : {args.train_mode}")
     print(f"stage_ratio       : {args.two_stage_ranking_ratio}")
     print(f"target_source     : {args.target_source}")
@@ -928,12 +1102,21 @@ def main(argv: list[str] | None = None) -> int:
     print(f"train_examples    : {len(train_examples)}")
     print(f"eval_examples     : {len(eval_examples)}")
     print(f"eval_corruptions  : {len(eval_corruptions)}")
+    if eval_corruption_alignment_stats["dropped_for_missing_clean_prefix"] > 0:
+        print(
+            "eval_corr_align  : "
+            f"dropped={eval_corruption_alignment_stats['dropped_for_missing_clean_prefix']} "
+            f"from={eval_corruption_alignment_stats['before_alignment']} "
+            f"after={eval_corruption_alignment_stats['after_alignment']}"
+        )
     print(f"contrastive_loss  : {args.use_contrastive_loss}")
     print(f"calibration_loss  : {args.calibration_loss}")
     print(f"calib_target_eps : {args.calibration_target_smoothing}")
     print(f"calib_weight_mode : {args.calibration_sample_weighting}")
     print(f"calib_weight_floor: {args.calibration_weight_floor}")
     print(f"calib_weight_gamma: {args.calibration_weight_gamma}")
+    print(f"anti_sat_weight  : {args.anti_saturation_weight}")
+    print(f"anti_sat_thr     : {args.anti_saturation_logit_threshold}")
     print(f"adaptive_balance  : {args.adaptive_loss_balancing}")
     print(f"pair_filter       : {args.contrastive_pair_filter}")
     print(f"pair_conf_thr     : {args.contrastive_confidence_threshold}")
@@ -952,6 +1135,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"external_pair_file: {args.external_pair_jsonl if args.external_pair_jsonl is not None else '<none>'}")
     print(f"external_pair_w   : {args.external_pair_weight}")
     print(f"external_pair_bal : {args.external_pair_source_balance}")
+    print(f"external_pair_ord : {args.external_pair_permutation_mode}")
     print(f"external_pair_dom : {args.external_pair_domain_filter if args.external_pair_domain_filter else '<all>'}")
     print(f"external_pair_minc: {args.external_pair_min_confidence}")
     print(f"external_pair_conf: {args.external_pair_use_confidence_weights}")
@@ -965,6 +1149,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"feat_cache_mode   : {args.feature_cache_mode}")
     print(f"feat_cache_root   : {args.feature_cache_root}")
     print(f"seed              : {args.seed}")
+    print(f"strict_determ     : {bool(args.strict_determinism)}")
     if external_pair_stats is not None:
         print(
             "external_sources : "
@@ -1003,6 +1188,18 @@ def main(argv: list[str] | None = None) -> int:
     value_head = SigmoidValueHead(value_head_config)
     value_device = _resolve_value_device(backbone, torch)
     value_head.to(value_device)
+    init_value_head_info = _initialize_value_head_from_checkpoint(
+        value_head=value_head,
+        current_config=value_head_config,
+        checkpoint_path=args.init_value_head_path,
+    )
+    if init_value_head_info is not None:
+        print(
+            "init_value_head_ok: "
+            f"path={init_value_head_info['path']} "
+            f"dropout_changed={init_value_head_info['config_mismatch_notes']['dropout_prob_changed']} "
+            f"init_std_changed={init_value_head_info['config_mismatch_notes']['init_std_changed']}"
+        )
     model_load_elapsed = time.perf_counter() - model_load_start
 
     feature_cache_start = time.perf_counter()
@@ -1424,6 +1621,8 @@ def main(argv: list[str] | None = None) -> int:
             calibration_bce_weight=args.calibration_bce_weight,
             calibration_bce_pos_weight=args.calibration_bce_pos_weight,
             calibration_target_smoothing=args.calibration_target_smoothing,
+            anti_saturation_weight=float(args.anti_saturation_weight),
+            anti_saturation_logit_threshold=float(args.anti_saturation_logit_threshold),
             lambda_contrastive=(args.lambda_contrastive if args.use_contrastive_loss else 0.0),
             contrastive_margin=args.contrastive_margin,
             contrastive_pair_filter=args.contrastive_pair_filter,
@@ -1444,6 +1643,7 @@ def main(argv: list[str] | None = None) -> int:
             external_pair_cache=external_pair_cache,
             external_pair_weight=float(args.external_pair_weight),
             external_pair_source_balance=str(args.external_pair_source_balance),
+            external_pair_permutation_mode=str(args.external_pair_permutation_mode),
             logging_steps=args.logging_steps,
             global_step_offset=global_step,
             max_steps=(args.max_steps if args.max_steps > 0 else None),
@@ -1573,7 +1773,11 @@ def main(argv: list[str] | None = None) -> int:
         "external_pair_stats": external_pair_stats,
         "external_pair_weight": float(args.external_pair_weight),
         "external_pair_source_balance": str(args.external_pair_source_balance),
+        "external_pair_permutation_mode": str(args.external_pair_permutation_mode),
         "external_pair_only": bool(args.external_pair_only),
+        "anti_saturation_weight": float(args.anti_saturation_weight),
+        "anti_saturation_logit_threshold": float(args.anti_saturation_logit_threshold),
+        "strict_determinism": bool(args.strict_determinism),
         "feature_cache": feature_cache_stats,
         "target_source_stats": {
             "train": train_target_source_stats,
@@ -1623,6 +1827,7 @@ def main(argv: list[str] | None = None) -> int:
         },
         "train_config": train_cfg.to_dict(),
         "value_head_config": value_head_config.to_dict(),
+        "init_value_head": init_value_head_info,
         "num_train_examples": len(train_examples),
         "num_eval_examples": len(eval_examples),
         "num_eval_corruptions": len(eval_corruptions),
@@ -1632,6 +1837,7 @@ def main(argv: list[str] | None = None) -> int:
         "external_pair_stats": external_pair_stats,
         "external_pair_weight": float(args.external_pair_weight),
         "external_pair_source_balance": str(args.external_pair_source_balance),
+        "external_pair_permutation_mode": str(args.external_pair_permutation_mode),
         "external_pair_only": bool(args.external_pair_only),
         "teacher_coverage_ratio_train": float(train_target_source_stats["teacher_available_ratio"]),
         "teacher_coverage_ratio_eval": float(eval_target_source_stats["teacher_available_ratio"]),
@@ -1672,6 +1878,10 @@ def main(argv: list[str] | None = None) -> int:
             },
             "checkpoint_selection_metric": str(args.checkpoint_selection_metric),
             "posthoc_calibration": str(args.posthoc_calibration),
+            "anti_saturation_weight": float(args.anti_saturation_weight),
+            "anti_saturation_logit_threshold": float(args.anti_saturation_logit_threshold),
+            "external_pair_permutation_mode": str(args.external_pair_permutation_mode),
+            "strict_determinism": bool(args.strict_determinism),
         },
     }
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -1695,7 +1905,11 @@ def main(argv: list[str] | None = None) -> int:
                 "external_pairs": len(external_pairs),
                 "external_pair_weight": float(args.external_pair_weight),
                 "external_pair_source_balance": str(args.external_pair_source_balance),
+                "external_pair_permutation_mode": str(args.external_pair_permutation_mode),
                 "external_pair_only": bool(args.external_pair_only),
+                "anti_saturation_weight": float(args.anti_saturation_weight),
+                "anti_saturation_logit_threshold": float(args.anti_saturation_logit_threshold),
+                "strict_determinism": bool(args.strict_determinism),
             },
         ),
         encoding="utf-8",
@@ -1742,12 +1956,22 @@ def main(argv: list[str] | None = None) -> int:
     if adaptive_loss_state is not None:
         print(f"adaptive_logvar_c : {float(adaptive_loss_state['log_var_calibration'].detach().cpu().item()):.6f}")
         print(f"adaptive_logvar_t : {float(adaptive_loss_state['log_var_contrastive'].detach().cpu().item()):.6f}")
-    if selected_eval_metrics.get("corruption") is not None:
-        print(f"corr_pair_acc     : {selected_eval_metrics['corruption']['pair_accuracy']:.6f}")
-    print(f"corr_auc          : {selected_eval_metrics['corruption']['auc_clean_vs_corrupt']:.6f}")
+    corr_pair_acc, corr_auc = _extract_corruption_console_metrics(selected_eval_metrics)
+    if corr_pair_acc is not None:
+        print(f"corr_pair_acc     : {float(corr_pair_acc):.6f}")
+    if corr_auc is not None:
+        print(f"corr_auc          : {float(corr_auc):.6f}")
+    else:
+        print("corr_auc          : <none>")
     print(f"external_pairs    : {len(external_pairs)}")
     print(f"external_pair_w   : {float(args.external_pair_weight):.4f}")
     print(f"external_pair_only: {bool(args.external_pair_only)}")
+    print(f"anti_sat_weight   : {float(args.anti_saturation_weight):.6f}")
+    print(f"anti_sat_thr      : {float(args.anti_saturation_logit_threshold):.4f}")
+    if train_curve:
+        last_train_stats = dict(train_curve[-1].get("train", {}))
+        if "avg_anti_saturation_loss" in last_train_stats:
+            print(f"last_avg_sat_loss : {float(last_train_stats['avg_anti_saturation_loss']):.6f}")
     print(f"train_metrics     : {train_metrics_path}")
     print(f"eval_metrics      : {eval_metrics_path}")
     print(f"manifest          : {manifest_path}")
@@ -1882,14 +2106,39 @@ def _build_external_pair_permutation(
     external_pair_cache: dict[str, Any],
     torch_module: Any,
     source_balance: str,
+    permutation_mode: str,
 ) -> Any:
     """Build external-pair permutation with optional source balancing."""
     num_pairs = int(external_pair_cache["num_pairs"])
     device = external_pair_cache["chosen_features"].device
     if num_pairs <= 1:
         return torch_module.arange(num_pairs, device=device)
+    if permutation_mode not in {"random", "stable_hash"}:
+        raise ValueError(
+            f"Unsupported external pair permutation mode: {permutation_mode!r}"
+        )
+    pair_ids = list(external_pair_cache.get("pair_ids") or [])
+    if len(pair_ids) != num_pairs:
+        # Backward compatibility for older caches without pair_ids.
+        pair_ids = [f"pair_{idx}" for idx in range(num_pairs)]
+
+    def _stable_order(values: list[int]) -> list[int]:
+        # 中文：stable_hash 模式不依赖当前 seed 的随机打乱，
+        # 而是按 pair_id 的哈希排序。这样可以把“训练结果差异”更多归因于
+        # 优化过程本身，而不是每个 seed 恰好看到了不同 pair 顺序。
+        return sorted(
+            values,
+            key=lambda idx: hashlib.sha256(str(pair_ids[idx]).encode("utf-8")).hexdigest(),
+        )
+
     if source_balance == "none":
-        return torch_module.randperm(num_pairs, device=device)
+        if permutation_mode == "random":
+            return torch_module.randperm(num_pairs, device=device)
+        return torch_module.tensor(
+            _stable_order(list(range(num_pairs))),
+            dtype=torch_module.long,
+            device=device,
+        )
     if source_balance != "uniform":
         raise ValueError(f"Unsupported external pair source balance mode: {source_balance!r}")
 
@@ -1901,16 +2150,23 @@ def _build_external_pair_permutation(
         values = buckets[key]
         if len(values) <= 1:
             continue
-        order = torch_module.randperm(len(values)).tolist()
-        buckets[key] = [values[pos] for pos in order]
+        if permutation_mode == "random":
+            order = torch_module.randperm(len(values)).tolist()
+            buckets[key] = [values[pos] for pos in order]
+        else:
+            buckets[key] = _stable_order(values)
 
     pointers: dict[str, int] = {key: 0 for key in buckets}
     ordered: list[int] = []
+    key_order = sorted(buckets.keys())
     while True:
-        active = [key for key, values in buckets.items() if pointers[key] < len(values)]
+        active = [key for key in key_order if pointers[key] < len(buckets[key])]
         if not active:
             break
-        if len(active) > 1:
+        # 中文：uniform balance 的目标不是“完全平均每个 source 的样本数”，
+        # 而是让训练遍历顺序不要长期被单一 source 垄断。
+        # 因此这里采用分桶后轮转抽取，而不是简单 concat。
+        if permutation_mode == "random" and len(active) > 1:
             shuffle_order = torch_module.randperm(len(active)).tolist()
             active = [active[pos] for pos in shuffle_order]
         for key in active:
@@ -1918,7 +2174,13 @@ def _build_external_pair_permutation(
             ordered.append(buckets[key][pos])
             pointers[key] = pos + 1
     if len(ordered) != num_pairs:
-        return torch_module.randperm(num_pairs, device=device)
+        if permutation_mode == "random":
+            return torch_module.randperm(num_pairs, device=device)
+        return torch_module.tensor(
+            _stable_order(list(range(num_pairs))),
+            dtype=torch_module.long,
+            device=device,
+        )
     return torch_module.tensor(ordered, dtype=torch_module.long, device=device)
 
 
@@ -1930,6 +2192,7 @@ def _next_external_pair_batch(
     cursor: int,
     batch_size: int,
     source_balance: str,
+    permutation_mode: str,
 ) -> tuple[Any, int, Any]:
     """Return one external-pair mini-batch with wrap-around sampling."""
     num_pairs = int(external_pair_cache["num_pairs"])
@@ -1938,35 +2201,44 @@ def _next_external_pair_batch(
         empty = torch_module.zeros((0,), dtype=torch_module.long, device=device)
         return empty, 0, permutation
     if permutation is None or int(permutation.shape[0]) != num_pairs:
+        # 中文：当缓存第一次使用，或外部 pair 数发生变化时，重新建 permutation。
         permutation = _build_external_pair_permutation(
             external_pair_cache=external_pair_cache,
             torch_module=torch_module,
             source_balance=source_balance,
+            permutation_mode=permutation_mode,
         )
         cursor = 0
-
-    if cursor + batch_size <= num_pairs:
-        indices = permutation[cursor : cursor + batch_size]
-        cursor += batch_size
+    cursor = int(cursor) % num_pairs
+    needed = int(batch_size)
+    chunks: list[Any] = []
+    while needed > 0:
         if cursor >= num_pairs:
+            # 中文：走到尾部后重新洗牌/重排，但 batch 继续补齐。
+            # 这样一个 optimizer step 永远拿到固定 batch_size 的 pair，
+            # 不会因为尾 batch 太小而让 external branch 梯度抖动。
             permutation = _build_external_pair_permutation(
                 external_pair_cache=external_pair_cache,
                 torch_module=torch_module,
                 source_balance=source_balance,
+                permutation_mode=permutation_mode,
             )
             cursor = 0
-        return indices, cursor, permutation
-
-    first = permutation[cursor:]
-    needed = batch_size - int(first.shape[0])
-    permutation = _build_external_pair_permutation(
-        external_pair_cache=external_pair_cache,
-        torch_module=torch_module,
-        source_balance=source_balance,
-    )
-    second = permutation[:needed]
-    cursor = needed
-    return torch_module.cat([first, second], dim=0), cursor, permutation
+        take = min(needed, num_pairs - cursor)
+        chunks.append(permutation[cursor : cursor + take])
+        cursor += take
+        needed -= take
+    if cursor >= num_pairs:
+        permutation = _build_external_pair_permutation(
+            external_pair_cache=external_pair_cache,
+            torch_module=torch_module,
+            source_balance=source_balance,
+            permutation_mode=permutation_mode,
+        )
+        cursor = 0
+    if len(chunks) == 1:
+        return chunks[0], cursor, permutation
+    return torch_module.cat(chunks, dim=0), cursor, permutation
 
 
 def _run_one_train_epoch(
@@ -1984,6 +2256,8 @@ def _run_one_train_epoch(
     calibration_bce_weight: float,
     calibration_bce_pos_weight: float,
     calibration_target_smoothing: float,
+    anti_saturation_weight: float,
+    anti_saturation_logit_threshold: float,
     lambda_contrastive: float,
     contrastive_margin: float,
     contrastive_pair_filter: str,
@@ -2004,6 +2278,7 @@ def _run_one_train_epoch(
     external_pair_cache: dict[str, Any] | None,
     external_pair_weight: float,
     external_pair_source_balance: str,
+    external_pair_permutation_mode: str,
     logging_steps: int,
     global_step_offset: int,
     max_steps: int | None,
@@ -2028,6 +2303,7 @@ def _run_one_train_epoch(
     running_cal = 0.0
     running_ctr = 0.0
     running_ctr_external = 0.0
+    running_anti_sat = 0.0
     running_effective_ctr_weight = 0.0
     batches = 0
     optimizer_steps = 0
@@ -2045,7 +2321,12 @@ def _run_one_train_epoch(
             external_pair_cache=external_pair_cache,
             torch_module=torch_module,
             source_balance=str(external_pair_source_balance),
+            permutation_mode=str(external_pair_permutation_mode),
         )
+    anti_saturation_enabled = (
+        float(anti_saturation_weight) > 0.0
+        and float(anti_saturation_logit_threshold) > 0.0
+    )
 
     for batch_start in range(0, num_examples, batch_size):
         if max_steps is not None and global_step_offset + optimizer_steps >= max_steps:
@@ -2059,6 +2340,13 @@ def _run_one_train_epoch(
         )
         sample_weights = train_cache["calibration_weights"][batch_indices]
         head_outputs = value_head(clean_features)
+        loss_sat = torch_module.zeros((), device=clean_features.device)
+        if anti_saturation_enabled:
+            loss_sat = loss_sat + anti_saturation_logit_penalty(
+                head_outputs["logits"],
+                logit_threshold=float(anti_saturation_logit_threshold),
+                torch_module=torch_module,
+            )
         if calibration_enabled:
             loss_cal = _compute_calibration_loss(
                 calibration_loss=calibration_loss,
@@ -2112,7 +2400,14 @@ def _run_one_train_epoch(
                     train_cache["contrastive_candidate_pair_weight"][batch_indices]
                 )
                 clean_scores_for_pairs = expanded_clean_scores[candidate_mask]
-                corrupt_scores = value_head(corrupt_features)["scores"]
+                corrupt_outputs = value_head(corrupt_features)
+                corrupt_scores = corrupt_outputs["scores"]
+                if anti_saturation_enabled:
+                    loss_sat = loss_sat + anti_saturation_logit_penalty(
+                        corrupt_outputs["logits"],
+                        logit_threshold=float(anti_saturation_logit_threshold),
+                        torch_module=torch_module,
+                    )
                 pair_weights = None
                 if bool(contrastive_use_pair_weights):
                     pair_weights = train_cache["contrastive_candidate_pair_weight"][batch_indices][candidate_mask]
@@ -2143,12 +2438,28 @@ def _run_one_train_epoch(
                 cursor=external_cursor,
                 batch_size=ext_count,
                 source_balance=str(external_pair_source_balance),
+                permutation_mode=str(external_pair_permutation_mode),
             )
             if ext_indices.numel() > 0:
                 chosen_features = external_pair_cache["chosen_features"][ext_indices]
                 rejected_features = external_pair_cache["rejected_features"][ext_indices]
-                chosen_scores = value_head(chosen_features)["scores"]
-                rejected_scores = value_head(rejected_features)["scores"]
+                chosen_outputs = value_head(chosen_features)
+                rejected_outputs = value_head(rejected_features)
+                chosen_scores = chosen_outputs["scores"]
+                rejected_scores = rejected_outputs["scores"]
+                if anti_saturation_enabled:
+                    loss_sat = loss_sat + 0.5 * (
+                        anti_saturation_logit_penalty(
+                            chosen_outputs["logits"],
+                            logit_threshold=float(anti_saturation_logit_threshold),
+                            torch_module=torch_module,
+                        )
+                        + anti_saturation_logit_penalty(
+                            rejected_outputs["logits"],
+                            logit_threshold=float(anti_saturation_logit_threshold),
+                            torch_module=torch_module,
+                        )
+                    )
                 ext_weights = external_pair_cache["pair_weights"][ext_indices]
                 loss_ctr_external = contrastive_margin_loss(
                     chosen_scores,
@@ -2161,7 +2472,7 @@ def _run_one_train_epoch(
                 loss_ctr = loss_ctr + (float(external_pair_weight) * loss_ctr_external)
                 used_ctr_pairs = True
 
-        loss, effective_ctr_weight = _compose_total_loss(
+        base_loss, effective_ctr_weight = _compose_total_loss(
             loss_cal=loss_cal,
             loss_ctr=loss_ctr,
             lambda_contrastive=float(lambda_contrastive),
@@ -2170,12 +2481,14 @@ def _run_one_train_epoch(
             used_ctr_pairs=used_ctr_pairs,
             torch_module=torch_module,
         )
+        loss = base_loss + (float(anti_saturation_weight) * loss_sat)
         if not bool(getattr(loss, "requires_grad", False)):
             # Ranking-only stage may hit batches with no surviving pairs after
             # filtering. Skip these batches to avoid backward on constants.
             running_total += float(loss.item())
             running_cal += float(loss_cal.item())
             running_ctr += float(loss_ctr.item())
+            running_anti_sat += float(loss_sat.item())
             running_effective_ctr_weight += float(effective_ctr_weight)
             batches += 1
             continue
@@ -2205,6 +2518,7 @@ def _run_one_train_epoch(
                     f"cal={float(loss_cal.item()):.6f} "
                     f"ctr={float(loss_ctr.item()):.6f} "
                     f"ctr_ext={float(loss_ctr_external.item()):.6f} "
+                    f"sat={float(loss_sat.item()):.6f} "
                     f"ctr_w={float(effective_ctr_weight):.4f}",
                     flush=True,
                 )
@@ -2213,6 +2527,7 @@ def _run_one_train_epoch(
         running_cal += float(loss_cal.item())
         running_ctr += float(loss_ctr.item())
         running_ctr_external += float(loss_ctr_external.item())
+        running_anti_sat += float(loss_sat.item())
         running_effective_ctr_weight += float(effective_ctr_weight)
         batches += 1
 
@@ -2221,6 +2536,7 @@ def _run_one_train_epoch(
         "avg_calibration_loss": float(running_cal / max(batches, 1)),
         "avg_contrastive_loss": float(running_ctr / max(batches, 1)),
         "avg_external_contrastive_loss": float(running_ctr_external / max(batches, 1)),
+        "avg_anti_saturation_loss": float(running_anti_sat / max(batches, 1)),
         "avg_effective_contrastive_weight": float(running_effective_ctr_weight / max(batches, 1)),
         "num_batches": int(batches),
         "optimizer_steps": int(optimizer_steps),
@@ -2580,6 +2896,21 @@ def _checkpoint_metric_higher_is_better(checkpoint_selection_metric: str) -> boo
     return checkpoint_selection_metric in {"corr_pair_acc", "corr_auc", "ranking_score"}
 
 
+def _extract_corruption_console_metrics(
+    eval_metrics: dict[str, Any],
+) -> tuple[float | None, float | None]:
+    """Return optional `(pair_accuracy, auc)` metrics for console reporting."""
+    corruption = eval_metrics.get("corruption")
+    if not isinstance(corruption, dict):
+        return None, None
+    pair_acc = corruption.get("pair_accuracy")
+    auc = corruption.get("auc_clean_vs_corrupt")
+    return (
+        (float(pair_acc) if pair_acc is not None else None),
+        (float(auc) if auc is not None else None),
+    )
+
+
 def _resolve_checkpoint_selection_value(
     *,
     eval_metrics: dict[str, Any],
@@ -2912,6 +3243,9 @@ def _encode_example_cache(
         device=device,
     )
     target_confidence = torch_module.abs(targets - 0.5) * 2.0
+    # 中文：target_confidence 不是模型预测置信度，而是标签离 0.5 有多远。
+    # 目标越接近 0 或 1，说明 rollout 标签越“明确”；越接近 0.5，说明这个前缀本身
+    # 更不确定，后续做 sample weighting 或 pair filter 时会用到这个信号。
     calibration_weights = _build_calibration_sample_weights(
         targets=targets,
         parseable=target_parseable,
@@ -2998,6 +3332,9 @@ def _encode_example_cache(
     max_candidates_in_batch = max((len(candidates) for candidates in candidate_lists), default=0)
     if max_candidates_in_batch <= 0:
         max_candidates_in_batch = 1
+    # 中文：这里把“每个样本可有 0..k 个 corruption 候选”的不规则结构，
+    # 显式打包成固定形状 tensor bank。这样后面的训练循环可以纯 tensor 化，
+    # 避免在每个 batch 中反复走 Python list，减少隐性 shape bug。
     hidden_size = int(clean_features.shape[1])
     corruption_features_bank = torch_module.zeros(
         (len(examples), max_candidates_in_batch, hidden_size),
@@ -3053,6 +3390,8 @@ def _encode_example_cache(
             )
             flat_corruption_positions.append((example_idx, candidate_idx))
     if flat_corruption_texts:
+        # 中文：先展平再统一编码，比“每个样本逐个编码 corruption”更稳定，也更高效。
+        # `flat_corruption_positions` 负责把编码结果还原回 `[sample, candidate]` 坐标。
         encoded_corrupt = _encode_text_list_in_batches(
             texts=flat_corruption_texts,
             backbone=backbone,
@@ -3107,6 +3446,9 @@ def _extract_contrastive_candidates(
         raise ValueError("`max_items` must be > 0")
     candidates: list[dict[str, Any]] = []
     if example.corruption_candidates:
+        # 中文：新链路优先使用 C1 已经排好序、带质量字段的 top-k 候选。
+        # 这些候选往往已经包含 delta_q / z_delta / pair_weight / gate 结果，
+        # 比旧版“只给一个 primary corruption”信息更完整。
         for item in example.corruption_candidates:
             if len(candidates) >= max_items:
                 break
@@ -3133,6 +3475,8 @@ def _extract_contrastive_candidates(
         return candidates
     if example.primary_corruption_text is None:
         return candidates
+    # 中文：这里保留 legacy 回退，是为了兼容旧 artifact。
+    # 否则很多历史 Phase C 结果会因为缺少 `corruption_candidates` 字段而无法重跑。
     candidates.append(
         {
             "corrupted_prefix_text": str(example.primary_corruption_text),
@@ -3195,6 +3539,7 @@ def _encode_external_pair_cache(
             "chosen_features": empty_features,
             "rejected_features": empty_features.clone(),
             "pair_weights": empty_weights,
+            "pair_ids": [],
             "source_tags": [],
             "domain_tags": [],
         }
@@ -3232,6 +3577,7 @@ def _encode_external_pair_cache(
         "chosen_features": chosen_features,
         "rejected_features": rejected_features,
         "pair_weights": pair_weights,
+        "pair_ids": [str(pair.pair_id) for pair in pairs],
         "source_tags": [str(pair.source_tag) for pair in pairs],
         "domain_tags": [str(pair.domain_tag) for pair in pairs],
     }
@@ -3452,6 +3798,15 @@ def _validate_cached_external_pair_cache_payload(
             "External pair cache `pair_weights` batch mismatch: "
             f"expected {expected_num_pairs}, got {int(weights.shape[0])}"
         )
+    if "pair_ids" in cache:
+        pair_ids = cache["pair_ids"]
+        if not isinstance(pair_ids, list):
+            raise TypeError("External pair cache `pair_ids` must be a list when present")
+        if len(pair_ids) != int(expected_num_pairs):
+            raise ValueError(
+                "External pair cache `pair_ids` length mismatch: "
+                f"expected {expected_num_pairs}, got {len(pair_ids)}"
+            )
 
 
 def _encode_text_list_in_batches(
@@ -3560,12 +3915,28 @@ def _resolve_dtype(name: str, torch_module: Any):
     raise ValueError(f"Unsupported dtype: {name}")
 
 
-def _set_seed(seed: int, torch_module: Any) -> None:
-    """Seed Python and torch RNGs for reproducible C2 behavior."""
+def _set_seed(
+    seed: int,
+    torch_module: Any,
+    *,
+    strict_determinism: bool = False,
+) -> None:
+    """Seed RNGs; optionally enable stricter deterministic backend behavior."""
     random.seed(seed)
     torch_module.manual_seed(seed)
     if torch_module.cuda.is_available():
         torch_module.cuda.manual_seed_all(seed)
+    if bool(strict_determinism):
+        # Best-effort deterministic mode for seed-stability diagnostics.
+        # We intentionally use warn_only to avoid hard failures on unsupported ops.
+        torch_module.use_deterministic_algorithms(True, warn_only=True)
+        if hasattr(torch_module.backends, "cudnn"):
+            torch_module.backends.cudnn.deterministic = True
+            torch_module.backends.cudnn.benchmark = False
+        if hasattr(torch_module.backends, "cuda") and hasattr(torch_module.backends.cuda, "matmul"):
+            torch_module.backends.cuda.matmul.allow_tf32 = False
+        if hasattr(torch_module.backends, "cudnn"):
+            torch_module.backends.cudnn.allow_tf32 = False
 
 
 def _import_runtime_deps():

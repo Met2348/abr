@@ -1,9 +1,10 @@
 # BCR/ABR Research Pipeline (Condensed)
 
-本仓库用于推进“推理可靠性/一致性/Faithfulness”研究，当前主线是：
+本仓库用于推进“推理可靠性/一致性/Faithfulness”研究，当前主线已经切换为：
 - 先用 Phase A/B 建立稳定基线与现象诊断，
-- 再在 Phase C/D 做 value supervision 与外部 PRM 支撑，
-- 最终服务后续 BCR/ABR 路由与训练策略。
+- 在 Phase C/D 验证 ranking-style value supervision 是否可学，
+- 但不再把 StrategyQA 当作主监督训练基准，
+- 后续先在具备高质量步骤监督的数据集上验证方法，再把结果迁移回 StrategyQA。
 
 ## 1. 当前仓库状态
 
@@ -33,13 +34,64 @@
 - 已新增 D6-T 分支（triplet validation）：
   - `DT1..DT6` 一键套件已实现，
   - 支持 Math-Shepherd / PRM800K triplet 构造、ranking-only 训练、外部 held-out pair 直接评测。
-- 当前重点：先在 D6-T 上验证“高置信 triplet + ranking 目标”是否可稳定过门槛，再回迁主线。
+- 最新关键进展（2026-03-07）：
+  - `DT2_MATH_SHEPHERD_SEED3_STABLE` 已稳定过门槛：
+    - `mean_pair_acc=0.8154`
+    - `mean_auc=0.7857`
+    - `std_pair_acc=0.0075`
+    - `std_auc=0.0086`
+  - `DT4_MIXED_MS_PRM800K_SEED3_STABLE` 仅属“边缘通过”：
+    - 总体 `mean_pair_acc=0.6612`
+    - 总体 `mean_auc=0.6616`
+    - 但分源看，`Math-Shepherd` 明显有效，`PRM800K` 近随机。
+  - `DT2_MATH_SHEPHERD_SEED3_STABLE_C1_TRANSFER` 已完成有效重跑：
+    - 外部 held-out 仍强，
+    - 但回到 StrategyQA 自有 C1 指标后近随机，
+    - 说明“外部 ranking 可学”不等于“目标任务自动迁移”。
+  - `DT3_PRM800K_SEED3_STABLE` 已确认是稳定弱源：
+    - `mean_pair_acc=0.5471`
+    - `mean_auc=0.5504`
+    - 当前 adapter 下不适合作为主线来源。
+  - 因此主线已切到 bridge：
+    1. 先用 `Math-Shepherd` 做 external ranking 预训练；
+    2. 再 warm-start 到 StrategyQA in-domain CQR/C1；
+    3. 看能否把外部 ranking 能力桥接回本任务。
+- 当前重点已切换为：
+  1. 跑 bridge 两阶段实验，验证外部 ranking 是否能经 in-domain continue training 转成真实增益。
+  2. 保留 `PRM800K` 仅作对照/消融来源，不再直接作为主线扩张依据。
+  3. 只有 bridge 出现正迁移，才继续推进更大的 mixed-source 或 Phase D promotion。
+- 战略调整（2026-03-10，现行执行基线）：
+  1. `DT2 stable -> transfer_fix -> DB3/DB4` 这条证据链说明：
+     - ranking supervision 本身可学，
+     - 但 StrategyQA 上缺少高质量原生步骤标签，
+     - 因而不适合作为主监督 value-head benchmark。
+  2. 研究联网调研结论：
+     - 公开 StrategyQA 资源提供 question / yes-no answer / decomposition / evidence，
+     - 但不提供 PRM 级的 step-quality 标注或高质量 chosen/rejected process pairs。
+  3. 新主线改为：
+     - 主训练/监督来源：`Math-Shepherd`、`PRM800K`
+     - 主评测基准：`ProcessBench`、`PRMBench`
+     - 后备逻辑线：`ProofWriter`、`EntailmentBank`、`FOLIO`、`FoVer`
+  4. StrategyQA 的新角色：
+     - bridge continue-training 目标，
+     - downstream transfer benchmark，
+     - OOD / stress test，
+     - 不再承担“方法是否成立”的第一性验证任务。
 
 ## 2. 近期关键实验结论
 
-1. Phase A/B 的基线价值已足够：流程可复现，指标可稳定产出。
-2. Phase C 早期“value head 学不到”不是偶发 bug，而是监督信号弱、噪声高、pair 区分度不足。
-3. Phase D 的 teacher 信号已成功落地（可批量打分），但要转化为稳定增益，必须先解决样本质量与筛选策略。
+1. `DT2_MATH_SHEPHERD_SEED3_STABLE` 已证明高质量外部 triplet 上 ranking 分支可以稳定学习。
+2. `DT2 ... C1_TRANSFER` 与 `DT3_PRM800K_SEED3_STABLE` 共同说明：
+   - “外部 ranking 可学”不等于“自动迁移到 StrategyQA”，
+   - `PRM800K` 在当前 adapter 下也不是强源。
+3. `DB3` 是当前最重要的正结果：
+   - ranking-only bridge 真正提升了 StrategyQA in-domain `corr_pair_acc/corr_auc`。
+4. `DB4` 是当前最重要的反例：
+   - better Brier 并不代表 better ranking，
+   - joint 标量目标会伤害排序能力。
+5. 因此项目的科学判断已更新：
+   - 当前问题更像 `process ranking`，不是 `scalar value regression`。
+6. 因为 StrategyQA 没有公开高质量步骤监督，仓库主验证 benchmark 已转向 PRM-grade 数据集；StrategyQA 仅保留为迁移检验集。
 
 ## 3. 运行入口
 
@@ -71,6 +123,11 @@ bash scripts/run_phase_d_teacher_suite.sh
 ### Phase D6-T（triplet validation suite）
 ```bash
 bash scripts/run_phase_d_triplet_validation_suite.sh
+```
+
+### Phase D Bridge（external pretrain -> in-domain continue）
+```bash
+bash scripts/run_phase_d_bridge_suite.sh
 ```
 
 ### Phase C/D（one-click control + diagnosis）

@@ -2,6 +2,308 @@
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
 
+## 2026-03-10 14:30:00 +0800 (+08)
+- Type: Strategy Pivot Documentation Update / Benchmark-Scope Correction
+- Summary: Recorded the newest decisive StrategyQA bridge results (`DB3` positive, `DB4` negative), then updated the repository's active planning documents to reflect the strategic pivot: StrategyQA is no longer treated as the primary supervised benchmark for value-head validation because it lacks public PRM-grade step-quality labels.
+- Details:
+  - Recent critical results now frozen into the docs:
+    - `DB3_STRATEGYQA_BRIDGE_FULL_RANK_SEED3`
+      - `mean_stage2_corr_pair_acc=0.5874`
+      - `mean_stage2_corr_auc=0.5461`
+      - `+0.0499 / +0.0303` vs the strongest internal StrategyQA C2 reference.
+    - `DB4_STRATEGYQA_BRIDGE_FULL_JOINT_SEED3`
+      - `mean_stage2_corr_pair_acc=0.4957`
+      - `mean_stage2_corr_auc=0.4948`
+      - despite a better Brier score, ranking degrades versus both `DB3` and the reference.
+  - Method interpretation written into the docs:
+    - current problem is better described as `process ranking`,
+      not `scalar value regression`,
+    - scalar/joint calibration objectives can systematically hurt ranking in our current setup.
+  - Strategic benchmark correction recorded:
+    - public StrategyQA resources provide:
+      - question,
+      - final answer,
+      - decomposition,
+      - evidence,
+    - but do not provide PRM-grade step-quality supervision or high-quality process-preference pairs.
+    - therefore StrategyQA is downgraded from:
+      - primary supervised benchmark
+      to:
+      - bridge target,
+      - downstream transfer benchmark,
+      - OOD stress test.
+  - New mainline benchmark policy documented:
+    - training / supervision:
+      - `Math-Shepherd`
+      - `PRM800K`
+    - primary evaluation:
+      - `ProcessBench`
+      - `PRMBench`
+    - optional future non-math logic track:
+      - `ProofWriter`
+      - `EntailmentBank`
+      - `FOLIO`
+      - `FoVer`
+- Files changed:
+  - `README.md`
+  - `docs/readme.md`
+  - `docs/readme_full.md`
+  - `docs/phase_D_plan.md`
+  - `docs/phase_C_plan.md`
+  - `docs/phase_C_fix_value_head.md`
+  - `docs/TODO_ours.md`
+  - `docs/readme_dev.md`
+  - `docs/phase_D_ppt_2slides.md`
+  - `docs/progress_detailed.md`
+- Breaking changes:
+  - Planning semantics changed:
+    - "StrategyQA first" is no longer the active benchmark policy for
+      value-head validation.
+    - Future work should default to PRM-grade benchmark validation first, then
+      StrategyQA transfer second.
+
+## 2026-03-07 20:05:00 +0800 (+08)
+- Type: Phase D Bridge Implementation + Runtime Bug Fix
+- Summary: Implemented the two-stage Phase D bridge suite (external Math-Shepherd ranking pretrain -> StrategyQA in-domain continue training), added warm-start support for the value head, fixed an eval corruption alignment bug discovered by the first smoke run, and validated the full bridge wiring with a tiny end-to-end smoke.
+- Details:
+  - Method decision captured in code:
+    - `DT2 stable` proved external ranking is learnable,
+    - `transfer_fix` then proved direct transfer is still near-random on StrategyQA C1,
+    - therefore the next step became a bridge, not more direct-transfer LR tuning.
+  - Training/runtime implementation:
+    - `scripts/phase_b_train_value.py`
+      - added `--init-value-head-path`,
+      - stage-2 can now warm-start from a previous `best_value_head.pt`,
+      - validates hidden-size and pooling compatibility before loading.
+    - `scripts/run_phase_d_bridge_suite.sh`
+      - new one-click bridge suite:
+        - stage-1 shared Math-Shepherd pair preparation,
+        - stable external ranking pretrain,
+        - held-out external pair eval,
+        - stage-2 in-domain continue training from the saved stage-1 head,
+        - final per-seed + aggregated bridge summary.
+      - added four groups:
+        - `DB1_STRATEGYQA_BRIDGE_SMOKE_RANK`
+        - `DB2_STRATEGYQA_BRIDGE_SMOKE_JOINT`
+        - `DB3_STRATEGYQA_BRIDGE_FULL_RANK_SEED3`
+        - `DB4_STRATEGYQA_BRIDGE_FULL_JOINT_SEED3`
+      - smoke groups now also cap stage-1 Phase C sample counts so they are
+        actually lightweight.
+      - when `STRICT_DETERMINISM=1`, suite now exports
+        `CUBLAS_WORKSPACE_CONFIG` to reduce CUDA determinism drift.
+  - Real runtime bug found and fixed:
+    - first bridge smoke crashed in `scripts/phase_b_train_value.py` with:
+      - `KeyError(clean_prefix_id)`
+    - root cause:
+      - `--max-eval-samples` truncated clean eval prefixes,
+      - but `eval_corruptions` was still loaded from the full artifact,
+      - later corruption scoring tried to access clean prefix IDs that were no
+        longer present.
+    - fix:
+      - added `_filter_corruptions_to_loaded_eval_examples(...)`,
+      - corruption rows are now aligned to surviving clean eval prefix IDs
+        before encoding/eval.
+  - Validation:
+    - `bash -n scripts/run_phase_d_bridge_suite.sh`
+    - `python -m py_compile scripts/phase_b_train_value.py`
+    - unit tests:
+      - `pytest -q tests/unit/test_phase_c_train_value.py tests/unit/test_phase_d_external_pairs.py`
+    - tiny end-to-end smoke:
+      - `phase_d_bridge_devsmoke2`
+      - completed:
+        - stage-1 pair prep,
+        - stage-1 train,
+        - stage-1 external eval,
+        - stage-2 warm-start (`init_value_head_ok` printed),
+        - final bridge summary write.
+- Files changed:
+  - `scripts/phase_b_train_value.py`
+  - `scripts/run_phase_d_bridge_suite.sh`
+  - `tests/unit/test_phase_c_train_value.py`
+  - `docs/readme.md`
+  - `docs/readme_full.md`
+  - `docs/phase_D_plan.md`
+  - `docs/progress_detailed.md`
+- Breaking changes:
+  - None at artifact format level.
+  - `scripts/phase_b_train_value.py --max-eval-samples` now intentionally
+    drops corruption rows whose clean prefix is outside the truncated eval set.
+
+## 2026-03-07 10:35:00 +0800 (+08)
+- Type: D6-T Result Audit + Transfer-Suite Fix
+- Summary: Audited the latest stable DT2 and mixed DT4 runs, confirmed the main residual problem is methodological rather than seed noise, and fixed the transfer suite so C1 standalone eval can no longer be silently skipped.
+- Details:
+  - Latest result diagnosis:
+    - `DT2_MATH_SHEPHERD_SEED3_STABLE`
+      - remains the strongest D6-T result:
+        - `mean_pair_acc=0.815393`
+        - `mean_auc=0.785653`
+        - `std_pair_acc=0.007464`
+        - `std_auc=0.008642`
+      - interpretation:
+        - the ranking-first value-head path is genuinely learnable on high-quality same-question triplets.
+    - `DT4_MIXED_MS_PRM800K_SEED3_STABLE`
+      - passes only marginally:
+        - `mean_pair_acc=0.661188`
+        - `mean_auc=0.661561`
+      - source-level breakdown from external held-out eval:
+        - `math_shepherd` remains strong,
+        - `prm800k` is near-random under the current adapter/training recipe.
+      - interpretation:
+        - mixed-source success is not yet real multi-source robustness; current performance is still largely carried by Math-Shepherd.
+  - Implementation audit:
+    - `DT2_MATH_SHEPHERD_SEED3_STABLE_C1_TRANSFER` was found invalid as transfer evidence:
+      - all three seeds had `c1_eval_run_dir = null`,
+      - root cause:
+        - group config used `${RUN_C1_STANDALONE_EVAL:-1}`,
+        - so a stale external environment value could silently keep C1 eval disabled.
+    - Fix:
+      - `scripts/run_phase_d_triplet_validation_suite.sh`
+        - `DT2_MATH_SHEPHERD_SEED3_STABLE_C1_TRANSFER` now force-sets `RUN_C1_STANDALONE_EVAL=1`,
+        - suite header now logs `run_c1_standalone_eval=...` explicitly.
+  - New diagnostic suite group:
+    - added `DT3_PRM800K_SEED3_STABLE`
+      - purpose:
+        - isolate whether `PRM800K` alone is learnable under the same stable DT2 recipe,
+        - determine whether mixed-source weakness is fundamentally a PRM800K-source problem.
+- Files changed:
+  - `scripts/run_phase_d_triplet_validation_suite.sh`
+  - `docs/readme_full.md`
+  - `docs/readme.md`
+  - `docs/progress_detailed.md`
+  - `docs/phase_D_plan.md`
+- Breaking changes:
+  - `DT2_MATH_SHEPHERD_SEED3_STABLE_C1_TRANSFER` semantics are stricter now:
+    - it will always execute standalone C1 eval unless the script itself fails before that stage.
+
+## 2026-03-06 22:55:00 +0800 (+08)
+- Type: Phase D6-T Stable Breakthrough + Artifact Hygiene Hardening
+- Summary: Confirmed the first seed-stable D6-T pass on Math-Shepherd (`DT2_MATH_SHEPHERD_SEED3_STABLE`), then hardened the suite and repository so incomplete artifacts and late summary overwrite issues no longer distort later runs.
+- Details:
+  - New confirmed result:
+    - run: `assets/artifacts/phase_d6t_logs/phase_d6t_stable_0306_2211`
+    - external held-out pair metrics:
+      - `mean_pair_acc=0.815393`
+      - `mean_auc=0.785653`
+      - `std_pair_acc=0.007464`
+      - `std_auc=0.008642`
+    - interpretation:
+      - high-quality same-question triplets are sufficient for stable ranking learnability in the current value-head pipeline,
+      - the D6-T blocker has moved from "seed instability" to "in-domain transfer + mixed-source robustness".
+  - Suite hardening:
+    - `scripts/run_phase_d_triplet_validation_suite.sh`
+      - lowered the stable DT2 default `MIN_PAIR_CONFIDENCE` to `0.55` to match current Math-Shepherd adapter confidence range,
+      - added explicit zero-pair guard immediately after external pair preparation,
+      - added success-summary preservation in `on_exit()` so a late shell-side failure no longer overwrites a valid aggregated summary,
+      - added new next-step groups:
+        - `DT2_MATH_SHEPHERD_SEED3_STABLE_C1_TRANSFER`
+        - `DT4_MIXED_MS_PRM800K_SEED3_STABLE`
+    - `scripts/run_phase_d6t_stable_suite.sh`
+      - locked default Phase C train/eval inputs to known-good full `k8` artifacts,
+      - exported wrapper-resolved env vars explicitly to the delegated suite.
+  - Artifact hygiene:
+    - added `scripts/cleanup_incomplete_artifacts.py`
+      - scans known artifact families with stage-specific completeness contracts,
+      - supports dry-run and actual deletion,
+      - used to remove all incomplete run directories after verifying no active experiment processes were running.
+    - post-cleanup verification:
+      - `total_incomplete_dirs : 0`
+  - Docs:
+    - `docs/readme_full.md`
+      - updated top-level Phase D status to reflect the stable DT2 pass,
+      - replaced old "DT2 still unstable" wording with historical/superseded wording,
+      - documented the new project focus: transfer and mixed-source robustness.
+    - `docs/readme.md`
+      - updated the condensed project status with the new stable D6-T result.
+- Files changed:
+  - `scripts/run_phase_d_triplet_validation_suite.sh`
+  - `scripts/run_phase_d6t_stable_suite.sh`
+  - `scripts/cleanup_incomplete_artifacts.py`
+  - `docs/readme_full.md`
+  - `docs/readme.md`
+  - `docs/progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-03-05 22:50:27 +0800 (+08)
+- Type: PRM800K Installability Hardening + Adapter Compatibility Fix
+- Summary: Fixed PRM800K official-repo compatibility for external-pair conversion, added regression tests, and documented Git LFS installation/pull steps plus parser smoke command.
+- Details:
+  - Runtime issue diagnosed:
+    - cloning `https://github.com/openai/prm800k` alone yields Git LFS pointer stubs in `prm800k/data/*.jsonl`,
+    - without `git-lfs`, `phase_d_prepare_external_pairs.py --prm800k-path ...` fails with JSON decode errors.
+  - Code update:
+    - `src/ours/phase_d/external_pairs_adapters.py`
+      - added direct PRM800K official-schema path:
+        - parse `label.steps[].completions[].rating`,
+        - build completion-level positive-vs-nonpositive pairs with prefix history,
+        - fallback to previous generic step-label extraction path when needed.
+      - added `_safe_rating_value` helper for mixed numeric/bool rating parsing.
+  - Tests:
+    - `tests/unit/test_phase_d_external_pairs.py`
+      - added regression test for official PRM800K-like payload (`question.problem` + `label.steps/completions/rating`).
+  - Docs:
+    - `docs/readme_full.md`
+      - added PRM800K Git LFS install/pull commands,
+      - added quick parser smoke command for `phase_d_prepare_external_pairs.py`.
+- Files changed:
+  - `src/ours/phase_d/external_pairs_adapters.py`
+  - `tests/unit/test_phase_d_external_pairs.py`
+  - `docs/readme_full.md`
+  - `docs/progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-03-05 22:31:15 +0800 (+08)
+- Type: Phase D Promotion Gate Automation + Scenario-Aware Decision Support
+- Summary: Added a dedicated Phase D promotion-gate evaluator script with unit tests, covering control-vs-gated D6 checks, D6-T seed-stability gates, and explicit blocking-reason interpretation.
+- Details:
+  - Added `scripts/phase_d_promotion_gate.py`:
+    - resolves C reference from `phase_c_logs`,
+    - resolves D6 control/gated summaries from `phase_d_logs`,
+    - resolves required D6-T groups from `phase_d6t_logs` and computes seed mean/std from `seed_results.jsonl`,
+    - enforces configurable thresholds for:
+      - D6 uplift (`pair_acc`, `auc`),
+      - D6 absolute ranking gates,
+      - calibration guardrail (baseline-improvement or trivial-brier fallback),
+      - D6-T mean/std stability gates,
+    - emits:
+      - `gate_report.json` (machine-readable checks and blocking reasons),
+      - `summary.md` (human-readable checklist + interpretation).
+  - Added regression tests `tests/unit/test_phase_d_promotion_gate.py`:
+    - pass-path: all gates satisfied,
+    - fail-path: D6-T high variance blocks promotion,
+    - fail-path: missing D6 gated group blocks promotion.
+  - Updated `docs/readme_full.md`:
+    - added runnable command block for the new promotion-gate evaluator.
+- Files changed:
+  - `scripts/phase_d_promotion_gate.py`
+  - `tests/unit/test_phase_d_promotion_gate.py`
+  - `docs/readme_full.md`
+  - `docs/progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-03-05 22:12:23 +0800 (+08)
+- Type: Phase C2 External Pair Sampling Bugfix + Unit Test Hardening
+- Summary: Fixed a wrap-around sampling bug in external pair batching that produced undersized batches and invalid cursors when `batch_size > num_pairs`, then added regression tests.
+- Details:
+  - `scripts/phase_b_train_value.py`
+    - rewrote `_next_external_pair_batch` to repeatedly wrap over shuffled permutations until exactly `batch_size` indices are produced.
+    - normalized incoming cursor with modulo to guarantee bounded state (`0 <= cursor < num_pairs`).
+    - ensured returned cursor/permutation remain valid across repeated calls.
+    - added `_extract_corruption_console_metrics` and guarded final `corr_auc` console print to avoid crashes when eval corruption metrics are absent.
+  - `tests/unit/test_phase_c_train_value.py`
+    - added regression test for `batch_size > num_pairs` to enforce fixed-size output and bounded cursor.
+    - added repeated-call regression test to enforce cursor validity and full batch length over multiple iterations.
+    - added regression tests for safe corruption metric extraction when `corruption` is missing and when metrics are present.
+- Files changed:
+  - `scripts/phase_b_train_value.py`
+  - `tests/unit/test_phase_c_train_value.py`
+  - `docs/progress_detailed.md`
+- Breaking changes:
+  - None.
+
 ## 2026-03-05 01:01:19 +0800 (+08)
 - Type: Phase D6-T Implementation / Triplet Validation Branch (DT1~DT6)
 - Summary: Completed the mentor-mandated D6-T branch implementation end-to-end, including PRM800K adapter support, one-click DT1~DT6 suite orchestration, and direct external held-out pair evaluation.

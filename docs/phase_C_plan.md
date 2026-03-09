@@ -21,17 +21,22 @@ The plan below is grounded in:
   - `assets/BCR on step level.pptx`
   - `assets/BCR_discussion_20251219.pptx`
 
-## 0.5 Status Re-interpretation (2026-03-05)
+## 0.5 Status Re-interpretation (2026-03-10)
 
 Phase C remains complete at infrastructure level, but its current role is now:
 1. provide stable control baselines for Phase D,
 2. provide C1/C2 contracts and quality diagnostics,
-3. no longer act as the promotion mainline by itself.
+3. provide StrategyQA transfer/bridge evidence,
+4. no longer act as the primary supervised benchmark for value-head validation.
 
 Methodology correction linked from Phase D:
 1. use PRM primarily as pair-quality signal,
 2. avoid treating PRM score means as default C2 target supervision,
 3. keep prior teacher-target runs as ablation evidence only.
+4. strategic benchmark correction:
+   - StrategyQA lacks public PRM-grade step-quality labels,
+   - so the primary supervised benchmark must move elsewhere,
+   - while StrategyQA remains useful as downstream transfer / OOD evaluation.
 
 ## 1. Why Phase C Exists
 
@@ -138,17 +143,23 @@ Phase C should **not** cover:
 
 These choices are required to avoid the chicken-and-egg failure mode.
 
-### 4.1 StrategyQA first
+### 4.1 Historical note: why early Phase C started on StrategyQA
 
-Phase C should start on **StrategyQA**, not GSM8K.
+This section is now historical context, not the active benchmark policy.
 
-Reason:
-1. StrategyQA Phase B PEFT is stable and positive.
-2. GSM8K still has long-CoT drift and checkpoint-selection issues.
-3. If Phase C starts on GSM8K, failures will be underdetermined:
-   - value problem,
-   - router problem,
-   - or unstable source model.
+Early Phase C started on **StrategyQA** because:
+1. StrategyQA Phase B PEFT was stable and positive.
+2. GSM8K still had long-CoT drift and checkpoint-selection issues.
+3. At that time, StrategyQA was the cleanest local place to debug the C1/C2
+   infrastructure.
+
+However, as of `2026-03-10`, this is no longer the recommended mainline for
+value-head validation:
+1. StrategyQA lacks public PRM-grade step-quality supervision.
+2. Recent results (`DT2 stable`, `transfer_fix`, `DB3`, `DB4`) show that it is
+   still useful for bridge/transfer evidence, but not as the first benchmark on
+   which to prove the method.
+3. Active mainline benchmark policy now lives in `phase_D_plan.md`.
 
 ### 4.2 Frozen-backbone first
 

@@ -1,9 +1,10 @@
 # BCR/ABR Research Pipeline (Condensed)
 
-本仓库用于推进“推理可靠性/一致性/Faithfulness”研究，当前主线是：
+本仓库用于推进“推理可靠性/一致性/Faithfulness”研究，当前主线已经更新为：
 - 先用 Phase A/B 建立稳定基线与现象诊断，
-- 再在 Phase C/D 做 value supervision 与外部 PRM 支撑，
-- 最终服务后续 BCR/ABR 路由与训练策略。
+- 再在 Phase C/D 验证 ranking-style value supervision 是否可学，
+- 但从 2026-03-10 起，不再把 StrategyQA 视作 value head 的主监督 benchmark，
+- 后续主验证将转向具备高质量步骤级监督的数据集，再回到 StrategyQA 做迁移/OOD 检验。
 
 ## 1. 当前仓库状态
 
@@ -27,13 +28,39 @@
 ### Phase D（当前主线）
 - 已接入外部 PRM（Qwen2.5-Math-PRM-7B）做 teacher scoring（D1）。
 - 已实现 teacher+MC 融合标签（D2）与目标源切换评估（D3）。
-- 当前重点：提高 pair 质量与监督可信度，验证是否能真正提升 C2 的可学习性。
+- 最近关键结果：
+  - `DT2_MATH_SHEPHERD_SEED3_STABLE` 证明高质量外部 triplet 上 ranking 可稳定学到：
+    - `mean_pair_acc=0.8154`
+    - `mean_auc=0.7857`
+  - `DT2 ... C1_TRANSFER` 说明直接迁移回 StrategyQA 近随机，外部可学不等于目标任务自动迁移。
+  - `DT3_PRM800K_SEED3_STABLE` 仅有 `mean_pair_acc=0.5471`、`mean_auc=0.5504`，当前 adapter 下是弱源。
+  - `DB3_STRATEGYQA_BRIDGE_FULL_RANK_SEED3` 为当前最强正结果：
+    - `mean_stage2_corr_pair_acc=0.5874`
+    - `mean_stage2_corr_auc=0.5461`
+    - 相比强 C2 基线提升 `+0.0499 / +0.0303`
+  - `DB4_STRATEGYQA_BRIDGE_FULL_JOINT_SEED3` 虽改善 Brier，但 ranking 退化到近随机：
+    - `mean_stage2_corr_pair_acc=0.4957`
+    - `mean_stage2_corr_auc=0.4948`
+- 战略调整（2026-03-10）：
+  - StrategyQA 没有公开的 PRM 级逐步推理质量标注，不再作为主监督 value-head benchmark。
+  - 新主线将转向：
+    - 训练/监督：`Math-Shepherd`、`PRM800K`
+    - 评测：`ProcessBench`、`PRMBench`
+    - 可选非数学逻辑线：`ProofWriter`、`EntailmentBank`、`FOLIO`、`FoVer`
+  - StrategyQA 之后只承担：
+    - bridge continue-training 目标，
+    - downstream transfer，
+    - OOD / stress test。
 
 ## 2. 近期关键实验结论
 
 1. Phase A/B 的基线价值已足够：流程可复现，指标可稳定产出。
-2. Phase C 早期“value head 学不到”不是偶发 bug，而是监督信号弱、噪声高、pair 区分度不足。
-3. Phase D 的 teacher 信号已成功落地（可批量打分），但要转化为稳定增益，必须先解决样本质量与筛选策略。
+2. `DB3` 与 `DB4` 的对照说明：ranking-first 目标可以在 StrategyQA bridge 上产生真实增益，但 joint scalar-calibration 目标会系统性伤害 ranking。
+3. 因此当前研究对象更像“process ranking”而不是“scalar value regression”。
+4. StrategyQA 缺少公开高质量步骤监督，这会导致明显的 `garbage in, garbage out` 风险。
+5. 仓库主线已正式改为：
+   - 用有明确步骤监督的数据集先验证 BCR/value-head 思路，
+   - 再把已验证的方法迁移回 StrategyQA。
 
 ## 3. 运行入口
 

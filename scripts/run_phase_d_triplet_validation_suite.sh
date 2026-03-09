@@ -50,6 +50,15 @@ FEATURE_CACHE_ROOT="${FEATURE_CACHE_ROOT:-assets/artifacts/phase_c_feature_cache
 FEATURE_CACHE_MODE="${FEATURE_CACHE_MODE:-read_write}"
 FEATURE_CACHE_LOCK_TIMEOUT_SEC="${FEATURE_CACHE_LOCK_TIMEOUT_SEC:-600}"
 
+# Seed-stability controls:
+# - shared: all training seeds reuse one external pair split (recommended).
+# - per_seed: each training seed builds its own pair split (legacy behavior).
+D6T_PAIR_SPLIT_MODE="${D6T_PAIR_SPLIT_MODE:-shared}"
+D6T_PAIR_SPLIT_SEED="${D6T_PAIR_SPLIT_SEED:-42}"
+# Ranking branch seed-stability controls inside C2 trainer.
+D6T_EXTERNAL_PAIR_PERM_MODE="${D6T_EXTERNAL_PAIR_PERM_MODE:-stable_hash}"
+D6T_STRICT_DETERMINISM="${D6T_STRICT_DETERMINISM:-1}"
+
 # Optional toggles / append-only args.
 RUN_C1_STANDALONE_EVAL="${RUN_C1_STANDALONE_EVAL:-0}"
 PAIR_PREP_EXTRA_ARGS="${PAIR_PREP_EXTRA_ARGS:-}"
@@ -63,6 +72,9 @@ GROUP_C2_TRAIN_EXTRA_DEFAULT=""
 PASS_PAIR_ACC_MIN="${PASS_PAIR_ACC_MIN:-0.65}"
 PASS_AUC_MIN="${PASS_AUC_MIN:-0.65}"
 PASS_STD_MAX="${PASS_STD_MAX:-0.03}"
+
+# Shared split artifact cache (used when D6T_PAIR_SPLIT_MODE=shared).
+SHARED_PAIR_RUN_DIR=""
 
 timestamp() {
   date "+%Y-%m-%d %H:%M:%S %z"
@@ -107,9 +119,24 @@ require_dir() {
 latest_phase_c_data_guess() {
   local dataset="$1"
   local marker="$2"
-  local latest=""
-  latest="$(compgen -G "assets/artifacts/phase_c_data/${dataset}/*${marker}*__*" | sort | tail -n 1 || true)"
-  printf '%s\n' "$latest"
+  local candidates=()
+  local candidate=""
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] || continue
+    candidates+=("$candidate")
+  done < <(compgen -G "assets/artifacts/phase_c_data/${dataset}/*${marker}*__*" | sort -r || true)
+
+  local dir=""
+  for dir in "${candidates[@]}"; do
+    # 中文：这里只接受“完整可复用”的 Phase C 数据目录。
+    # 过去很多半截 artifact 只有 prefixes，没有 manifest/targets，
+    # 如果按名字直接取最新目录，suite 会在更后面的位置才炸，排查成本很高。
+    if [[ -f "$dir/manifest.json" && -f "$dir/prefixes.jsonl" && -f "$dir/rollout_targets.jsonl" ]]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+  done
+  return 1
 }
 
 latest_dir_for_prefix() {
@@ -139,6 +166,14 @@ write_failure_summary() {
 EOM
 }
 
+summary_looks_complete() {
+  local path="$1"
+  [[ -f "$path" ]] || return 1
+  # 中文：若已经写出了聚合 gate 段，说明成功摘要基本完整。
+  # 这种情况下即便 shell 在 very-late stage 报错，也不应再把成功摘要覆盖成 failed。
+  grep -q '^## Aggregated Gate' "$path"
+}
+
 on_exit() {
   local exit_code="$1"
   if [[ "$exit_code" -ne 0 ]]; then
@@ -146,7 +181,13 @@ on_exit() {
       log_line "Failure stage: ${CURRENT_STAGE:-unknown}"
       log_line "Exit code: ${exit_code}"
     } >> "$SUITE_LOG_FILE"
-    write_failure_summary "$exit_code"
+    if summary_looks_complete "$SUMMARY_FILE"; then
+      {
+        log_line "Preserve existing final summary because aggregated gate section already exists."
+      } >> "$SUITE_LOG_FILE"
+    else
+      write_failure_summary "$exit_code"
+    fi
   fi
 }
 trap 'on_exit $?' EXIT
@@ -205,6 +246,66 @@ resolve_group() {
       EXTERNAL_PAIR_ONLY="${EXTERNAL_PAIR_ONLY:-1}"
       GROUP_C2_TRAIN_EXTRA_DEFAULT="${GROUP_C2_TRAIN_EXTRA_DEFAULT:---lambda-contrastive 1.0}"
       ;;
+    DT2_MATH_SHEPHERD_SEED3_STABLE)
+      GROUP_TITLE="DT2 Math-Shepherd Seed3 Stable"
+      GROUP_INTENTION="Conservative seed-3 validation with fixed pair split and low-risk ranking settings."
+      GROUP_OBSERVE="Prioritize reproducible completion and lower seed variance before chasing peak score."
+      GROUP_EXPECT="Suite should complete reliably and produce cleaner cross-seed comparison."
+      SEEDS=(42 43 44)
+      USE_MATH_SHEPHERD=1
+      USE_PRM800K=0
+      C2_EPOCHS="${C2_EPOCHS:-3}"
+      C2_LR="${C2_LR:-5e-5}"
+      C2_TRAIN_BATCH_SIZE="${C2_TRAIN_BATCH_SIZE:-64}"
+      C2_EVAL_BATCH_SIZE="${C2_EVAL_BATCH_SIZE:-64}"
+      MAX_PAIRS_PER_SOURCE="${MAX_PAIRS_PER_SOURCE:-6000}"
+      MAX_PAIRS_TOTAL="${MAX_PAIRS_TOTAL:-12000}"
+      # Math-Shepherd step-converted pairs currently emit confidence around
+      # 0.55 / 0.62 depending on positive-negative step distance. A 0.65 gate
+      # would silently wipe out the whole source and make the suite fail later
+      # inside C2 with "no external pairs survived filtering".
+      MIN_PAIR_CONFIDENCE="${MIN_PAIR_CONFIDENCE:-0.55}"
+      MIN_CHARS="${MIN_CHARS:-12}"
+      MAX_LENGTH_RATIO="${MAX_LENGTH_RATIO:-3.0}"
+      MAX_TOKEN_OVERLAP="${MAX_TOKEN_OVERLAP:-0.99}"
+      MAX_PAIRS_PER_SAMPLE="${MAX_PAIRS_PER_SAMPLE:-1}"
+      C2_TRAIN_MODE="${C2_TRAIN_MODE:-ranking_only}"
+      C2_CALIBRATION_LOSS="${C2_CALIBRATION_LOSS:-mse}"
+      EXTERNAL_PAIR_WEIGHT="${EXTERNAL_PAIR_WEIGHT:-1.0}"
+      EXTERNAL_PAIR_SOURCE_BALANCE="${EXTERNAL_PAIR_SOURCE_BALANCE:-uniform}"
+      EXTERNAL_PAIR_ONLY="${EXTERNAL_PAIR_ONLY:-1}"
+      GROUP_C2_TRAIN_EXTRA_DEFAULT="${GROUP_C2_TRAIN_EXTRA_DEFAULT:---lambda-contrastive 1.0 --checkpoint-selection-metric ranking_score --contrastive-margin 0.2 --dropout-prob 0.1 --anti-saturation-weight 0.03 --anti-saturation-logit-threshold 4.0}"
+      ;;
+    DT2_MATH_SHEPHERD_SEED3_STABLE_C1_TRANSFER)
+      GROUP_TITLE="DT2 Math-Shepherd Seed3 Stable + C1 Transfer"
+      GROUP_INTENTION="Check whether stable external ranking learning transfers back to our in-domain StrategyQA corruption metrics."
+      GROUP_OBSERVE="Keep the stable DT2 recipe fixed, but also run standalone C1 eval after each seed."
+      GROUP_EXPECT="External pair gate should stay strong; any real transfer should appear in C1 pair_acc/AUC above near-random."
+      SEEDS=(42 43 44)
+      USE_MATH_SHEPHERD=1
+      USE_PRM800K=0
+      # 中文：这个组之所以存在，就是为了验证“外部 pair 学到的排序能力”
+      # 能不能迁移回我们自己的 C1 corruption 指标。因此这里必须硬性开启
+      # C1 standalone eval，不能再允许外部残留环境变量把它静默关掉。
+      RUN_C1_STANDALONE_EVAL=1
+      C2_EPOCHS="${C2_EPOCHS:-3}"
+      C2_LR="${C2_LR:-5e-5}"
+      C2_TRAIN_BATCH_SIZE="${C2_TRAIN_BATCH_SIZE:-64}"
+      C2_EVAL_BATCH_SIZE="${C2_EVAL_BATCH_SIZE:-64}"
+      MAX_PAIRS_PER_SOURCE="${MAX_PAIRS_PER_SOURCE:-6000}"
+      MAX_PAIRS_TOTAL="${MAX_PAIRS_TOTAL:-12000}"
+      MIN_PAIR_CONFIDENCE="${MIN_PAIR_CONFIDENCE:-0.55}"
+      MIN_CHARS="${MIN_CHARS:-12}"
+      MAX_LENGTH_RATIO="${MAX_LENGTH_RATIO:-3.0}"
+      MAX_TOKEN_OVERLAP="${MAX_TOKEN_OVERLAP:-0.99}"
+      MAX_PAIRS_PER_SAMPLE="${MAX_PAIRS_PER_SAMPLE:-1}"
+      C2_TRAIN_MODE="${C2_TRAIN_MODE:-ranking_only}"
+      C2_CALIBRATION_LOSS="${C2_CALIBRATION_LOSS:-mse}"
+      EXTERNAL_PAIR_WEIGHT="${EXTERNAL_PAIR_WEIGHT:-1.0}"
+      EXTERNAL_PAIR_SOURCE_BALANCE="${EXTERNAL_PAIR_SOURCE_BALANCE:-uniform}"
+      EXTERNAL_PAIR_ONLY="${EXTERNAL_PAIR_ONLY:-1}"
+      GROUP_C2_TRAIN_EXTRA_DEFAULT="${GROUP_C2_TRAIN_EXTRA_DEFAULT:---lambda-contrastive 1.0 --checkpoint-selection-metric ranking_score --contrastive-margin 0.2 --dropout-prob 0.1 --anti-saturation-weight 0.03 --anti-saturation-logit-threshold 4.0}"
+      ;;
     DT3_PRM800K_SMOKE)
       GROUP_TITLE="DT3 PRM800K Smoke"
       GROUP_INTENTION="Schema/learning sanity check on PRM800K-only triplets."
@@ -231,6 +332,32 @@ resolve_group() {
       EXTERNAL_PAIR_ONLY="${EXTERNAL_PAIR_ONLY:-1}"
       GROUP_C2_TRAIN_EXTRA_DEFAULT="${GROUP_C2_TRAIN_EXTRA_DEFAULT:---lambda-contrastive 1.0}"
       ;;
+    DT3_PRM800K_SEED3_STABLE)
+      GROUP_TITLE="DT3 PRM800K Seed3 Stable"
+      GROUP_INTENTION="Isolate whether PRM800K-only external pairs are learnable under the same stabilized ranking recipe."
+      GROUP_OBSERVE="Keep the DT2 stable recipe fixed and replace the source with PRM800K only."
+      GROUP_EXPECT="If PRM800K is a usable source, it should clear gate on its own; otherwise DT4 weakness is source quality, not seed noise."
+      SEEDS=(42 43 44)
+      USE_MATH_SHEPHERD=0
+      USE_PRM800K=1
+      C2_EPOCHS="${C2_EPOCHS:-3}"
+      C2_LR="${C2_LR:-5e-5}"
+      C2_TRAIN_BATCH_SIZE="${C2_TRAIN_BATCH_SIZE:-64}"
+      C2_EVAL_BATCH_SIZE="${C2_EVAL_BATCH_SIZE:-64}"
+      MAX_PAIRS_PER_SOURCE="${MAX_PAIRS_PER_SOURCE:-4000}"
+      MAX_PAIRS_TOTAL="${MAX_PAIRS_TOTAL:-4000}"
+      MIN_PAIR_CONFIDENCE="${MIN_PAIR_CONFIDENCE:-0.55}"
+      MIN_CHARS="${MIN_CHARS:-12}"
+      MAX_LENGTH_RATIO="${MAX_LENGTH_RATIO:-3.0}"
+      MAX_TOKEN_OVERLAP="${MAX_TOKEN_OVERLAP:-0.99}"
+      MAX_PAIRS_PER_SAMPLE="${MAX_PAIRS_PER_SAMPLE:-1}"
+      C2_TRAIN_MODE="${C2_TRAIN_MODE:-ranking_only}"
+      C2_CALIBRATION_LOSS="${C2_CALIBRATION_LOSS:-mse}"
+      EXTERNAL_PAIR_WEIGHT="${EXTERNAL_PAIR_WEIGHT:-1.0}"
+      EXTERNAL_PAIR_SOURCE_BALANCE="${EXTERNAL_PAIR_SOURCE_BALANCE:-uniform}"
+      EXTERNAL_PAIR_ONLY="${EXTERNAL_PAIR_ONLY:-1}"
+      GROUP_C2_TRAIN_EXTRA_DEFAULT="${GROUP_C2_TRAIN_EXTRA_DEFAULT:---lambda-contrastive 1.0 --checkpoint-selection-metric ranking_score --contrastive-margin 0.2 --dropout-prob 0.1 --anti-saturation-weight 0.03 --anti-saturation-logit-threshold 4.0}"
+      ;;
     DT4_MIXED_MS_PRM800K_SEED3)
       GROUP_TITLE="DT4 Mixed Math-Shepherd + PRM800K Seed3"
       GROUP_INTENTION="Phase-2 mixed-source robustness gate."
@@ -256,6 +383,32 @@ resolve_group() {
       EXTERNAL_PAIR_SOURCE_BALANCE="${EXTERNAL_PAIR_SOURCE_BALANCE:-uniform}"
       EXTERNAL_PAIR_ONLY="${EXTERNAL_PAIR_ONLY:-1}"
       GROUP_C2_TRAIN_EXTRA_DEFAULT="${GROUP_C2_TRAIN_EXTRA_DEFAULT:---lambda-contrastive 1.0}"
+      ;;
+    DT4_MIXED_MS_PRM800K_SEED3_STABLE)
+      GROUP_TITLE="DT4 Mixed Math-Shepherd + PRM800K Seed3 Stable"
+      GROUP_INTENTION="Test whether the new stable DT2 recipe still holds after adding a second external process-supervision source."
+      GROUP_OBSERVE="Keep the stable ranking recipe fixed and only widen data source diversity in a capped, source-balanced way."
+      GROUP_EXPECT="If mixed-source robustness is real, DT4 should remain above gate with acceptable std; otherwise the blocker is source shift/noise, not seed variance."
+      SEEDS=(42 43 44)
+      USE_MATH_SHEPHERD=1
+      USE_PRM800K=1
+      C2_EPOCHS="${C2_EPOCHS:-3}"
+      C2_LR="${C2_LR:-5e-5}"
+      C2_TRAIN_BATCH_SIZE="${C2_TRAIN_BATCH_SIZE:-64}"
+      C2_EVAL_BATCH_SIZE="${C2_EVAL_BATCH_SIZE:-64}"
+      MAX_PAIRS_PER_SOURCE="${MAX_PAIRS_PER_SOURCE:-4000}"
+      MAX_PAIRS_TOTAL="${MAX_PAIRS_TOTAL:-8000}"
+      MIN_PAIR_CONFIDENCE="${MIN_PAIR_CONFIDENCE:-0.55}"
+      MIN_CHARS="${MIN_CHARS:-12}"
+      MAX_LENGTH_RATIO="${MAX_LENGTH_RATIO:-3.0}"
+      MAX_TOKEN_OVERLAP="${MAX_TOKEN_OVERLAP:-0.99}"
+      MAX_PAIRS_PER_SAMPLE="${MAX_PAIRS_PER_SAMPLE:-1}"
+      C2_TRAIN_MODE="${C2_TRAIN_MODE:-ranking_only}"
+      C2_CALIBRATION_LOSS="${C2_CALIBRATION_LOSS:-mse}"
+      EXTERNAL_PAIR_WEIGHT="${EXTERNAL_PAIR_WEIGHT:-1.0}"
+      EXTERNAL_PAIR_SOURCE_BALANCE="${EXTERNAL_PAIR_SOURCE_BALANCE:-uniform}"
+      EXTERNAL_PAIR_ONLY="${EXTERNAL_PAIR_ONLY:-1}"
+      GROUP_C2_TRAIN_EXTRA_DEFAULT="${GROUP_C2_TRAIN_EXTRA_DEFAULT:---lambda-contrastive 1.0 --checkpoint-selection-metric ranking_score --contrastive-margin 0.2 --dropout-prob 0.1 --anti-saturation-weight 0.03 --anti-saturation-logit-threshold 4.0}"
       ;;
     DT5_ABLATION_NO_FILTER)
       GROUP_TITLE="DT5 Ablation No Filter"
@@ -314,8 +467,12 @@ resolve_group() {
       echo "Supported groups:" >&2
       echo "  DT1_MATH_SHEPHERD_SMOKE" >&2
       echo "  DT2_MATH_SHEPHERD_SEED3" >&2
+      echo "  DT2_MATH_SHEPHERD_SEED3_STABLE" >&2
+      echo "  DT2_MATH_SHEPHERD_SEED3_STABLE_C1_TRANSFER" >&2
       echo "  DT3_PRM800K_SMOKE" >&2
+      echo "  DT3_PRM800K_SEED3_STABLE" >&2
       echo "  DT4_MIXED_MS_PRM800K_SEED3" >&2
+      echo "  DT4_MIXED_MS_PRM800K_SEED3_STABLE" >&2
       echo "  DT5_ABLATION_NO_FILTER" >&2
       echo "  DT6_ABLATION_WITH_CAL_AUX" >&2
       exit 1
@@ -514,48 +671,101 @@ run_one_seed() {
   local group_tag
   group_tag="$(echo "$ACTIVE_PHASE_D6T_GROUP" | tr '[:upper:]' '[:lower:]')"
 
-  local pair_run_name="${RUN_PREFIX}_${group_tag}_s${seed}_pairs"
+  local split_seed="$seed"
+  if [[ "$D6T_PAIR_SPLIT_MODE" == "shared" ]]; then
+    # 中文：shared 模式下，多个训练 seed 共用同一份 external pair train/val 切分。
+    # 这样可以把“数据切分噪声”从“训练 seed 波动”里剥离出来，更适合做稳定性诊断。
+    split_seed="$D6T_PAIR_SPLIT_SEED"
+  fi
+
+  local pair_run_name=""
+  if [[ "$D6T_PAIR_SPLIT_MODE" == "shared" ]]; then
+    pair_run_name="${RUN_PREFIX}_${group_tag}_sharedsplit_s${split_seed}_pairs"
+  else
+    pair_run_name="${RUN_PREFIX}_${group_tag}_s${seed}_pairs"
+  fi
   local c2_run_name="${RUN_PREFIX}_${group_tag}_s${seed}_c2"
   local ext_eval_name="${RUN_PREFIX}_${group_tag}_s${seed}_ext_eval"
   local c1_eval_name="${RUN_PREFIX}_${group_tag}_s${seed}_c1_eval"
 
-  local prep_args=(
-    -u scripts/phase_d_prepare_external_pairs.py
-    --run-name "$pair_run_name"
-    --output-root "$PAIR_OUTPUT_ROOT"
-    --seed "$seed"
-    --validation-ratio "${VALIDATION_RATIO:-0.1}"
-    --build-step-converted
-    --max-pairs-per-source "$MAX_PAIRS_PER_SOURCE"
-    --max-pairs-total "$MAX_PAIRS_TOTAL"
-    --min-pair-confidence "$MIN_PAIR_CONFIDENCE"
-    --min-chars "$MIN_CHARS"
-    --max-length-ratio "$MAX_LENGTH_RATIO"
-    --max-token-overlap "$MAX_TOKEN_OVERLAP"
-    --max-pairs-per-sample "$MAX_PAIRS_PER_SAMPLE"
-  )
-  if [[ "$USE_MATH_SHEPHERD" -eq 1 ]]; then
-    prep_args+=(--math-shepherd-path "$MATH_SHEPHERD_PATH")
-  fi
-  if [[ "$USE_PRM800K" -eq 1 ]]; then
-    prep_args+=(--prm800k-path "$PRM800K_PATH")
-  fi
-  append_extra_args prep_args "$GROUP_PAIR_PREP_EXTRA_DEFAULT"
-  append_extra_args prep_args "$PAIR_PREP_EXTRA_ARGS"
-
-  CURRENT_STAGE="seed_${seed}_prepare_pairs"
-  {
-    log_line "[seed=${seed}] Prepare external triplet pairs"
-    log_line "[seed=${seed}] Command: $PYTHON_BIN ${prep_args[*]}"
-  } | tee -a "$SUITE_LOG_FILE" >/dev/null
-  "$PYTHON_BIN" "${prep_args[@]}" 2>&1 | tee -a "$SUITE_LOG_FILE"
-
   local pair_run_dir=""
-  pair_run_dir="$(latest_dir_for_prefix "${PAIR_OUTPUT_ROOT}/${pair_run_name}__*")"
+  if [[ "$D6T_PAIR_SPLIT_MODE" == "shared" && -n "$SHARED_PAIR_RUN_DIR" ]]; then
+    pair_run_dir="$SHARED_PAIR_RUN_DIR"
+    {
+      log_line "[seed=${seed}] Reusing shared pair split artifact"
+      log_line "[seed=${seed}] shared_pair_run_dir=$pair_run_dir"
+      log_line "[seed=${seed}] split_seed=$split_seed"
+    } | tee -a "$SUITE_LOG_FILE" >/dev/null
+  else
+    local prep_args=(
+      -u scripts/phase_d_prepare_external_pairs.py
+      --run-name "$pair_run_name"
+      --output-root "$PAIR_OUTPUT_ROOT"
+      --seed "$split_seed"
+      --validation-ratio "${VALIDATION_RATIO:-0.1}"
+      --build-step-converted
+      --max-pairs-per-source "$MAX_PAIRS_PER_SOURCE"
+      --max-pairs-total "$MAX_PAIRS_TOTAL"
+      --min-pair-confidence "$MIN_PAIR_CONFIDENCE"
+      --min-chars "$MIN_CHARS"
+      --max-length-ratio "$MAX_LENGTH_RATIO"
+      --max-token-overlap "$MAX_TOKEN_OVERLAP"
+      --max-pairs-per-sample "$MAX_PAIRS_PER_SAMPLE"
+    )
+    if [[ "$USE_MATH_SHEPHERD" -eq 1 ]]; then
+      prep_args+=(--math-shepherd-path "$MATH_SHEPHERD_PATH")
+    fi
+    if [[ "$USE_PRM800K" -eq 1 ]]; then
+      prep_args+=(--prm800k-path "$PRM800K_PATH")
+    fi
+    append_extra_args prep_args "$GROUP_PAIR_PREP_EXTRA_DEFAULT"
+    append_extra_args prep_args "$PAIR_PREP_EXTRA_ARGS"
+
+    CURRENT_STAGE="seed_${seed}_prepare_pairs"
+    {
+      log_line "[seed=${seed}] Prepare external triplet pairs"
+      log_line "[seed=${seed}] pair_split_mode=$D6T_PAIR_SPLIT_MODE split_seed=$split_seed"
+      log_line "[seed=${seed}] Command: $PYTHON_BIN ${prep_args[*]}"
+    } | tee -a "$SUITE_LOG_FILE" >/dev/null
+    "$PYTHON_BIN" "${prep_args[@]}" 2>&1 | tee -a "$SUITE_LOG_FILE"
+    pair_run_dir="$(latest_dir_for_prefix "${PAIR_OUTPUT_ROOT}/${pair_run_name}__*")"
+    if [[ "$D6T_PAIR_SPLIT_MODE" == "shared" ]]; then
+      # 中文：shared split 只准备一次 pair 数据，后续 seed 直接复用。
+      # 否则 seed=43/44 又重建一遍，即使 split_seed 相同，也会增加无意义运行时间。
+      SHARED_PAIR_RUN_DIR="$pair_run_dir"
+    fi
+  fi
+
   local pair_train_jsonl="${pair_run_dir}/train_pairs.jsonl"
   local pair_val_jsonl="${pair_run_dir}/validation_pairs.jsonl"
   require_file "$pair_train_jsonl" "train_pairs.jsonl"
   require_file "$pair_val_jsonl" "validation_pairs.jsonl"
+  local pair_summary_json="${pair_run_dir}/summary.json"
+  require_file "$pair_summary_json" "summary.json"
+  local pair_count_guard=""
+  pair_count_guard="$("$PYTHON_BIN" - "$pair_summary_json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+summary_path = Path(sys.argv[1])
+summary = json.loads(summary_path.read_text(encoding="utf-8"))
+num_train = int(summary.get("num_train_rows", 0))
+num_val = int(summary.get("num_validation_rows", 0))
+num_total = int(summary.get("num_rows_after_dedup", 0))
+if num_train <= 0 or num_val <= 0 or num_total <= 0:
+    raise SystemExit(
+        "External pair preparation produced zero usable rows. "
+        "Likely cause: min_pair_confidence too high for the selected source."
+    )
+print(f"train={num_train} val={num_val} total={num_total}")
+PY
+)"
+  {
+    # 中文：这里把 pair 数量记录进 suite.log，方便后面诊断“训练没学到东西”
+    # 究竟是目标太难，还是根本没喂到足够监督。
+    log_line "[seed=${seed}] external_pair_counts ${pair_count_guard}"
+  } | tee -a "$SUITE_LOG_FILE" >/dev/null
 
   local train_args=(
     -u scripts/phase_b_train_value.py
@@ -576,6 +786,7 @@ run_one_seed() {
     --external-pair-jsonl "$pair_train_jsonl"
     --external-pair-weight "$EXTERNAL_PAIR_WEIGHT"
     --external-pair-source-balance "$EXTERNAL_PAIR_SOURCE_BALANCE"
+    --external-pair-permutation-mode "$D6T_EXTERNAL_PAIR_PERM_MODE"
     --external-pair-min-confidence "$MIN_PAIR_CONFIDENCE"
     --external-pair-use-confidence-weights
     --train-mode "$C2_TRAIN_MODE"
@@ -586,6 +797,9 @@ run_one_seed() {
     --feature-cache-mode "$FEATURE_CACHE_MODE"
     --feature-cache-lock-timeout-sec "$FEATURE_CACHE_LOCK_TIMEOUT_SEC"
   )
+  if [[ "$D6T_STRICT_DETERMINISM" -eq 1 ]]; then
+    train_args+=(--strict-determinism)
+  fi
   if [[ "$EXTERNAL_PAIR_ONLY" -eq 1 ]]; then
     train_args+=(--external-pair-only)
   fi
@@ -666,6 +880,10 @@ main() {
   : > "$SEED_RESULTS_JSONL"
 
   resolve_group
+  if [[ "$D6T_PAIR_SPLIT_MODE" != "shared" && "$D6T_PAIR_SPLIT_MODE" != "per_seed" ]]; then
+    echo "ERROR: D6T_PAIR_SPLIT_MODE must be one of: shared, per_seed" >&2
+    exit 1
+  fi
   auto_resolve_phase_c_dirs
   if [[ "$USE_MATH_SHEPHERD" -eq 1 ]]; then
     require_file "$MATH_SHEPHERD_PATH" "Math-Shepherd JSONL"
@@ -689,6 +907,11 @@ main() {
     log_line "phase_c_train_dir=${PHASE_C_TRAIN_DIR}"
     log_line "phase_c_eval_dir=${PHASE_C_EVAL_DIR}"
     log_line "seeds=${SEEDS[*]}"
+    log_line "pair_split_mode=${D6T_PAIR_SPLIT_MODE}"
+    log_line "pair_split_seed=${D6T_PAIR_SPLIT_SEED}"
+    log_line "external_pair_perm_mode=${D6T_EXTERNAL_PAIR_PERM_MODE}"
+    log_line "strict_determinism=${D6T_STRICT_DETERMINISM}"
+    log_line "run_c1_standalone_eval=${RUN_C1_STANDALONE_EVAL}"
     log_line "feature_cache_root=${FEATURE_CACHE_ROOT}"
     log_line "feature_cache_mode=${FEATURE_CACHE_MODE}"
   } | tee -a "$SUITE_LOG_FILE"

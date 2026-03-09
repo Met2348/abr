@@ -1,5 +1,12 @@
 # Phase D Decision Update (2-Slide Deck Draft)
 
+> 2026-03-10 update:
+> this slide draft is now historical context for the "why external pairs" decision.
+> The current stronger conclusion is:
+> StrategyQA lacks PRM-grade step-quality supervision, so Phase D mainline
+> validation should move to PRM-grade benchmarks first; StrategyQA remains a
+> transfer/OOD target.
+
 ## Slide 1 - Why We Must Introduce External Pair Resources, and How
 
 Title:

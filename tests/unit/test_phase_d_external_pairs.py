@@ -12,6 +12,7 @@ from ours.phase_d.external_pairs import (
     load_external_pair_jsonl,
     summarize_external_pairs,
 )
+from ours.phase_d.external_pairs_adapters import PairBuildConfig, load_prm800k_pairs
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -112,3 +113,58 @@ def test_summarize_external_pairs_counts_sources_and_confidence() -> None:
     assert stats["by_source"] == {"r_prm": 2}
     assert stats["by_domain"] == {"general_math": 2}
     assert abs(float(stats["mean_pair_confidence"]) - 0.8) < 1e-8
+
+
+def test_load_prm800k_pairs_supports_official_step_completion_schema(tmp_path: Path) -> None:
+    path = tmp_path / "prm800k_like.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {
+                "question": {"problem": "What is 7 + 5?"},
+                "label": {
+                    "steps": [
+                        {
+                            "completions": [
+                                {
+                                    "text": "Compute the sum carefully: seven plus five equals twelve.",
+                                    "rating": 1,
+                                },
+                                {
+                                    "text": "Use an incorrect operation and claim seven plus five equals thirty-five.",
+                                    "rating": -1,
+                                },
+                            ],
+                            "chosen_completion": 0,
+                        },
+                        {
+                            "completions": [
+                                {
+                                    "text": "State the final answer: the result is twelve.",
+                                    "rating": 1,
+                                },
+                                {
+                                    "text": "State a wrong final answer: the result is ten.",
+                                    "rating": 0,
+                                },
+                            ],
+                            "chosen_completion": 0,
+                        },
+                    ]
+                },
+            }
+        ],
+    )
+
+    rows = load_prm800k_pairs(
+        path=path,
+        config=PairBuildConfig(
+            min_chars=12,
+            max_length_ratio=8.0,
+            max_token_overlap=1.0,
+            max_pairs_per_sample=2,
+        ),
+    )
+    assert len(rows) >= 1
+    assert all(row.source_tag == "prm800k" for row in rows)
+    assert all(row.domain_tag == "general_math" for row in rows)

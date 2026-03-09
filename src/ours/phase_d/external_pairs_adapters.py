@@ -220,6 +220,18 @@ def load_prm800k_pairs(
     for file_path in files:
         for row_idx, payload in enumerate(_iter_json_records(file_path), start=1):
             prompt = _extract_prm800k_prompt(payload)
+            direct_pairs = _extract_prm800k_completion_pairs(
+                payload=payload,
+                prompt_text=prompt,
+                source_file=file_path,
+                source_row_index=int(row_idx),
+                config=config,
+            )
+            if direct_pairs:
+                rows.extend(direct_pairs)
+                if max_pairs is not None and len(rows) >= int(max_pairs):
+                    return rows[: int(max_pairs)]
+                continue
             step_labels = _extract_step_labels_from_prm800k_payload(payload)
             converted = _convert_step_labels_to_pairs(
                 prompt_text=f"{prompt}\n\n",
@@ -235,6 +247,113 @@ def load_prm800k_pairs(
             rows.extend(converted)
             if max_pairs is not None and len(rows) >= int(max_pairs):
                 return rows[: int(max_pairs)]
+    return rows
+
+
+def _extract_prm800k_completion_pairs(
+    *,
+    payload: dict[str, Any],
+    prompt_text: str,
+    source_file: Path,
+    source_row_index: int,
+    config: PairBuildConfig,
+) -> list[ExternalPairRecord]:
+    """Build pairs from official PRM800K `label.steps[].completions[]` schema.
+
+    Strategy:
+    - For each step, select one positive completion (`rating > 0`) and one
+      non-positive completion (`rating <= 0`).
+    - Compose pair texts as prefixes over chosen history + current step variant.
+    """
+    label_obj = payload.get("label")
+    if not isinstance(label_obj, dict):
+        return []
+    steps = label_obj.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return []
+
+    rows: list[ExternalPairRecord] = []
+    history_steps: list[str] = []
+    for step_idx, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        completions = step.get("completions")
+        if not isinstance(completions, list):
+            continue
+
+        positive: tuple[str, float] | None = None
+        non_positive: tuple[str, float] | None = None
+        for item in completions:
+            if not isinstance(item, dict):
+                continue
+            text_raw = item.get("text")
+            if not isinstance(text_raw, str):
+                continue
+            text = text_raw.strip()
+            if text == "":
+                continue
+            rating = _safe_rating_value(item.get("rating"))
+            if rating is None:
+                continue
+            if rating > 0.0:
+                if positive is None or rating > positive[1]:
+                    positive = (text, rating)
+            else:
+                if non_positive is None or rating < non_positive[1]:
+                    non_positive = (text, rating)
+
+        if positive is not None and non_positive is not None:
+            chosen_prefix = _join_steps_as_prefix(
+                [*history_steps, positive[0]],
+                len(history_steps),
+            )
+            rejected_prefix = _join_steps_as_prefix(
+                [*history_steps, non_positive[0]],
+                len(history_steps),
+            )
+            rating_gap = positive[1] - non_positive[1]
+            if rating_gap >= 2.0:
+                confidence = 0.78
+            elif rating_gap >= 1.0:
+                confidence = 0.70
+            else:
+                confidence = 0.62
+            record = _build_record(
+                source_tag="prm800k",
+                domain_tag="general_math",
+                prompt_text=f"{prompt_text}\n\n",
+                chosen_text=chosen_prefix,
+                rejected_text=rejected_prefix,
+                pair_confidence=confidence,
+                metadata={
+                    "source_file": str(source_file),
+                    "source_row_index": int(source_row_index),
+                    "positive_step_index": int(step_idx),
+                    "negative_step_index": int(step_idx),
+                    "rating_positive": float(positive[1]),
+                    "rating_negative": float(non_positive[1]),
+                    "pair_build_mode": "prm800k_completion_ratings",
+                },
+                config=config,
+            )
+            if record is not None:
+                rows.append(record)
+                if len(rows) >= int(config.max_pairs_per_sample):
+                    break
+
+        # Keep prefix progression close to annotator-selected chain when possible.
+        chosen_idx = step.get("chosen_completion")
+        next_history = None
+        if isinstance(chosen_idx, int) and 0 <= chosen_idx < len(completions):
+            chosen_item = completions[chosen_idx]
+            if isinstance(chosen_item, dict):
+                text_raw = chosen_item.get("text")
+                if isinstance(text_raw, str) and text_raw.strip():
+                    next_history = text_raw.strip()
+        if next_history is None and positive is not None:
+            next_history = positive[0]
+        if next_history is not None:
+            history_steps.append(next_history)
     return rows
 
 
@@ -561,6 +680,19 @@ def _parse_sign_value(value: Any) -> str | None:
     return None
 
 
+def _safe_rating_value(value: Any) -> float | None:
+    """Convert one rating field to float, ignoring invalid values."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    try:
+        out = float(value)
+    except Exception:  # noqa: BLE001
+        return None
+    return out
+
+
 def _extract_step_labels_from_conversations(conversations: list[dict[str, Any]]) -> list[tuple[str, str]]:
     """Extract `(step_text, label)` from RLHFlow conversation turns."""
     rows: list[tuple[str, str]] = []
@@ -601,6 +733,9 @@ def _convert_step_labels_to_pairs(
     for pos_idx in positives:
         if len(rows) >= int(config.max_pairs_per_sample):
             break
+        # 中文：这里不是拿“任意一个负样本”，而是优先选距离最近的错误步骤。
+        # 目的不是构造最难/最强 pair，而是让 chosen/rejected 共享尽量多上下文，
+        # 这样 ranking 信号更像“这一步好坏”的差异，而不是整条长推理完全不同。
         neg_idx = min(negatives, key=lambda n: abs(n - pos_idx))
         key = (pos_idx, neg_idx)
         if key in used_pairs:
@@ -609,6 +744,8 @@ def _convert_step_labels_to_pairs(
         chosen_text = _join_steps_as_prefix([step for step, _ in step_labels], pos_idx)
         rejected_text = _join_steps_as_prefix([step for step, _ in step_labels], neg_idx)
         distance = abs(pos_idx - neg_idx)
+        # 中文：当前 confidence 是经验型启发式，不是假设它等于“真实概率”。
+        # 距离近说明两个 prefix 只在局部步骤附近分叉，通常更适合作为高质量排序监督。
         confidence = 0.62 if distance <= 2 else 0.55
         record = _build_record(
             source_tag=source_tag,
@@ -657,6 +794,8 @@ def _build_record(
         rejected_text=rejected_text,
     )
     if not _passes_quality_filter(flags=flags, config=config):
+        # 中文：质量过滤在 adapter 层提前做，而不是等到训练再发现坏样本。
+        # 这样 summary.json 能直接反映“外部 pair 源本身质量如何”，便于调数据。
         return None
     pair_id = _stable_hash(
         source_tag,
@@ -665,6 +804,8 @@ def _build_record(
         _normalize_space(chosen_text),
         _normalize_space(rejected_text),
     )[:20]
+    # 中文：pair_id 由内容稳定哈希生成，而不是依赖行号。
+    # 好处是不同批次重建/合并多个来源时，去重和复现都更可靠。
     record = ExternalPairRecord(
         pair_id=pair_id,
         source_tag=str(source_tag).strip(),
@@ -697,6 +838,8 @@ def _compute_quality_flags(
     rejected_tokens = set(rejected_norm.split())
     union = chosen_tokens | rejected_tokens
     overlap = (len(chosen_tokens & rejected_tokens) / len(union)) if union else 1.0
+    # 中文：这里保留的是“可解释的质量特征”，而不是直接在此处做 hard filter。
+    # 后续 config 可以基于这些 flag 改阈值，避免把过滤逻辑散落在多处。
     return {
         "chosen_chars": int(chosen_chars),
         "rejected_chars": int(rejected_chars),

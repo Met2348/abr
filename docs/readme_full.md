@@ -2,7 +2,7 @@
 
 This repository is building an in-house reasoning-faithfulness pipeline from scratch.
 
-Current milestone status (2026-03-05):
+Current milestone status (2026-03-10):
 - Phase A is concluded and stable (full-dataset benchmark contracts are reproducible).
 - Phase B core diagnosis is concluded:
   - StrategyQA can gain from PEFT under current pipeline,
@@ -37,15 +37,306 @@ Current milestone status (2026-03-05):
     - A/B/C stages show weak AUC and poor calibration under current config.
   - Several D4 tuning runs failed at D2 eval due teacher-coverage gate
     (`coverage < teacher_min_coverage`), so command-level coverage control is required.
-  - D6 ranking-first implementation is now ready (code-level complete, pending
-    first execution):
-    - ranking-based checkpoint selection in C2,
-    - teacher-free MC control arm,
-    - direct D6 control-vs-pair-gate smoke groups.
+  - D6-T stable DT2 branch has now produced the first strong positive result:
+    - `phase_d6t_stable_0306_2211`
+    - external held-out pair gate passed with:
+      - `mean_pair_acc=0.8154`,
+      - `mean_auc=0.7857`,
+      - `std_pair_acc=0.0075`,
+      - `std_auc=0.0086`.
+    - This is the first clean evidence that under high-quality same-question
+      triplets, our current value-head training can learn stable ranking.
+  - Immediate implication:
+    - the old "seed instability blocks the whole D6-T branch" diagnosis is no
+      longer true for the stabilized DT2 recipe,
+    - the next blockers are now:
+      - in-domain transfer back to StrategyQA C1 metrics,
+      - mixed-source robustness (`Math-Shepherd + PRM800K`).
+  - New bridge result (critical):
+    - `DB3_STRATEGYQA_BRIDGE_FULL_RANK_SEED3`
+      - `mean_stage2_corr_pair_acc=0.5874`
+      - `mean_stage2_corr_auc=0.5461`
+      - vs strong C2 reference:
+        - `+0.0499 pair_acc`
+        - `+0.0303 auc`
+    - interpretation:
+      - external ranking pretrain is not enough by itself,
+      - but `external ranking pretrain -> in-domain ranking continue` is a real
+        positive method result.
+  - New bridge counterexample (equally important):
+    - `DB4_STRATEGYQA_BRIDGE_FULL_JOINT_SEED3`
+      - `mean_stage2_corr_pair_acc=0.4957`
+      - `mean_stage2_corr_auc=0.4948`
+      - while Brier improves relative to DB3/reference.
+    - interpretation:
+      - scalar calibration objective can conflict with ranking objective,
+      - so the main object we need to learn is closer to `process ranking`
+        than to `scalar value regression`.
+  - Strategic pivot (2026-03-10, authoritative):
+    - StrategyQA no longer serves as the primary supervised benchmark for
+      value-head / process-ranking validation.
+    - Reason:
+      - public StrategyQA resources provide decomposition/evidence, but do not
+        provide PRM-grade step-quality labels or high-quality process
+        preference pairs.
+      - continuing to use StrategyQA as the main supervision source risks a
+        `garbage in, garbage out` regime.
+    - New mainline benchmark policy:
+      - training / supervision:
+        - `Math-Shepherd`
+        - `PRM800K`
+      - primary evaluation:
+        - `ProcessBench`
+        - `PRMBench`
+      - optional future non-math logic track:
+        - `ProofWriter`
+        - `EntailmentBank`
+        - `FOLIO`
+        - `FoVer`
+    - StrategyQA remains important, but only as:
+      - bridge continue-training target,
+      - downstream transfer benchmark,
+      - OOD stress test.
+  - Latest strict diagnosis (2026-03-07):
+    - `DT4_MIXED_MS_PRM800K_SEED3_STABLE` does pass the external gate, but only
+      marginally:
+      - `mean_pair_acc=0.6612`
+      - `mean_auc=0.6616`
+    - source breakdown shows the mixed pass is asymmetric:
+      - `math_shepherd`: clearly useful,
+      - `prm800k`: near-random under current adapter/training recipe.
+    - the old transfer run `phase_d6t_transfer_0306_2236` is **not valid
+      evidence** for transfer because its `C1 standalone eval` never actually
+      ran (`c1_eval_run_dir=null` for all seeds); that suite has now been fixed.
 
 Primary roadmap:
 - `TODO_ours.md`
 - `phase_D_plan.md`
+
+## 2026-03-10 Strategic Pivot (Authoritative)
+
+This is now the repository's active methodology baseline.
+
+Why the pivot happened:
+1. `DT2 stable` proved high-quality external ranking is learnable.
+2. `transfer_fix` proved direct transfer back to StrategyQA stays near random.
+3. `DB3` then proved bridge-style ranking-only continue training can help.
+4. `DB4` proved adding scalar/joint calibration pressure can destroy that gain.
+5. Separate dataset research found no public StrategyQA resource with PRM-grade
+   step-quality supervision.
+
+What this means:
+1. StrategyQA is still valuable, but no longer as the primary supervised
+   benchmark for value-head training.
+2. The scientific question should first be answered on datasets whose process
+   supervision is genuinely strong.
+3. After the method is validated there, StrategyQA becomes the transfer test
+   that tells us how much of the learned ranking prior can survive domain shift.
+
+Operational decision:
+1. Freeze existing StrategyQA value-head results as:
+   - control baselines,
+   - transfer evidence,
+   - objective-mismatch evidence.
+2. Move main validation to:
+   - training / supervision:
+     - `Math-Shepherd`
+     - `PRM800K`
+   - evaluation:
+     - `ProcessBench`
+     - `PRMBench`
+3. Keep a second-track plan for non-math logical reasoning:
+   - `ProofWriter`
+   - `EntailmentBank`
+   - `FOLIO`
+   - `FoVer`
+
+External references that motivated the benchmark change:
+1. StrategyQA dataset card:
+   - https://huggingface.co/datasets/voidful/StrategyQA
+2. StrategyQA official repository:
+   - https://github.com/eladsegal/strategyqa
+3. PRM800K:
+   - https://github.com/openai/prm800k
+4. Math-Shepherd:
+   - https://huggingface.co/datasets/peiyi9979/Math-Shepherd
+5. ProcessBench:
+   - https://huggingface.co/datasets/Qwen/ProcessBench
+6. PRMBench:
+   - https://prmbench.github.io/
+
+## 2026-03-07 D6-T Strict Diagnosis
+
+This is the current method-level reading of the latest two Phase D6-T results.
+
+Confirmed runs:
+1. `assets/artifacts/phase_d6t_logs/phase_d6t_stable_0306_2211/final_summary.md`
+2. `assets/artifacts/phase_d6t_logs/phase_d6t_mixed_stable_0306_2242/final_summary.md`
+3. `assets/artifacts/phase_d_triplet_eval/phase_d6t_mixed_stable_0306_2242_dt4_mixed_ms_prm800k_seed3_stable_s42_ext_eval_20260306T150134Z/metrics.json`
+
+What is now solid:
+1. `DT2_MATH_SHEPHERD_SEED3_STABLE` is a real success:
+   - external held-out ranking is high and seed-stable,
+   - so the ranking-first branch is learnable under high-quality same-question pairs.
+2. `DT4_MIXED_MS_PRM800K_SEED3_STABLE` is only a partial success:
+   - overall gate barely passes,
+   - but source breakdown shows `PRM800K` is almost random while `Math-Shepherd`
+     still carries the result.
+3. Therefore the mixed result should not be narrated as:
+   - "multi-source external supervision works",
+   - but as:
+   - "the current mixed recipe still survives because Math-Shepherd dominates the usable signal".
+
+What is not yet solved:
+1. In-domain transfer is still unproven.
+2. The previous transfer suite was implementation-invalid:
+   - `phase_d6t_transfer_0306_2236`
+   - `c1_eval_run_dir=null` for all seeds,
+   - root cause: the `DT2_MATH_SHEPHERD_SEED3_STABLE_C1_TRANSFER` group did not
+     force-enable `RUN_C1_STANDALONE_EVAL`, so stale environment state could
+     silently disable the extra eval stage.
+3. The D6 promotion gate report remains blocked by an older failed D6 gated run:
+   - `D6_STRATEGYQA_SMOKE_RANKING_PRM_GATE`
+   - failure reason:
+     - zero optimizer steps after overly strict pair filtering,
+     - not a parser bug in the gate report itself.
+
+Method-level conclusion:
+1. There is no longer evidence of a core implementation bug in the stable DT2
+   learning loop.
+2. The remaining risk is methodological:
+   - source mismatch,
+   - external pair quality mismatch,
+   - and lack of transfer from math-process triplets to StrategyQA corruption ranking.
+3. Two new strict results sharpened this diagnosis:
+   - `DT2_MATH_SHEPHERD_SEED3_STABLE_C1_TRANSFER`
+     - external held-out remains strong,
+     - but mean in-domain C1 transfer stays near random,
+     - therefore "external ranking learnability" does not automatically become
+       "target-task corruption ranking utility".
+   - `DT3_PRM800K_SEED3_STABLE`
+     - stable but weak,
+     - therefore `PRM800K` under the current adapter should be treated as a
+       control/ablation source, not the main external signal.
+4. Immediate project move:
+   - stop spending the next cycle on small LR/epoch tuning,
+   - move to a bridge experiment:
+     - stage-1 external ranking pretrain on Math-Shepherd,
+     - stage-2 warm-start on StrategyQA in-domain CQR/C1 pairs,
+     - evaluate whether in-domain `corr_pair_acc` / `corr_auc` improves.
+
+## 2026-03-07 Bridge Suite Added
+
+Bridge rationale:
+1. `DT2 stable` proved the ranking branch can learn from high-quality external
+   triplets.
+2. `transfer_fix` proved that direct zero-bridge transfer back to StrategyQA is
+   not enough.
+3. Therefore the right next method step is not more direct-transfer tuning, but
+   a two-stage bridge.
+
+What is implemented:
+1. `scripts/phase_b_train_value.py`
+   - added `--init-value-head-path`,
+   - allows stage-2 to warm-start from a stage-1 `best_value_head.pt`,
+   - validates hidden-size/pooling compatibility before loading.
+2. `scripts/run_phase_d_bridge_suite.sh`
+   - stage-1:
+     - build/reuse shared Math-Shepherd pairs,
+     - run stable external ranking pretrain,
+     - evaluate on held-out external validation pairs.
+   - stage-2:
+     - continue training on StrategyQA in-domain CQR/C1 artifacts,
+     - re-use the stage-1 value-head weights via `--init-value-head-path`,
+     - summarize final in-domain corruption metrics and delta vs reference C2 baseline.
+3. `scripts/phase_b_train_value.py`
+   - fixed a real eval bug:
+     - when `--max-eval-samples` truncates eval prefixes, corruption rows are
+       now aligned to the surviving clean prefix IDs,
+     - avoids `KeyError(clean_prefix_id)` during smoke and bridge runs.
+
+Smoke validation:
+1. `phase_d_bridge_devsmoke2`
+   - successfully completed:
+     - pair preparation,
+     - stage-1 ranking pretrain,
+     - stage-1 external held-out eval,
+     - stage-2 warm-start (`init_value_head_ok` printed),
+     - final bridge summary.
+2. This was a tiny run for wiring validation only, not for reporting quality.
+
+Directly runnable bridge groups:
+```bash
+# DB1: smoke, ranking-only bridge
+ACTIVE_PHASE_DBR_GROUP=DB1_STRATEGYQA_BRIDGE_SMOKE_RANK \
+RUN_PREFIX=phase_d_bridge_smoke_rank_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_d_bridge_suite.sh
+
+# DB2: smoke, joint bridge
+ACTIVE_PHASE_DBR_GROUP=DB2_STRATEGYQA_BRIDGE_SMOKE_JOINT \
+RUN_PREFIX=phase_d_bridge_smoke_joint_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_d_bridge_suite.sh
+
+# DB3: full seed-3, ranking-only bridge
+ACTIVE_PHASE_DBR_GROUP=DB3_STRATEGYQA_BRIDGE_FULL_RANK_SEED3 \
+RUN_PREFIX=phase_d_bridge_full_rank_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_d_bridge_suite.sh
+
+# DB4: full seed-3, joint bridge
+ACTIVE_PHASE_DBR_GROUP=DB4_STRATEGYQA_BRIDGE_FULL_JOINT_SEED3 \
+RUN_PREFIX=phase_d_bridge_full_joint_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_d_bridge_suite.sh
+```
+
+Interpretation update after full runs:
+1. `DB3` is now frozen as the strongest positive StrategyQA transfer result in
+   this repository.
+2. `DB4` is frozen as the strongest evidence that ranking and scalar
+   calibration are not interchangeable objectives in our setting.
+3. These runs should now be cited as methodological evidence, not as proof that
+   StrategyQA itself is a sufficient supervised benchmark.
+
+## 2026-03-06 Stable DT2 Breakthrough
+
+This is now the most important new result in the repository.
+
+Confirmed run:
+1. `assets/artifacts/phase_d6t_logs/phase_d6t_stable_0306_2211/suite.log`
+2. `assets/artifacts/phase_d6t_logs/phase_d6t_stable_0306_2211/seed_results.jsonl`
+3. `assets/artifacts/phase_d_external_pairs/phase_d6t_stable_0306_2211_dt2_math_shepherd_seed3_stable_sharedsplit_s42_pairs__b5c1a9ab3d12/summary.json`
+
+Per-seed external held-out ranking:
+1. seed42:
+   - `pair_acc=0.8050`, `auc=0.7772`
+2. seed43:
+   - `pair_acc=0.8222`, `auc=0.7975`
+3. seed44:
+   - `pair_acc=0.8190`, `auc=0.7823`
+
+Aggregated result:
+1. `mean_pair_acc=0.8154`
+2. `mean_auc=0.7857`
+3. `std_pair_acc=0.0075`
+4. `std_auc=0.0086`
+5. gate interpretation:
+   - pass
+
+Why this matters:
+1. It resolves the earlier ambiguity around D6-T:
+   - the ranking branch is learnable,
+   - and it can be made seed-stable with shared split + deterministic ordering + conservative optimization.
+2. It narrows the real remaining problem:
+   - not "can the head learn ranking at all?",
+   - but "can that ranking signal transfer to our in-domain corruption metrics and survive mixed-source data?".
+3. Therefore the next project move is no longer more random hyperparameter search on unstable DT2,
+   but:
+   - transfer verification,
+   - mixed-source robustness,
+   - then return to mainline D6 promotion logic.
 
 ## 2026-03-05 Critical Diagnosis (Project Direction)
 
@@ -94,6 +385,64 @@ Mentor guidance (actionable summary, 2026-03-05):
    - `phase_D_plan.md` now includes a staged checklist `D6T-0 -> D6T-5`
      (contract freeze, data quality gate, seed-3 stability gate, mixed-source
      robustness gate, and migration decision gate).
+
+## 2026-03-05 Latest Result Snapshot (Historical, Superseded by 2026-03-06 Stable DT2)
+
+This section records the latest overnight reruns and their implications.
+
+### New run outputs (confirmed)
+
+1. D6-T cal-aux substitute reruns:
+   - `assets/artifacts/phase_d6t_logs/d6t_dt2_calaux_substitute_0305_0522/final_summary.md`
+   - `assets/artifacts/phase_d6t_logs/d6t_dt2_calaux_substitute_0305_0523/final_summary.md`
+   - `assets/artifacts/phase_d6t_logs/d6t_dt2_calaux_substitute_0305_0526/final_summary.md`
+2. D4 full rerun attempt:
+   - `assets/artifacts/phase_d_logs/d4abc_full_0305_0523/suite.log`
+3. New D4 3-way smoke summary:
+   - `assets/artifacts/phase_d_logs/phase_cd_full_0304_2347_d4_strategyqa_smoke_3way/final_summary.md`
+
+### Key observed numbers
+
+1. Historical status before the stable recipe:
+   - `DT2_MATH_SHEPHERD_SEED3` was unstable across seeds,
+   - typical pattern in latest reruns:
+     - seed42: near-random to moderate (`pair_acc ~0.54-0.77`)
+     - seed43: strong (`pair_acc ~0.75-0.79`, `auc ~0.74-0.78`)
+     - seed44: collapse (`pair_acc ~0.36-0.37`, `auc ~0.37-0.41`)
+   - all reruns fail gate due high variance; `gate_pass=False`.
+2. D6-T cal-aux substitute does not improve robustness:
+   - no stable lift vs ranking-only baseline;
+   - variance remains the dominant failure mode.
+3. D4ABC full rerun (`d4abc_full_0305_0523`) did not reach stage summary:
+   - log stops in `D4A_train_c2` during large external pair encoding;
+   - no `final_summary.md` generated.
+4. D4 3-way smoke confirms prior pattern:
+   - teacher/fused strongly improve Brier (calibration),
+   - but ranking metrics remain only modestly above random (`pair_acc ~0.56`, `auc ~0.52`).
+
+### Critical diagnosis update
+
+1. Current blocker is now clearly "ranking stability", not "single-run learnability":
+   - we can get good seeds, but not seed-robust behavior.
+2. Calibration auxiliary does not solve this blocker:
+   - improves calibration diagnostics in some runs,
+   - but does not reliably prevent ranking collapse.
+3. Full external-pair chain is still compute-fragile at current scale:
+   - pair volume is too large for reliable one-shot full reruns without tighter caps/sharding.
+
+### Immediate next steps (execution order)
+
+1. Keep D6-T as the main promotion gate, but enforce robust-seed criteria:
+   - require `mean_pair_acc >= 0.65`, `mean_auc >= 0.65`,
+   - plus `std_pair_acc <= 0.05` and `std_auc <= 0.05` before promotion.
+2. Run seed-collapse triage before new architecture changes:
+   - compare score distributions for strong seed vs collapsed seed from `phase_d_triplet_eval/*/pair_scores.jsonl`;
+   - explicitly check saturation (`chosen_score` and `rejected_score` both near 1).
+3. For D4 full-chain reruns, cap external pair volume first:
+   - do not rerun uncapped D4A full;
+   - start from bounded-pair variants and recover end-to-end stage completion.
+4. Treat D4 teacher/fused improvements as calibration-side evidence only:
+   - do not use current D4 outputs as ranking-promotion evidence.
 
 Evidence files:
 1. `assets/artifacts/phase_d_logs/phase_d_bundle_smoke/final_summary.md`
@@ -294,6 +643,32 @@ bash scripts/run_phase_d_teacher_suite.sh
 # clone PRM800K data repo locally (path used by suite default).
 git clone https://github.com/openai/prm800k assets/external_datasets/openai_prm800k
 
+# PRM800K uses Git LFS for large JSONL files.
+# If `git lfs` is missing in your env, install it first:
+source ~/anaconda3/etc/profile.d/conda.sh
+conda activate base
+conda install -y -c conda-forge git-lfs
+
+# Pull real JSONL payloads (instead of LFS pointer stubs).
+git lfs install --skip-repo
+git -C assets/external_datasets/openai_prm800k lfs install
+git -C assets/external_datasets/openai_prm800k lfs pull
+
+# Quick parser smoke before running DT3/DT4:
+python -u scripts/phase_d_prepare_external_pairs.py \
+  --run-name prm800k_install_smoke \
+  --output-root assets/artifacts/phase_d_external_pairs \
+  --prm800k-path assets/external_datasets/openai_prm800k \
+  --max-pairs-total 200 \
+  --max-pairs-per-source 200 \
+  --validation-ratio 0.1 \
+  --min-pair-confidence 0.55 \
+  --min-chars 12 \
+  --max-length-ratio 3.0 \
+  --max-token-overlap 0.99 \
+  --max-pairs-per-sample 2 \
+  --overwrite
+
 # DT1: Math-Shepherd smoke
 ACTIVE_PHASE_D6T_GROUP=DT1_MATH_SHEPHERD_SMOKE \
 RUN_PREFIX=d6t_dt1_smoke \
@@ -412,6 +787,189 @@ CUDA_VISIBLE_DEVICES=0 \
 bash scripts/run_phase_d_teacher_suite.sh
 ```
 
+### Bundle D6/D4 diagnosis matrix (current active paths, 2026-03-05)
+
+Use this matrix when the main issue is "good seeds exist, but seed stability fails".
+
+Common env:
+
+```bash
+cd /home/zling/y/bcr/ref
+export PYTHONPATH=$PWD/src
+export CUDA_VISIBLE_DEVICES=0
+
+export PHASE_C_TRAIN_DIR=assets/artifacts/phase_c_data/strategyqa/phase_d_bundle_smoke_d4_strategyqa_smoke_3way_d2_c1_train__b06602a61215
+export PHASE_C_EVAL_DIR=assets/artifacts/phase_c_data/strategyqa/phase_d_bundle_smoke_d4_strategyqa_smoke_3way_d2_c1_eval__fd79eb66bbe5
+export MATH_SHEPHERD_PATH=assets/external_datasets/peiyi_math_shepherd/math-shepherd.jsonl
+export FEATURE_CACHE_ROOT=assets/artifacts/phase_c_feature_cache
+export FEATURE_CACHE_MODE=read_write
+```
+
+G1 (baseline, ranking-only, seed-3 gate):
+
+```bash
+ACTIVE_PHASE_D6T_GROUP=DT2_MATH_SHEPHERD_SEED3 \
+RUN_PREFIX=diag_g1_dt2_rank_seed3_$(date +%m%d_%H%M) \
+PHASE_C_TRAIN_DIR=$PHASE_C_TRAIN_DIR \
+PHASE_C_EVAL_DIR=$PHASE_C_EVAL_DIR \
+MATH_SHEPHERD_PATH=$MATH_SHEPHERD_PATH \
+C2_EPOCHS=4 \
+C2_LR=1e-4 \
+C2_TRAIN_BATCH_SIZE=64 \
+C2_EVAL_BATCH_SIZE=64 \
+FEATURE_CACHE_ROOT=$FEATURE_CACHE_ROOT \
+FEATURE_CACHE_MODE=$FEATURE_CACHE_MODE \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+```
+
+G2 (repeatability rerun, same config new prefix):
+
+```bash
+ACTIVE_PHASE_D6T_GROUP=DT2_MATH_SHEPHERD_SEED3 \
+RUN_PREFIX=diag_g2_dt2_rank_repeat_$(date +%m%d_%H%M) \
+PHASE_C_TRAIN_DIR=$PHASE_C_TRAIN_DIR \
+PHASE_C_EVAL_DIR=$PHASE_C_EVAL_DIR \
+MATH_SHEPHERD_PATH=$MATH_SHEPHERD_PATH \
+C2_EPOCHS=4 \
+C2_LR=1e-4 \
+C2_TRAIN_BATCH_SIZE=64 \
+C2_EVAL_BATCH_SIZE=64 \
+FEATURE_CACHE_ROOT=$FEATURE_CACHE_ROOT \
+FEATURE_CACHE_MODE=$FEATURE_CACHE_MODE \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+```
+
+G3 (calibration-aux substitute ablation):
+
+```bash
+ACTIVE_PHASE_D6T_GROUP=DT2_MATH_SHEPHERD_SEED3 \
+RUN_PREFIX=diag_g3_dt2_calaux_$(date +%m%d_%H%M) \
+PHASE_C_TRAIN_DIR=$PHASE_C_TRAIN_DIR \
+PHASE_C_EVAL_DIR=$PHASE_C_EVAL_DIR \
+MATH_SHEPHERD_PATH=$MATH_SHEPHERD_PATH \
+C2_TRAIN_MODE=joint \
+C2_CALIBRATION_LOSS=bce_mse \
+C2_TRAIN_EXTRA_ARGS="--calibration-mse-weight 0.2 --calibration-bce-weight 0.2" \
+C2_EPOCHS=4 \
+C2_LR=1e-4 \
+C2_TRAIN_BATCH_SIZE=64 \
+C2_EVAL_BATCH_SIZE=64 \
+FEATURE_CACHE_ROOT=$FEATURE_CACHE_ROOT \
+FEATURE_CACHE_MODE=$FEATURE_CACHE_MODE \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+```
+
+G4 (stability-tuned DT2, lower lr + ranking_score selection):
+
+```bash
+ACTIVE_PHASE_D6T_GROUP=DT2_MATH_SHEPHERD_SEED3 \
+RUN_PREFIX=diag_g4_dt2_stability_$(date +%m%d_%H%M) \
+PHASE_C_TRAIN_DIR=$PHASE_C_TRAIN_DIR \
+PHASE_C_EVAL_DIR=$PHASE_C_EVAL_DIR \
+MATH_SHEPHERD_PATH=$MATH_SHEPHERD_PATH \
+C2_EPOCHS=4 \
+C2_LR=5e-5 \
+C2_TRAIN_BATCH_SIZE=64 \
+C2_EVAL_BATCH_SIZE=64 \
+C2_TRAIN_EXTRA_ARGS="--checkpoint-selection-metric ranking_score --contrastive-margin 0.2 --dropout-prob 0.1" \
+FEATURE_CACHE_ROOT=$FEATURE_CACHE_ROOT \
+FEATURE_CACHE_MODE=$FEATURE_CACHE_MODE \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+```
+
+G4b (stability + anti-saturation regularization):
+
+```bash
+ACTIVE_PHASE_D6T_GROUP=DT2_MATH_SHEPHERD_SEED3 \
+RUN_PREFIX=diag_g4b_dt2_antisat_$(date +%m%d_%H%M) \
+PHASE_C_TRAIN_DIR=$PHASE_C_TRAIN_DIR \
+PHASE_C_EVAL_DIR=$PHASE_C_EVAL_DIR \
+MATH_SHEPHERD_PATH=$MATH_SHEPHERD_PATH \
+C2_EPOCHS=4 \
+C2_LR=5e-5 \
+C2_TRAIN_BATCH_SIZE=64 \
+C2_EVAL_BATCH_SIZE=64 \
+C2_TRAIN_EXTRA_ARGS="--checkpoint-selection-metric ranking_score --contrastive-margin 0.2 --dropout-prob 0.1 --anti-saturation-weight 0.03 --anti-saturation-logit-threshold 4.0" \
+FEATURE_CACHE_ROOT=$FEATURE_CACHE_ROOT \
+FEATURE_CACHE_MODE=$FEATURE_CACHE_MODE \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+```
+
+G5 (D4A-only capacity diagnosis with strict caps, must finish):
+
+```bash
+ACTIVE_PHASE_D4_GROUP=D4A_STRATEGYQA_SMOKE \
+RUN_PREFIX=diag_g5_d4a_cap_$(date +%m%d_%H%M) \
+PHASE_C_TRAIN_DIR=$PHASE_C_TRAIN_DIR \
+PHASE_C_EVAL_DIR=$PHASE_C_EVAL_DIR \
+R_PRM_ROOT=assets/external_datasets/kevinpro_r_prm \
+PRMBENCH_PREVIEW_PATH=assets/external_datasets/hitsmy_prmbench_preview/prmbench_preview.jsonl \
+PAIR_PREP_EXTRA_ARGS="--max-pairs-per-source 4000 --max-pairs-total 12000" \
+C2_TRAIN_EXTRA_ARGS="--external-pair-max-train-samples 30000" \
+C2_EPOCHS=4 \
+C2_TRAIN_BATCH_SIZE=32 \
+C2_EVAL_BATCH_SIZE=32 \
+D4_EVAL_POSTHOC_MODE=none \
+FEATURE_CACHE_ROOT=$FEATURE_CACHE_ROOT \
+FEATURE_CACHE_MODE=$FEATURE_CACHE_MODE \
+bash scripts/run_phase_d_external_pair_suite.sh
+```
+
+G6 (D4ABC chain with caps, diagnose stage-by-stage survivability):
+
+```bash
+ACTIVE_PHASE_D4_GROUP=D4ABC_STRATEGYQA_SMOKE \
+RUN_PREFIX=diag_g6_d4abc_cap_$(date +%m%d_%H%M) \
+PHASE_C_TRAIN_DIR=$PHASE_C_TRAIN_DIR \
+PHASE_C_EVAL_DIR=$PHASE_C_EVAL_DIR \
+R_PRM_ROOT=assets/external_datasets/kevinpro_r_prm \
+PRMBENCH_PREVIEW_PATH=assets/external_datasets/hitsmy_prmbench_preview/prmbench_preview.jsonl \
+MATH_SHEPHERD_PATH=assets/external_datasets/peiyi_math_shepherd/math-shepherd.jsonl \
+RLHFLOW_MISTRAL_ROOT=assets/external_datasets/rlhflow_mistral_prm \
+RLHFLOW_DEEPSEEK_PATH=assets/external_datasets/rlhflow_deepseek_prm/deepseek_instruct_data.jsonl \
+PAIR_PREP_EXTRA_ARGS="--max-pairs-per-source 5000 --max-pairs-total 15000" \
+C2_TRAIN_EXTRA_ARGS="--external-pair-max-train-samples 40000" \
+C2_EPOCHS=4 \
+C2_TRAIN_BATCH_SIZE=32 \
+C2_EVAL_BATCH_SIZE=32 \
+D4_EVAL_POSTHOC_MODE=none \
+FEATURE_CACHE_ROOT=$FEATURE_CACHE_ROOT \
+FEATURE_CACHE_MODE=$FEATURE_CACHE_MODE \
+bash scripts/run_phase_d_external_pair_suite.sh
+```
+
+Post-run saturation audit (for any D6-T run prefix):
+
+```bash
+python - <<'PY'
+import json, statistics as st
+from pathlib import Path
+import glob
+
+prefix = "diag_g1_dt2_rank_seed3"  # change this
+paths = sorted(glob.glob(f"assets/artifacts/phase_d_triplet_eval/{prefix}*_ext_eval_*/pair_scores.jsonl"))
+for p in paths:
+    chosen, rejected, margin = [], [], []
+    for line in Path(p).read_text().splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        c = float(row.get("chosen_score", 0.0))
+        r = float(row.get("rejected_score", 0.0))
+        chosen.append(c)
+        rejected.append(r)
+        margin.append(c - r)
+    if not margin:
+        continue
+    print(Path(p).parent.name)
+    print(" chosen_mean/std:", round(sum(chosen)/len(chosen), 6), round(st.pstdev(chosen), 6))
+    print(" reject_mean/std:", round(sum(rejected)/len(rejected), 6), round(st.pstdev(rejected), 6))
+    print(" margin_mean/std:", round(sum(margin)/len(margin), 6), round(st.pstdev(margin), 6))
+    print(" margin_min/max :", round(min(margin), 6), round(max(margin), 6))
+    print()
+PY
+```
+
 ### Bundle D4ABC: External pair bootstrap chain
 
 ```bash
@@ -470,6 +1028,158 @@ python -u scripts/phase_cd_compare_report.py \
   --phase-d-logs-root assets/artifacts/phase_d_logs \
   --output-dir assets/artifacts/phase_cd_reports/manual_diag \
   --dataset strategyqa
+```
+
+Standalone promotion-gate decision command (new):
+
+```bash
+python -u scripts/phase_d_promotion_gate.py \
+  --phase-c-logs-root assets/artifacts/phase_c_logs \
+  --phase-d-logs-root assets/artifacts/phase_d_logs \
+  --phase-d6t-logs-root assets/artifacts/phase_d6t_logs \
+  --output-dir assets/artifacts/phase_d_gate_reports/manual_gate \
+  --dataset strategyqa \
+  --d6-control-group-id D6_STRATEGYQA_SMOKE_RANKING_CTRL \
+  --d6-gated-group-id D6_STRATEGYQA_SMOKE_RANKING_PRM_GATE \
+  --required-d6t-groups DT2_MATH_SHEPHERD_SEED3_STABLE,DT4_MIXED_MS_PRM800K_SEED3_STABLE \
+  --min-corr-pair-acc 0.55 \
+  --min-corr-auc 0.60 \
+  --d6t-mean-pair-acc-min 0.65 \
+  --d6t-mean-auc-min 0.65 \
+  --d6t-std-max 0.05
+
+cat assets/artifacts/phase_d_gate_reports/manual_gate/summary.md
+```
+
+Gate-backlog completion commands (for missing D6/D6-T artifacts in gate report):
+
+```bash
+# Optional preflight: quickly check required files.
+ls -l assets/external_datasets/peiyi_math_shepherd/math-shepherd.jsonl
+ls -ld assets/external_datasets/openai_prm800k
+ls -l assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_full_mcorr4_c2_strategyqa_quality_first_full_c1_train__b7a8789f1974/teacher_prefix_scores.jsonl
+ls -l assets/artifacts/phase_c_data/strategyqa/phase_c_quality_first_c2_strategyqa_quality_first_c1_eval__f608255f810d/teacher_prefix_scores.jsonl
+```
+
+```bash
+# 1) Fill missing D6 control arm artifact.
+ACTIVE_PHASE_D_GROUP=D6_STRATEGYQA_SMOKE_RANKING_CTRL \
+RUN_PREFIX=phase_d6_smoke_rank_ctrl_fill \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_d_teacher_suite.sh
+
+# 2) Fill missing D6 PRM-gated arm artifact.
+ACTIVE_PHASE_D_GROUP=D6_STRATEGYQA_SMOKE_RANKING_PRM_GATE \
+RUN_PREFIX=phase_d6_smoke_rank_pairgate_fill \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_d_teacher_suite.sh
+
+# 3) Fill missing DT4 mixed-source seed-3 artifact.
+# Set PRM800K_PATH to your local mirror if default path is absent.
+ACTIVE_PHASE_D6T_GROUP=DT4_MIXED_MS_PRM800K_SEED3_STABLE \
+RUN_PREFIX=phase_d6t_dt4_seed3_fill \
+MATH_SHEPHERD_PATH=assets/external_datasets/peiyi_math_shepherd/math-shepherd.jsonl \
+PRM800K_PATH=assets/external_datasets/openai_prm800k \
+CUDA_VISIBLE_DEVICES=3 \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+```
+
+DT2 stability re-run command (historical; superseded by the stable wrapper below):
+
+```bash
+ACTIVE_PHASE_D6T_GROUP=DT2_MATH_SHEPHERD_SEED3 \
+RUN_PREFIX=phase_d6t_dt2_seed3_tight \
+MATH_SHEPHERD_PATH=assets/external_datasets/peiyi_math_shepherd/math-shepherd.jsonl \
+CUDA_VISIBLE_DEVICES=1 \
+MIN_PAIR_CONFIDENCE=0.65 \
+MAX_PAIRS_TOTAL=12000 \
+MAX_PAIRS_PER_SOURCE=6000 \
+MAX_PAIRS_PER_SAMPLE=1 \
+C2_LR=5e-5 \
+C2_EPOCHS=3 \
+C2_TRAIN_EXTRA_ARGS="--lambda-contrastive 1.0 --anti-saturation-weight 0.03 --anti-saturation-logit-threshold 4.0" \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+```
+
+D6-T seed-stability recommended defaults (new):
+1. Use one shared external-pair split across all training seeds to remove split noise.
+2. Enable strict deterministic backend + stable external-pair permutation inside C2.
+
+```bash
+RUN_PREFIX=phase_d6t_stable_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_d6t_stable_suite.sh
+```
+
+Equivalent raw command:
+
+```bash
+ACTIVE_PHASE_D6T_GROUP=DT2_MATH_SHEPHERD_SEED3_STABLE \
+RUN_PREFIX=phase_d6t_dt2_seed3_stable \
+MATH_SHEPHERD_PATH=assets/external_datasets/peiyi_math_shepherd/math-shepherd.jsonl \
+CUDA_VISIBLE_DEVICES=1 \
+D6T_PAIR_SPLIT_MODE=shared \
+D6T_PAIR_SPLIT_SEED=42 \
+D6T_EXTERNAL_PAIR_PERM_MODE=stable_hash \
+D6T_STRICT_DETERMINISM=1 \
+bash scripts/run_phase_d_triplet_validation_suite.sh
+```
+
+Next-step D6-T bundles after the stable DT2 pass:
+1. Transfer check:
+   - keep the stable DT2 recipe fixed,
+   - also run standalone C1 eval after each seed,
+   - objective: verify whether external ranking learning improves our in-domain StrategyQA corruption metrics.
+2. Mixed-source robustness:
+   - keep the stable recipe fixed,
+   - only widen data source diversity (`Math-Shepherd + PRM800K`),
+   - objective: check whether the new stability survives cross-source mixing.
+3. PRM800K source isolation:
+   - keep the exact stable DT2 recipe fixed,
+   - remove Math-Shepherd entirely,
+   - objective: determine whether `PRM800K` itself is usable, or whether it is
+     the source dragging DT4 toward the gate floor.
+
+```bash
+# DT2 stable + C1 transfer check
+ACTIVE_PHASE_D6T_GROUP=DT2_MATH_SHEPHERD_SEED3_STABLE_C1_TRANSFER \
+RUN_PREFIX=phase_d6t_transfer_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_d6t_stable_suite.sh
+
+# DT3 stable PRM800K-only source isolation
+ACTIVE_PHASE_D6T_GROUP=DT3_PRM800K_SEED3_STABLE \
+RUN_PREFIX=phase_d6t_prm800k_stable_$(date +%m%d_%H%M) \
+PRM800K_PATH=assets/external_datasets/openai_prm800k \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_d6t_stable_suite.sh
+
+# DT4 stable mixed-source robustness
+ACTIVE_PHASE_D6T_GROUP=DT4_MIXED_MS_PRM800K_SEED3_STABLE \
+RUN_PREFIX=phase_d6t_mixed_stable_$(date +%m%d_%H%M) \
+PRM800K_PATH=assets/external_datasets/openai_prm800k \
+CUDA_VISIBLE_DEVICES=3 \
+bash scripts/run_phase_d6t_stable_suite.sh
+```
+
+```bash
+# 4) Re-run promotion gate after missing groups are filled.
+python -u scripts/phase_d_promotion_gate.py \
+  --phase-c-logs-root assets/artifacts/phase_c_logs \
+  --phase-d-logs-root assets/artifacts/phase_d_logs \
+  --phase-d6t-logs-root assets/artifacts/phase_d6t_logs \
+  --output-dir assets/artifacts/phase_d_gate_reports/manual_gate_after_fill \
+  --dataset strategyqa \
+  --d6-control-group-id D6_STRATEGYQA_SMOKE_RANKING_CTRL \
+  --d6-gated-group-id D6_STRATEGYQA_SMOKE_RANKING_PRM_GATE \
+  --required-d6t-groups DT2_MATH_SHEPHERD_SEED3_STABLE,DT4_MIXED_MS_PRM800K_SEED3_STABLE \
+  --min-corr-pair-acc 0.55 \
+  --min-corr-auc 0.60 \
+  --d6t-mean-pair-acc-min 0.65 \
+  --d6t-mean-auc-min 0.65 \
+  --d6t-std-max 0.05
+
+cat assets/artifacts/phase_d_gate_reports/manual_gate_after_fill/summary.md
 ```
 
 Notes:
