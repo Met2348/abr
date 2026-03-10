@@ -81,7 +81,7 @@ def load_gsm8k(
 
     ``config`` can be ``main`` or ``socratic``.
 
-    中文要点
+    说明
     --------
     - GSM8K 原始 `answer` 往往同时包含推理与最终答案。
     - 这里先拆成 `cot` 与 `answer`，供后续 Phase A 按 `target_style`
@@ -145,7 +145,7 @@ def load_strategyqa(
 
     Current snapshot in this repo includes only ``strategyQA_train.json``.
 
-    中文要点
+    说明
     --------
     - StrategyQA 的 `decomposition` 被视作过程监督候选轨迹（cot）。
     - 后续 Phase A 在 `cot_then_answer` 模式下会把这条轨迹写入 `target_text`。

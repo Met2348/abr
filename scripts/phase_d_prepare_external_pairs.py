@@ -80,6 +80,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-length-ratio", type=float, default=4.0)
     parser.add_argument("--max-token-overlap", type=float, default=0.995)
     parser.add_argument("--max-pairs-per-sample", type=int, default=2)
+    parser.add_argument(
+        "--step-label-pair-mode",
+        choices=["first_bad_edge_strict", "legacy_nearest"],
+        default="first_bad_edge_strict",
+        help=(
+            "How to convert single-trajectory +/- step labels into pairs. "
+            "Default is the stricter local first-bad-edge mode."
+        ),
+    )
 
     parser.add_argument(
         "--r-prm-root",
@@ -171,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
         max_length_ratio=float(args.max_length_ratio),
         max_token_overlap=float(args.max_token_overlap),
         max_pairs_per_sample=int(args.max_pairs_per_sample),
+        step_label_pair_mode=str(args.step_label_pair_mode),
     )
     config.validate()
 
@@ -186,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
             "max_length_ratio": float(args.max_length_ratio),
             "max_token_overlap": float(args.max_token_overlap),
             "max_pairs_per_sample": int(args.max_pairs_per_sample),
+            "step_label_pair_mode": str(args.step_label_pair_mode),
             "r_prm_root": str(args.r_prm_root) if args.r_prm_root is not None else None,
             "r_prm_split": str(args.r_prm_split),
             "prmbench_preview_path": (
@@ -235,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"max_pairs_total  : {args.max_pairs_total}")
     print(f"max_pairs_source : {args.max_pairs_per_source}")
     print(f"min_confidence   : {args.min_pair_confidence}")
+    print(f"step_label_mode  : {args.step_label_pair_mode}")
     print("=" * 88)
 
     all_rows: list[ExternalPairRecord] = []
@@ -327,6 +339,7 @@ def main(argv: list[str] | None = None) -> int:
             "max_length_ratio": float(config.max_length_ratio),
             "max_token_overlap": float(config.max_token_overlap),
             "max_pairs_per_sample": int(config.max_pairs_per_sample),
+            "step_label_pair_mode": str(config.step_label_pair_mode),
             "min_pair_confidence": float(args.min_pair_confidence),
             "max_pairs_per_source": args.max_pairs_per_source,
             "max_pairs_total": args.max_pairs_total,
@@ -337,7 +350,7 @@ def main(argv: list[str] | None = None) -> int:
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     manifest = {
-        "artifact_stage": "phase_d_external_pairs_v1",
+        "artifact_stage": "phase_d_external_pairs_v2",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "script": "scripts/phase_d_prepare_external_pairs.py",
         "run_name": str(args.run_name),
@@ -463,11 +476,15 @@ def _render_summary_markdown(summary: dict[str, Any]) -> str:
             "",
             f"- num_pairs: {summary.get('train_summary', {}).get('num_pairs')}",
             f"- mean_pair_confidence: {summary.get('train_summary', {}).get('mean_pair_confidence')}",
+            f"- by_pair_build_mode: {summary.get('train_summary', {}).get('by_pair_build_mode')}",
+            f"- by_pair_semantics: {summary.get('train_summary', {}).get('by_pair_semantics')}",
             "",
             "## Validation Summary",
             "",
             f"- num_pairs: {summary.get('validation_summary', {}).get('num_pairs')}",
             f"- mean_pair_confidence: {summary.get('validation_summary', {}).get('mean_pair_confidence')}",
+            f"- by_pair_build_mode: {summary.get('validation_summary', {}).get('by_pair_build_mode')}",
+            f"- by_pair_semantics: {summary.get('validation_summary', {}).get('by_pair_semantics')}",
             "",
         ]
     )

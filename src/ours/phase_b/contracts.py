@@ -42,7 +42,7 @@ class PhaseBTrainRow:
 
     Required fields are aligned with `scripts/phase_a_prepare.py` outputs.
 
-    中文要点
+    说明
     --------
     这是 B 阶段最基础的数据契约；字段一旦变更，会影响 loader、训练与评测全链路。
 

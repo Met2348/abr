@@ -463,7 +463,7 @@ def load_value_supervision_examples(
         target_q_ci_width = float(target.get("q_ci_width", 0.0))
         target_q_weight = float(target.get("q_weight", 1.0))
         # D2 teacher/fusion fields are optional and must keep backward compatibility.
-        # 中文：老产物没有 teacher 字段时，这里保持 None/False，不影响旧实验复现。
+        # 老产物没有 teacher 字段时，这里保持 None/False，不影响旧实验复现。
         target_q_teacher_raw = target.get("q_teacher")
         target_q_fused_raw = target.get("q_fused")
         target_q_teacher = (

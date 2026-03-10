@@ -497,7 +497,7 @@ def build_step_sequence_from_phase_b_row(
         The built sequence and a small metadata payload describing how the row
         was interpreted.
 
-    中文要点
+    说明
     --------
     - 从 `target_text` 中先分离“推理段”和“最终答案段”。
     - 前缀轨迹主要来自推理段，最终答案用于终态目标与一致性检查。
@@ -577,7 +577,7 @@ def build_prefix_artifacts(
     - each reasoning-step boundary,
     - but not the terminal answer step.
 
-    中文要点
+    说明
     --------
     - 该函数把一条完整监督轨迹切成多条“可训练的前缀状态”。
     - 每个 reasoning step 都会形成一个新的 prefix 样本。

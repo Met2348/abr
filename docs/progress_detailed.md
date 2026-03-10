@@ -2,6 +2,572 @@
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
 
+## 2026-03-11 02:30:00 +08 (+0800)
+- Type: Phase E Intradataset ACC90 Branch / Same-Source Suite Implementation
+- Summary: Added a new same-source-only Phase E branch that ignores transfer and benchmark-generalization, extends the value head with an optional MLP architecture, and introduces dataset-specific ACC90 suites plus a held-out-only checkpoint selector.
+- Details:
+  - Value-head expressivity upgrade:
+    - `src/ours/phase_b/value_head.py`
+    - added `architecture={linear, mlp}`
+    - added `mlp_hidden_size` and `activation`
+    - preserved backward compatibility for existing linear checkpoints
+  - Phase E trainer upgrade:
+    - `scripts/phase_e_train_value.py`
+    - added head-architecture CLI knobs
+    - warm-start now requires full config match, not just hidden-size match
+  - New same-source ACC90 experiment groups in `scripts/run_phase_e_suite.sh`:
+    - `E40`..`E49`
+    - these groups skip benchmark eval and optimize only held-out same-source pair metrics
+  - New selector:
+    - `scripts/phase_e_select_intradataset_candidate.py`
+    - only uses held-out pair accuracy/AUC, worst-seed floor, and seed variance
+  - New wrapper suite:
+    - `scripts/run_phase_e_intradataset_suite.sh`
+    - supports smoke, per-dataset full matrices, and one full all-dataset run
+  - New planning doc:
+    - `docs/phase_E_intradataset_acc90_plan.md`
+- Verification:
+  - `bash -n scripts/run_phase_e_suite.sh`
+  - `bash -n scripts/run_phase_e_intradataset_suite.sh`
+  - `python -m py_compile scripts/phase_e_train_value.py scripts/phase_e_select_intradataset_candidate.py src/ours/phase_b/value_head.py`
+  - `pytest -q tests/unit/test_phase_e_train_script.py tests/unit/test_value_head.py`
+- Files changed:
+  - `src/ours/phase_b/value_head.py`
+  - `scripts/phase_e_train_value.py`
+  - `scripts/run_phase_e_suite.sh`
+  - `scripts/phase_e_select_intradataset_candidate.py`
+  - `scripts/run_phase_e_intradataset_suite.sh`
+  - `tests/unit/test_phase_e_train_script.py`
+  - `tests/unit/test_value_head.py`
+  - `docs/phase_E_intradataset_acc90_plan.md`
+  - `docs/phase_E_plan.md`
+  - `docs/readme.md`
+  - `docs/readme_full.md`
+  - `README.md`
+- Breaking changes:
+  - None.
+
+This file is prepend-only: newest entries must be added at the top (right below this header).
+
+## 2026-03-11 01:20:00 +08 (+0800)
+- Type: Cache Provenance Hardening / CPU-Cache Refactor / OOM Risk Repair
+- Summary: Audited the shared feature-cache and OOM handling paths, confirmed several high-risk implementation gaps, then hardened cache provenance, cache self-healing, and the main head-training loops so stale feature reuse and cache-driven GPU saturation are less likely.
+- Details:
+  - Shared feature-cache hardening (`src/ours/phase_b/feature_cache.py`):
+    - bumped schema to `phase_feature_cache_v2`
+    - directory signatures now expand index-referenced weight shards
+    - loose top-level weight files (`.safetensors/.bin/.pt/.pth`) are also tracked
+    - existing corrupt cache entries are now purged and rewritten instead of
+      causing sticky miss loops
+    - stale `.write.lock` files are now reclaimed after timeout instead of only
+      raising forever
+  - Phase B training cache refactor (`scripts/phase_b_train_value.py`):
+    - cached train/eval/corruption/external-pair tensors no longer get moved
+      wholesale to GPU on cache hit
+    - encoded cache payloads now return to CPU before long-lived storage
+    - training/eval loops now move only the current mini-batch to the head
+      device
+    - frozen backbone/tokenizer are explicitly released after feature encoding
+  - Phase C P(IK) training received the same CPU-cache treatment:
+    - `scripts/phase_c_train_pik.py`
+  - Cache validation was tightened:
+    - hidden-size checks for Phase B / Phase C cached payloads
+    - stricter tensor-shape checks for `Phase E` cached features
+  - Added targeted unit coverage:
+    - weight-shard provenance tracking
+    - corrupt-cache rewrite
+    - stale-lock recovery
+- Verification:
+  - `python -m py_compile` on:
+    - `src/ours/phase_b/feature_cache.py`
+    - `src/ours/phase_e/runtime.py`
+    - `scripts/phase_b_train_value.py`
+    - `scripts/phase_c_train_pik.py`
+  - `pytest -q`:
+    - `tests/unit/test_feature_cache.py`
+    - `tests/unit/test_phase_c_train_value.py`
+    - `tests/unit/test_phase_e_train_script.py`
+    - result: `14 passed`
+- Remaining caution:
+  - generation / encoding / scoring paths still have explicit OOM backoff,
+  - but training loops are currently protected mainly by CPU-cache refactoring
+    and smaller live batches rather than a full recursive backward-pass OOM
+    splitter.
+
+## 2026-03-10 23:59:00 +08 (+0800)
+- Type: Data Semantics Repair / Step-Label Pair Builder Hardening
+- Summary: Confirmed the mentor-reported data-semantics risk, then rewrote all single-trajectory `+/-` step-label pair builders so new Math-Shepherd / RLHFlow / PRM800K-fallback artifacts no longer use nearest-negative depth-mixed pairs.
+- Details:
+  - Audited `docs/data_semantics_risk_audit_20260310.md` against the actual
+    adapter code and confirmed the 一级风险 was real.
+  - Verified from raw source samples that:
+    - `Math-Shepherd` only provides one labeled trajectory,
+    - `RLHFlow` mistral/deepseek also only provide one labeled trajectory,
+    - so true same-step sibling pairs cannot be reconstructed from these
+      sources.
+  - Replaced the default step-label conversion semantics in
+    `src/ours/phase_d/external_pairs_adapters.py`:
+    - old default:
+      - nearest positive vs nearest negative prefix from the same trajectory,
+    - new default:
+      - `first_bad_edge_strict`
+      - keep only the last clean prefix before the first bad step versus the
+        prefix that includes the first bad step.
+  - Added explicit `pair_build_mode` / `pair_semantics` metadata to summaries
+    and artifacts so future reports cannot silently mix different supervision
+    semantics.
+  - Bumped artifact stages:
+    - `phase_e_pairs_v2`
+    - `phase_d_external_pairs_v2`
+  - Wired the new mode through:
+    - `scripts/phase_e_prepare_pairs.py`
+    - `scripts/phase_d_prepare_external_pairs.py`
+    - `scripts/run_phase_e_suite.sh`
+    - `scripts/run_phase_d_bridge_suite.sh`
+    - `scripts/run_phase_d_external_pair_suite.sh`
+    - `scripts/run_phase_d_triplet_validation_suite.sh`
+  - Added unit coverage for:
+    - `Math-Shepherd` strict first-bad-edge extraction,
+    - pair-build-mode summary propagation,
+    - Phase E artifact stage update.
+  - Updated primary docs to downgrade all pre-fix nearest-negative artifacts to
+    `legacy` status and to interpret new results as `first_bad_edge`
+    learnability, not exact same-step branch preference learning.
+
+## 2026-03-10 23:55:00 +08 (+0800)
+- Type: Phase F Docs / Engineering Framework Survey
+- Summary: Added a build-vs-buy framework survey to the `Phase F` plan and froze the current engineering conclusion that `Phase F` should reuse an environment-centric RL stack rather than jumping directly to a heavyweight token-level LLM-RLHF platform.
+- Details:
+  - Added a dedicated `Existing RL Framework Survey And Build-vs-Buy Decision`
+    subsection to `docs/phase_F_plan.md`.
+  - Split the landscape into two categories:
+    - environment-centric RL toolchains:
+      - `Gymnasium / OpenEnv`
+      - `TorchRL`
+      - `Tianshou`
+      - `RLlib`
+      - `CleanRL` as algorithm reference
+    - LLM-RLHF / post-training frameworks:
+      - `TRL`
+      - `OpenRLHF`
+      - `verl`
+      - `SkyRL`
+  - Wrote the repository-specific conclusion:
+    - current `Phase F` is a custom controller-RL problem on top of a frozen LM
+      and frozen value head,
+    - so the preferred stack is `Gymnasium/OpenEnv + TorchRL/Tianshou + repo-local reward/support-audit logic`,
+    - while `TRL/OpenRLHF/verl/SkyRL` are better treated as later escalation
+      options for token-level or larger-scale LLM RL.
+  - Explicitly documented which components should still be implemented locally
+    versus which generic RL machinery should be reused from external frameworks.
+- Files changed:
+  - `docs/phase_F_plan.md`
+  - `docs/progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-03-10 16:40:00 +08 (+0800)
+- Type: Phase E Multi-Source Math Implementation / Stage A-E Suites
+- Summary: Implemented the first full same-family multi-source math experiment stack, including direct Stage A-D groups, staged curriculum Stage E, source-weighted weak-source ablations, and one-click suite wrappers.
+- Details:
+  - New Phase E bundle support landed:
+    - `math_shepherd_r_prm`
+    - `math_shepherd_prmbench_preview`
+    - `math_shepherd_r_prm_prmbench_preview`
+    - `math_shepherd_r_prm_prmbench_preview_prm800k`
+  - New training-control feature landed:
+    - `source_weight_overrides_json` in pair artifact preparation
+    - per-source weight now persists into pair metadata and is applied during
+      feature-cache training
+    - this is the formal mechanism for "keep weak source in the pool, but do
+      not let it dominate"
+  - New direct Stage A-D groups wired into `scripts/run_phase_e_suite.sh`:
+    - `E20_STAGEA_MS_ANCHOR_SEED3`
+    - `E21_STAGEA_RPRM_ANCHOR_SEED3`
+    - `E22_STAGEA_PRMBENCH_PREVIEW_ANCHOR_SEED3`
+    - `E23_STAGEA_PRM800K_CTRL_SEED3`
+    - `E24_STAGEB_MS_RPRM_MIX_SEED3`
+    - `E25_STAGEB_MS_PRMBENCH_MIX_SEED3`
+    - `E26_STAGEB_RPRM_PRMBENCH_MIX_SEED3`
+    - `E27_STAGEC_MS_RPRM_PRMBENCH_MIX_SEED3`
+    - `E28_STAGED_TRIMIX_PLUS_PRM800K_LOWWT_SEED3`
+    - `E29_STAGED_MS_PLUS_PRM800K_LOWWT_SEED3`
+  - New staged curriculum wrapper added:
+    - `scripts/run_phase_e_multisource_math_suite.sh`
+    - supports:
+      - `MM1_MULTISOURCE_MATH_SMOKE`
+      - `MM2_MULTISOURCE_MATH_STAGE_ABCD_SEED3`
+      - `MM3_MULTISOURCE_MATH_STAGEE_CURRICULUM_SEED3`
+      - `MM4_MULTISOURCE_MATH_FULL_PROGRAM`
+    - Stage E curricula currently implemented:
+      - `CUR1_STAGEE_MS_TO_MSRPRM`
+      - `CUR2_STAGEE_MS_TO_TRIMIX`
+      - `CUR3_STAGEE_MS_TO_MSRPRM_TO_TRIMIX`
+  - Documentation refreshed with explicit experiment intent and runnable
+    commands:
+    - `docs/phase_E_multisource_math_plan.md`
+    - `docs/phase_E_plan.md`
+    - `docs/readme.md`
+    - `docs/readme_full.md`
+    - `README.md`
+
+## 2026-03-10 14:55:00 +08 (+0800)
+- Type: Phase E Multi-Source Math Strategy / Literature Review / Experiment Planning
+- Summary: Recorded the new `E15` evidence that same-source `Math-Shepherd` learnability is real while benchmark-native transfer remains weak, then formalized the next Phase E mainline as same-family multi-source math mixture training backed by current PRM literature.
+- Details:
+  - New local evidence frozen:
+    - `E15_MATH_SHEPHERD_TRUST_ROBUST_SEED3`
+      - `mean_heldout_pair_acc=0.7518`
+      - `mean_heldout_auc=0.7280`
+      - but benchmark-native metrics remain weak:
+        - `ProcessBench GSM8K mean_auc=0.4834`
+        - `ProcessBench Math mean_auc=0.4746`
+  - New methodological conclusion:
+    - single-source `Math-Shepherd` is enough to prove learnability,
+    - but not enough to justify a benchmark-trustworthy value head,
+    - so the next mainline is same-family multi-source math mixture training.
+  - Literature-backed guidance integrated:
+    - `ProcessBench` / `PRMBench`: current PRMs still struggle on explicit,
+      fine-grained process verification
+    - `VersaPRM`: multi-domain PRMs are a direct answer to weak single-domain
+      generalization
+    - `R-PRM`: stronger preference construction can outperform much larger weak
+      PRM datasets
+    - `The Lessons of Developing PRMs`: weak MC-style labels and BoN-heavy eval
+      can mislead
+    - `OmegaPRM`: first-error localization and balanced positive/negative
+      signals matter
+    - `Qwen2.5-Math Technical Report`: staged RM-guided self-improvement is
+      more defensible than one-shot isolated training
+    - `ImplicitPRM`: task relevance matters more than raw response diversity
+  - New official planning document added:
+    - `docs/phase_E_multisource_math_plan.md`
+  - Immediate experimental direction frozen:
+    - single-source anchors,
+    - balanced two-source mixtures,
+    - three-source same-family mixture,
+    - weak-source `PRM800K` ablation,
+    - staged curriculum mixture.
+- Files changed:
+  - `docs/phase_E_multisource_math_plan.md`
+  - `docs/phase_E_plan.md`
+  - `docs/readme_full.md`
+  - `docs/readme.md`
+  - `docs/TODO_ours.md`
+  - `docs/progress_detailed.md`
+- Breaking changes:
+  - Planning semantics changed again:
+    - the next official Phase E target is no longer single-source trust
+      selection alone,
+    - but same-family multi-source math mixture validation.
+
+## 2026-03-10 23:45:00 +08 (+0800)
+- Type: Phase F Docs / Literature Risk Audit
+- Summary: Re-checked the current `Phase F` design against recent PRM/RLHF literature and added explicit notes for the main places where the plan is still weaker than best practice or insufficiently operationalized.
+- Details:
+  - Added a dedicated `Literature-Flagged Risk Notes` section to
+    `docs/phase_F_plan.md`.
+  - Recorded the main risk points that remain despite the overall conservative
+    design:
+    - single-head reward uncertainty is still too optional,
+    - `same-family` support control is not yet concrete enough,
+    - strong non-RL baselines are not yet mandatory enough,
+    - independent external auditing is still too weakly specified,
+    - process-vs-outcome misalignment can still leak through the reward,
+    - a frozen reward model becomes exploitable over longer optimization
+      horizons,
+    - explicit process shaping may be over-credited without simpler baselines,
+    - the training objective may drift away from the eventual inference stack.
+  - Added literature anchors used to justify these notes:
+    - `BSPO`
+    - `UP-RLHF`
+    - `Free Process Rewards without Process Labels`
+    - `Regularized Best-of-N`
+    - `Inference-Aware Alignment`
+    - plus the previously logged PRM / ProcessBench / Math-Shepherd /
+      overoptimization references.
+- Files changed:
+  - `docs/phase_F_plan.md`
+  - `docs/progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-03-10 23:30:00 +08 (+0800)
+- Type: Phase F Planning / RL Stage Definition
+- Summary: Added the official conditional `Phase F` plan that defines how a trust-selected `Math-Shepherd` value head should be used for conservative same-family RL only after `Phase E` succeeds.
+- Details:
+  - Created `docs/phase_F_plan.md` as a new standalone phase document rather
+    than rewriting older `Phase C/O7` RL notes.
+  - Defined `Phase F` as conditional:
+    - `Phase E` remains the active stage,
+    - `Phase F` starts only after one `Math-Shepherd` checkpoint family passes
+      the trust matrix and one explicit `best_value_head.pt` is promoted.
+  - Froze the main scientific position:
+    - do not assume cross-dataset generalization,
+    - treat the promoted head as a bounded-support process reward model,
+    - prove bounded-support controllability rather than universal value quality.
+  - Wrote non-negotiable downstream rules:
+    - freeze LM and value head initially,
+    - start with deterministic `ABR-lite`,
+    - then router warm start,
+    - then router-only RL,
+    - no full-token policy RL or joint LM/value/router online optimization as
+      the first step.
+  - Defined reward and safety policy:
+    - terminal correctness anchor,
+    - bounded value-head shaping,
+    - explicit verification/token penalties,
+    - canary checks,
+    - anti-reward-hacking diagnostics,
+    - seed-repeat validation before any wider promotion.
+- Files changed:
+  - `docs/phase_F_plan.md`
+  - `docs/progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-03-10 23:00:00 +08 (+0800)
+- Type: Phase E Docs / Literature Review / RL Guidance Policy
+- Summary: Expanded the official Phase E plan with a literature-backed conclusion that same-source value-head learnability is plausible while cross-domain generalization remains difficult, then froze a conservative policy for how a successful `Math-Shepherd` value head should and should not be used in the first RL-facing stage.
+- Details:
+  - Strengthened `docs/phase_E_plan.md` literature section with explicit conclusions from:
+    - `Let's Verify Step by Step`
+    - `Math-Shepherd`
+    - `OmegaPRM`
+    - `SVPO`
+    - `R-PRM`
+    - `ProcessBench`
+    - `PRMBench`
+    - `The Lessons of Developing Process Reward Models`
+    - `VersaPRM`
+    - `ThinkPRM`
+    - `Do We Need to Verify Step by Step?`
+  - Wrote the new project-level decision into the plan:
+    - same-family learnability is the immediate target,
+    - cross-dataset generalization is explicitly downgraded from the near-term
+      objective,
+    - a successful `Math-Shepherd` head should be treated as a bounded-support
+      process reward model, not a universal value estimator.
+  - Added a concrete post-Phase-E policy for RL-facing use:
+    - freeze the selected value head,
+    - optimize only a narrow controller/router first,
+    - use the head as dense shaping or ranking guidance rather than the sole
+      raw reward,
+    - retain terminal correctness anchors, KL/support control, canary metrics,
+      and anti-reward-hacking checks.
+  - Added an explicit pitfall list:
+    - no cross-domain claims from `Math-Shepherd` alone,
+    - no joint LM + value + router online RL as the first step,
+    - no checkpoint promotion by lucky seed,
+    - no reward-only success claim when held-out metrics degrade.
+- Files changed:
+  - `docs/phase_E_plan.md`
+  - `docs/progress_detailed.md`
+- Breaking changes:
+  - None.
+
+## 2026-03-10 22:10:00 +0800 (+08)
+- Type: Phase E Math-Shepherd Trust Matrix / Candidate Promotion Tooling
+- Summary: Added a dedicated Math-Shepherd trust-track on top of Phase E, including new seed-3 recipe groups, a matrix wrapper, and a candidate-selection script that promotes one explicit `best_value_head.pt` by fixed trust rules instead of ad-hoc log reading.
+- Details:
+  - New Math-Shepherd trust-oriented Phase E groups:
+    - `E12_MATH_SHEPHERD_TRUST_LOWLR_SEED3`
+    - `E13_MATH_SHEPHERD_TRUST_UNWEIGHTED_SEED3`
+    - `E14_MATH_SHEPHERD_TRUST_ANTISAT_SEED3`
+    - `E15_MATH_SHEPHERD_TRUST_ROBUST_SEED3`
+  - New bundle / promotion tooling:
+    - `scripts/run_phase_e_mathshepherd_trust_suite.sh`
+    - `scripts/phase_e_select_candidate.py`
+  - Suite-layer hardening:
+    - `run_phase_e_suite.sh` now supports `SEEDS_OVERRIDE`,
+    - training-side optional hyperparameter pass-through added for:
+      - `anti_saturation`,
+      - `ranking margin`,
+      - `lambda` terms,
+      - `weight_decay`,
+      - `max_length`.
+  - Current best interpretation frozen into docs:
+    - `Math-Shepherd` has real source-family learnability,
+    - but one-seed collapse means it is not yet safe to freeze a checkpoint by
+      single-run peak score,
+    - therefore Phase E now needs an explicit trust-selection layer before any
+      RL-heavy downstream stage.
+  - Lightweight end-to-end validation completed:
+    - `MS1_MATH_SHEPHERD_TRUST_SMOKE` wrapper path ran through:
+      - sub-suite launch,
+      - candidate selection,
+      - final summary write.
+    - current devcheck provisional candidate:
+      - `E12_MATH_SHEPHERD_TRUST_LOWLR_SEED3`
+      - checkpoint:
+        - `assets/artifacts/phase_e_runs/phase_e_ms_trust_devcheck_e12_math_shepherd_trust_lowlr_seed3_e12_math_shepherd_trust_lowlr_seed3_s42_value_20260310T054813Z/best_value_head.pt`
+      - but this is only a smoke-scale provisional choice, not a promotion-level result.
+- Files changed:
+  - `scripts/run_phase_e_suite.sh`
+  - `scripts/run_phase_e_mathshepherd_trust_suite.sh`
+  - `scripts/phase_e_select_candidate.py`
+  - `README.md`
+  - `docs/readme.md`
+  - `docs/readme_full.md`
+  - `docs/phase_E_plan.md`
+  - `docs/progress_detailed.md`
+- Breaking changes:
+  - None for existing Phase E entrypoints.
+  - New recommended Phase E command for checkpoint promotion is now:
+    - `bash scripts/run_phase_e_mathshepherd_trust_suite.sh`
+
+## 2026-03-10 20:20:00 +0800 (+08)
+- Type: Phase E Strategy Refresh / Literature-Backed Gate Reordering
+- Summary: Re-evaluated Phase E goals against both our newest smoke/seed3 evidence and current PRM literature, then changed the active Phase E success criterion from "prioritize cross-dataset transfer" to "prove same-benchmark learnability first, treat benchmark transfer and StrategyQA transfer as later gates".
+- Details:
+  - New internal evidence recorded:
+    - `Math-Shepherd smoke`
+      - same-source held-out is clearly positive:
+        - `pair_acc=0.6787`
+        - `auc=0.6704`
+      - but `ProcessBench GSM8K` remains weak:
+        - `pair_acc=0.4661`
+        - `auc=0.5155`
+    - `PRM800K seed3`
+      - same-source held-out mean is weak:
+        - `mean_pair_acc=0.4783`
+        - `mean_auc=0.4855`
+      - `ProcessBench GSM8K` mean is also weak:
+        - `mean_pair_acc=0.4737`
+        - `mean_auc=0.4943`
+  - Community/literature diagnosis incorporated:
+    - `ProcessBench` and `PRMBench` both exist because current PRMs remain weak
+      on harder/finer-grained process verification.
+    - recent responses such as `VersaPRM`, `ThinkPRM`, and `R-PRM` all imply
+      that robust cross-domain generalization usually needs a stronger method
+      than single-source scalar-head fitting.
+  - Planning consequence:
+    - Phase E gate order is now:
+      1. source-family held-out learnability
+      2. benchmark-native evaluation
+      3. StrategyQA transfer
+    - cross-dataset transfer is no longer the first pass/fail standard.
+- Files changed:
+  - `docs/phase_E_plan.md`
+  - `docs/readme.md`
+  - `docs/readme_full.md`
+  - `docs/TODO_ours.md`
+  - `docs/progress_detailed.md`
+- Breaking changes:
+  - Planning semantics changed again:
+    - same-benchmark learnability is now the primary scientific target of
+      Phase E.
+
+## 2026-03-10 18:40:00 +0800 (+08)
+- Type: Phase E E0-E3 Implementation / Benchmark-Native Stack Delivery
+- Summary: Implemented the full `E0-E3` backbone in new `phase_e_*` modules and scripts, decoupled high-quality pair training from mandatory `Phase C` artifacts, added benchmark-native `ProcessBench / PRMBench_Preview` evaluation, shipped one-click Phase E suites, and validated the stack with direct smoke runs plus a real suite smoke.
+- Details:
+  - New benchmark-native code path:
+    - `src/ours/phase_e/contracts.py`
+    - `src/ours/phase_e/pairs.py`
+    - `src/ours/phase_e/runtime.py`
+    - `src/ours/phase_e/training.py`
+    - `src/ours/phase_e/benchmark_eval.py`
+    - `scripts/phase_e_prepare_pairs.py`
+    - `scripts/phase_e_train_value.py`
+    - `scripts/phase_e_eval_benchmark.py`
+    - `scripts/run_phase_e_suite.sh`
+  - E0 benchmark contract freeze now lives in code:
+    - source bundles:
+      - `math_shepherd`
+      - `prm800k`
+      - `r_prm_train`
+      - `prmbench_preview`
+      - mixed bundles
+    - eval benchmarks:
+      - `processbench_gsm8k`
+      - `processbench_math`
+      - `prmbench_preview`
+  - E1 trainer decoupling is complete:
+    - external-pair-only training no longer requires a `Phase C` train/eval dir.
+  - E2 suites shipped:
+    - `E1_MATH_SHEPHERD_PAIR_LEARN_SMOKE`
+    - `E2_MATH_SHEPHERD_PAIR_LEARN_SEED3`
+    - `E3_RPRM_PRMBENCH_PREVIEW_SMOKE`
+    - `E4_RPRM_PRMBENCH_PREVIEW_SEED3`
+    - `E5_PRM800K_PAIR_LEARN_SEED3`
+  - E3 benchmark-native eval shipped:
+    - `ProcessBench`:
+      - good-vs-bad pair accuracy / AUC
+      - first-error edge accuracy
+    - `PRMBench_Preview`:
+      - pair accuracy / AUC
+  - Validation completed:
+    - `python -m py_compile` on all new Phase E modules/scripts
+    - `pytest` on all new Phase E unit tests
+    - `bash -n scripts/run_phase_e_suite.sh`
+    - real direct smoke:
+      - prepare -> train -> ProcessBench eval
+    - real suite smoke:
+      - `E1_MATH_SHEPHERD_PAIR_LEARN_SMOKE`
+- Files changed:
+  - `src/ours/phase_e/*`
+  - `scripts/phase_e_prepare_pairs.py`
+  - `scripts/phase_e_train_value.py`
+  - `scripts/phase_e_eval_benchmark.py`
+  - `scripts/run_phase_e_suite.sh`
+  - `tests/unit/test_phase_e_*.py`
+  - `README.md`
+  - `docs/readme.md`
+  - `docs/readme_full.md`
+  - `docs/phase_E_plan.md`
+  - `docs/TODO_ours.md`
+  - `docs/progress_detailed.md`
+- Breaking changes:
+  - None for existing Phase A-D entrypoints.
+  - New recommended mainline entrypoint is now `scripts/run_phase_e_suite.sh`.
+
+## 2026-03-10 16:10:00 +0800 (+08)
+- Type: Phase E Definition / Code Readiness Assessment / Planning Docs
+- Summary: Formally opened `Phase E` as the new active project stage, defined its scope as "validate value-head learnability on high-quality pair/process-supervision benchmarks", assessed what the current codebase can already support versus what still depends on Phase C/StrategyQA artifacts, and wrote the official Phase E planning document.
+- Details:
+  - Phase transition decision:
+    - Phase D is kept as:
+      - methodology-correction stage,
+      - bridge-evidence stage,
+      - benchmark-scope correction stage.
+    - Phase E becomes the new active mainline:
+      - validate the method on PRM-grade supervision sources first,
+      - only then return to StrategyQA as transfer/OOD evaluation.
+  - Code readiness assessment:
+    - already ready:
+      - `scripts/phase_d_prepare_external_pairs.py`
+      - `src/ours/phase_d/external_pairs_adapters.py`
+      - `scripts/phase_b_train_value.py` ranking-first/external-pair branch
+      - `scripts/phase_d_eval_external_pairs.py`
+      - seed-stable suites (`run_phase_d_triplet_validation_suite.sh`, `run_phase_d6t_stable_suite.sh`)
+      - bridge suite (`run_phase_d_bridge_suite.sh`)
+    - not yet ready:
+      - trainer still hard-depends on `Phase C` train/eval artifact dirs,
+      - `ProcessBench / PRMBench` benchmark-native evaluation is not wired,
+      - promotion gates are still too StrategyQA/C1/C2-shaped.
+  - New official planning doc:
+    - `docs/phase_E_plan.md`
+    - defines:
+      - objective,
+      - code readiness,
+      - scope,
+      - benchmark choice,
+      - work packages `E0..E5`,
+      - immediate next actions.
+- Files changed:
+  - `docs/phase_E_plan.md`
+  - `README.md`
+  - `docs/readme.md`
+  - `docs/readme_full.md`
+  - `docs/TODO_ours.md`
+  - `docs/phase_D_plan.md`
+  - `docs/progress_detailed.md`
+- Breaking changes:
+  - Planning semantics changed:
+    - after `2026-03-10`, `Phase E` is the active execution stage.
+    - `Phase D` remains important, but is no longer the active top-level plan.
+
 ## 2026-03-10 14:30:00 +0800 (+08)
 - Type: Strategy Pivot Documentation Update / Benchmark-Scope Correction
 - Summary: Recorded the newest decisive StrategyQA bridge results (`DB3` positive, `DB4` negative), then updated the repository's active planning documents to reflect the strategic pivot: StrategyQA is no longer treated as the primary supervised benchmark for value-head validation because it lacks public PRM-grade step-quality labels.

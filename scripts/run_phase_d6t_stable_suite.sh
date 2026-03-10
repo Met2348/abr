@@ -31,8 +31,10 @@ MATH_SHEPHERD_PATH="${MATH_SHEPHERD_PATH:-assets/external_datasets/peiyi_math_sh
 # Prefer the original full k=8 StrategyQA rollout artifacts for this stable
 # bundle. They are the cleanest "base Phase C" inputs and avoid accidentally
 # inheriting extra transformations from later D-stage derived directories.
-# 中文：stable 套件默认钉死这两个输入目录，避免“自动找最新目录”时捞到
-# 半截 artifact 或别的实验链路产物，导致 seed 稳定性结论被污染。
+# Pin these two inputs by default so auto-discovery cannot pick half-finished or unrelated artifacts.
+# stable 套件默认钉死这两个输入目录，避免“自动找最新目录”时捞到半截 artifact 或别的实验链路产物。
+# That keeps the seed-stability conclusion tied to one fixed Phase C base.
+# 这样 seed 稳定性结论才不会被别的实验链路污染。
 PHASE_C_TRAIN_DIR="${PHASE_C_TRAIN_DIR:-assets/artifacts/phase_c_data/strategyqa/strategyqa_value_rollouts_k8_train_full__59aed6ac5f99}"
 PHASE_C_EVAL_DIR="${PHASE_C_EVAL_DIR:-assets/artifacts/phase_c_data/strategyqa/strategyqa_value_rollouts_k8_val_full__c5cb0e294b2c}"
 
@@ -44,8 +46,10 @@ D6T_STRICT_DETERMINISM="${D6T_STRICT_DETERMINISM:-1}"
 
 # Export the resolved defaults so the delegated suite receives exactly the
 # configuration shown in this wrapper's preflight logs.
-# 中文：这里只赋值不 export 的话，子脚本读不到这些默认值，
-# 会退回到它自己的自动解析逻辑。之前就因此出现过“日志看起来对，实际跑错目录”的问题。
+# Export is required here; plain shell assignment would not reach the delegated suite process.
+# 这里只赋值不 export 的话，子脚本读不到这些默认值，会退回到它自己的自动解析逻辑。
+# We have already seen runs where the logs looked correct but the child script resolved the wrong directory.
+# 之前就出现过“日志看起来对，实际跑错目录”的问题。
 export ACTIVE_PHASE_D6T_GROUP
 export RUN_PREFIX
 export MATH_SHEPHERD_PATH

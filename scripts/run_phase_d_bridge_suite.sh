@@ -31,6 +31,7 @@ cd "$REPO_ROOT"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 ACTIVE_PHASE_DBR_GROUP="${ACTIVE_PHASE_DBR_GROUP:-DB1_STRATEGYQA_BRIDGE_SMOKE_RANK}"
 RUN_PREFIX="${RUN_PREFIX:-phase_d_bridge_suite}"
+STEP_LABEL_PAIR_MODE="${STEP_LABEL_PAIR_MODE:-first_bad_edge_strict}"
 
 # Stage-1 uses the original full k=8 StrategyQA rollout artifacts, matching the
 # proven DT2 stable recipe.
@@ -438,6 +439,7 @@ run_one_seed() {
       --max-pairs-per-source "$STAGE1_MAX_PAIRS_PER_SOURCE"
       --max-pairs-total "$STAGE1_MAX_PAIRS_TOTAL"
       --min-pair-confidence "$STAGE1_MIN_PAIR_CONFIDENCE"
+      --step-label-pair-mode "$STEP_LABEL_PAIR_MODE"
       --min-chars "12"
       --max-length-ratio "3.0"
       --max-token-overlap "0.99"
@@ -447,6 +449,7 @@ run_one_seed() {
     {
       log_line "[seed=${seed}] Prepare shared Math-Shepherd pairs"
       log_line "[seed=${seed}] pair_split_mode=${DPAIR_SPLIT_MODE} split_seed=${split_seed}"
+      log_line "[seed=${seed}] step_label_pair_mode=${STEP_LABEL_PAIR_MODE}"
       log_line "[seed=${seed}] Command: $PYTHON_BIN ${prep_args[*]}"
     } | tee -a "$SUITE_LOG_FILE" >/dev/null
     "$PYTHON_BIN" "${prep_args[@]}" 2>&1 | tee -a "$SUITE_LOG_FILE"
@@ -498,7 +501,7 @@ run_one_seed() {
     --anti-saturation-weight 0.03
     --anti-saturation-logit-threshold 4.0
   )
-  # 中文：smoke 组需要把 stage-1 也裁小，否则虽然 external pair 数少，
+  # smoke 组需要把 stage-1 也裁小，否则虽然 external pair 数少，
   # 但仍会读取整套 Phase C train/eval 特征，导致“烟测不烟”。
   if [[ -n "${STAGE1_MAX_TRAIN_SAMPLES:-}" ]]; then
     stage1_train_args+=(--max-train-samples "$STAGE1_MAX_TRAIN_SAMPLES")
@@ -611,7 +614,7 @@ main() {
 
   resolve_group
 
-  # 中文：PyTorch 仅开启 deterministic flag 还不够；对于 CUDA>=10.2 的
+  # PyTorch 仅开启 deterministic flag 还不够；对于 CUDA>=10.2 的
   # cuBLAS 路径，还需要在进程启动前设置工作区配置，否则只会收到 warning，
   # 但实际并不能保证最严格的确定性。
   if [[ "$STRICT_DETERMINISM" -eq 1 ]]; then
@@ -636,6 +639,7 @@ main() {
     log_line "group_observe=${GROUP_OBSERVE}"
     log_line "group_expect=${GROUP_EXPECT}"
     log_line "run_prefix=${RUN_PREFIX}"
+    log_line "step_label_pair_mode=${STEP_LABEL_PAIR_MODE}"
     log_line "stage1_train_dir=${PHASE_C_STAGE1_TRAIN_DIR}"
     log_line "stage1_eval_dir=${PHASE_C_STAGE1_EVAL_DIR}"
     log_line "stage2_train_dir=${PHASE_C_STAGE2_TRAIN_DIR}"

@@ -25,7 +25,7 @@
 - 已实现多种 loss/校准/对比/过滤技巧，但整体信号质量仍偏弱。
 - 当前判断：核心瓶颈在 supervision 噪声与 pair 质量，不是单纯参数没调好。
 
-### Phase D（当前主线）
+### Phase D（关键前置阶段，已完成方向纠偏）
 - 已接入外部 PRM（Qwen2.5-Math-PRM-7B）做 teacher scoring（D1）。
 - 已实现 teacher+MC 融合标签（D2）与目标源切换评估（D3）。
 - 已上线 D6（ranking-first）工程版本：
@@ -78,6 +78,52 @@
      - OOD / stress test，
      - 不再承担“方法是否成立”的第一性验证任务。
 
+### Phase E（当前主线）
+- 定义：
+  - 在高质量 pair / process-supervision benchmark 上先验证同一 benchmark 家族内的 value/ranking 可学习性。
+- 2026-03-10 数据语义审计后的修复约束：
+  - `Math-Shepherd` / `RLHFlow` / `PRM800K` fallback 不再默认使用 nearest-negative 启发式 pair；
+  - 现在默认只构造严格 `first_bad_edge` pair；
+  - 新 artifact 会显式记录 `pair_build_mode / pair_semantics`；
+  - 旧的 nearest-negative 结果应作为 `legacy` 处理，不再与新结果混读；
+  - 详见：`docs/data_semantics_risk_audit_20260310.md`
+- 现在的实现状态（2026-03-10, E0-E3 已落地）：
+  1. benchmark-native 新入口已经实现：
+     - `scripts/phase_e_prepare_pairs.py`
+     - `scripts/phase_e_train_value.py`
+     - `scripts/phase_e_eval_benchmark.py`
+     - `scripts/run_phase_e_suite.sh`
+  2. 新中间层模块已经实现：
+     - `src/ours/phase_e/contracts.py`
+     - `src/ours/phase_e/pairs.py`
+     - `src/ours/phase_e/runtime.py`
+     - `src/ours/phase_e/training.py`
+     - `src/ours/phase_e/benchmark_eval.py`
+  3. 已经验证的能力：
+     - 不依赖 `Phase C` artifact 的 external-pair-only 训练
+     - `ProcessBench` benchmark-native 评测
+     - `PRMBench_Preview` benchmark-native 评测
+     - `run_phase_e_suite.sh` 的真实 smoke 跑通
+- 当前执行顺序因此更新为：
+  1. 直接运行 `Phase E` smoke/full learnability suites，
+  2. 先看 source-family held-out learnability，
+  3. 再看 benchmark-native 指标，
+  4. 最后才回到 StrategyQA 做 transfer。
+ - 2026-03-11 运行时可靠性修复：
+  1. shared feature cache 已升级到更严格的 provenance 追踪：
+     - 不再只记录 `config/index`，还会绑定 index 引用的 shard 文件；
+  2. `Phase B` 与 `Phase C P(IK)` 训练器现在都遵循：
+     - cache 常驻 CPU，
+     - 训练/评测只搬当前 mini-batch 到 head device；
+  3. 这次修复的目的不是提速，而是避免两类静默风险：
+     - stale feature cache 误复用，
+     - cache hit 后整包特征常驻 GPU 导致显存被慢慢吃满。
+ - 2026-03-11 新增 `intradataset ACC90` 分支：
+  1. 只关心单一数据集自己的 held-out pair 判别准确率，
+  2. 不把跨数据集迁移和 benchmark 泛化混进这一分支，
+  3. 新增 `MLP value head` 选项用于同源高精度拟合，
+  4. 新入口：`scripts/run_phase_e_intradataset_suite.sh`
+
 ## 2. 近期关键实验结论
 
 1. `DT2_MATH_SHEPHERD_SEED3_STABLE` 已证明高质量外部 triplet 上 ranking 分支可以稳定学习。
@@ -92,6 +138,44 @@
 5. 因此项目的科学判断已更新：
    - 当前问题更像 `process ranking`，不是 `scalar value regression`。
 6. 因为 StrategyQA 没有公开高质量步骤监督，仓库主验证 benchmark 已转向 PRM-grade 数据集；StrategyQA 仅保留为迁移检验集。
+7. 最新 `Phase E` 结果与社区结论一致：
+   - `Math-Shepherd smoke` 在 source 内可学，但 `ProcessBench` 仍弱；
+   - `PRM800K seed3` 在 source 内和 `ProcessBench` 上都偏弱；
+   - 因此当前不应把“跨数据集迁移”设为第一性成功标准。
+8. `Math-Shepherd` 正式 seed3 又补了一条更关键的证据：
+   - 两个 seed 在 same-source held-out 上很强，
+   - 一个 seed 明显塌陷，
+   - 因此下一步重点是运行 `Math-Shepherd trust matrix`，
+     选出真正可托付的 `best_value_head.pt`，而不是再看单次峰值。
+9. 最新 `E15_MATH_SHEPHERD_TRUST_ROBUST_SEED3` 进一步说明：
+   - `Math-Shepherd` 单源已经足够证明可学习性，
+   - 但对 `ProcessBench` 仍然几乎不泛化，
+   - 因此下一步主线应切到“同家族多源数学数据混训”，而不是继续期待单源直接迁移。
+10. 还必须保留一条实现层面的谨慎结论：
+   - 修复后 `Math-Shepherd` adapter 已对齐到严格 `first_bad_edge`，
+   - 但它仍不是“同一步 sibling branch”监督，
+   - 所以它更像“local first-bad-edge learnability”证据，
+   - 不是“benchmark-grade process verifier 已成立”的证据。
+
+## 2.1 社区/学界结论（影响当前 Phase E 规划）
+
+1. `ProcessBench` 与 `PRMBench` 的出发点就是：现有 PRMs 在更严格的过程错误识别上仍然不足。
+2. `VersaPRM`、`ThinkPRM`、`R-PRM` 这类后续工作进一步说明：
+   - 单一数据集直接训一个小型判别式 value head，并不天然带来强跨域泛化；
+   - 若真要追求跨 benchmark 泛化，通常需要：
+     - 多域训练，
+     - 更成熟的 preference/process 构造，
+     - 或生成式 verifier。
+3. 因此仓库的现行策略改为：
+   - 先证明 same-benchmark learnability，
+   - 再把跨 benchmark/StrategyQA transfer 作为次级目标。
+4. 最新补充判断：
+   - 多源混训是合理下一步，但必须是**同家族、source-balanced、benchmark-clean** 的混训，
+   - 不能把 benchmark 测试集直接掺入训练，
+   - 也不能让弱源（如当前 recipe 下的 `PRM800K`）按体量主导训练。
+5. 与此同时，Phase E 现在又额外拆出一个更窄的问题：
+   - 单一高质量 pair 数据集本身，能不能把 held-out ACC 拉到 `>90%`？
+   - 这个问题现在由 `intradataset ACC90` 分支单独回答。
 
 ## 3. 运行入口
 
@@ -130,6 +214,39 @@ bash scripts/run_phase_d_triplet_validation_suite.sh
 bash scripts/run_phase_d_bridge_suite.sh
 ```
 
+### Phase E（high-quality benchmark learnability）
+```bash
+# 轻量烟测
+ACTIVE_PHASE_E_GROUP=E1_MATH_SHEPHERD_PAIR_LEARN_SMOKE \
+RUN_PREFIX=phase_e_smoke_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_e_suite.sh
+
+# 主线 3-seed
+ACTIVE_PHASE_E_GROUP=E2_MATH_SHEPHERD_PAIR_LEARN_SEED3 \
+RUN_PREFIX=phase_e_math_seed3_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_e_suite.sh
+
+# Math-Shepherd trust candidate search
+ACTIVE_PHASE_E_MS_GROUP=MS2_MATH_SHEPHERD_TRUST_SEED3_MATRIX \
+RUN_PREFIX=phase_e_ms_trust_seed3_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_e_mathshepherd_trust_suite.sh
+
+# 多源数学混训 Stage A-E（推荐新主线）
+ACTIVE_PHASE_E_MM_GROUP=MM2_MULTISOURCE_MATH_STAGE_ABCD_SEED3 \
+RUN_PREFIX=phase_e_multisource_abcd_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_e_multisource_math_suite.sh
+
+# 单数据集 held-out ACC90 专项套件
+ACTIVE_PHASE_E_INTRADATASET_GROUP=I5_ALL_ACC90_MATRIX \
+RUN_PREFIX=phase_e_all_acc90_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_e_intradataset_suite.sh
+```
+
 ### Phase C/D（one-click control + diagnosis）
 ```bash
 bash scripts/run_phase_cd_control_suite.sh
@@ -139,6 +256,9 @@ bash scripts/run_phase_cd_control_suite.sh
 
 - 总体路线与状态：`docs/readme.md`
 - 完整技术手册：`docs/readme_full.md`
+- Phase E 正式计划：`docs/phase_E_plan.md`
+- Phase E 多源数学混训计划：`docs/phase_E_multisource_math_plan.md`
+- Phase E 单数据集 ACC90 计划：`docs/phase_E_intradataset_acc90_plan.md`
 - Phase B 结果总表：`docs/phase_B_report.md`
 - Phase C 方案与诊断：`docs/phase_C_plan.md`, `docs/phase_C_fix_value_head.md`
 - Phase D 正式计划：`docs/phase_D_plan.md`

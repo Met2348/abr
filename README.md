@@ -25,7 +25,7 @@
 - 已实现多种 loss/校准/对比/过滤技巧，但整体信号质量仍偏弱。
 - 当前判断：核心瓶颈在 supervision 噪声与 pair 质量，不是单纯参数没调好。
 
-### Phase D（当前主线）
+### Phase D（关键前置阶段，已完成方向纠偏）
 - 已接入外部 PRM（Qwen2.5-Math-PRM-7B）做 teacher scoring（D1）。
 - 已实现 teacher+MC 融合标签（D2）与目标源切换评估（D3）。
 - 最近关键结果：
@@ -52,6 +52,51 @@
     - downstream transfer，
     - OOD / stress test。
 
+### Phase E（当前主线）
+- 目标：在高质量 pair / process-supervision benchmark 上先验证同一 benchmark 家族内的 value/ranking 可学习性。
+- 现状（E0-E3 已实现并经 smoke 验证）：
+  - 新 benchmark-native 代码入口：
+    - `scripts/phase_e_prepare_pairs.py`
+    - `scripts/phase_e_train_value.py`
+    - `scripts/phase_e_eval_benchmark.py`
+    - `scripts/run_phase_e_suite.sh`
+  - 新核心模块：
+    - `src/ours/phase_e/contracts.py`
+    - `src/ours/phase_e/pairs.py`
+    - `src/ours/phase_e/runtime.py`
+    - `src/ours/phase_e/training.py`
+    - `src/ours/phase_e/benchmark_eval.py`
+  - 已完成的真实烟测：
+    - `prepare_pairs -> train_value -> ProcessBench eval`
+    - `run_phase_e_suite.sh` 的 `E1_MATH_SHEPHERD_PAIR_LEARN_SMOKE`
+- 这意味着 `Phase E` 已经从“规划阶段”进入“可直接起跑的实现阶段”。
+- 当前成功标准也已更新：
+  - 先看 source-family held-out learnability，
+  - 再看 benchmark-native 指标，
+  - 最后才看 StrategyQA transfer。
+- 当前新的执行重点：
+  - 不再只跑单个 `Math-Shepherd` baseline，
+  - 而是运行 `Math-Shepherd trust matrix`，
+  - 用固定脚本从多组 recipe 中选出一个更可托付的 `best_value_head.pt`
+    供后续 RL/价值判断阶段复用。
+  - 最新 `E15` 结果又进一步说明：
+    - 单源 `Math-Shepherd` 已足够证明 learnability，
+    - 但 benchmark-native 指标仍弱，
+    - 因此下一步主线应切到同家族多源数学数据混训。
+  - 2026-03-10 数据语义修复后：
+    - `Math-Shepherd` / `RLHFlow` / `PRM800K` fallback 默认只构造严格 `first_bad_edge` pair，
+    - 新 artifact 会记录 `pair_build_mode / pair_semantics`，
+    - 修复前的 nearest-negative 结果应视为 `legacy`。
+  - 2026-03-11 cache/显存可靠性修复后：
+    - shared feature cache 已升级为更严格的 provenance 追踪，
+      会绑定 index 引用的实际权重 shard；
+    - `Phase B` / `Phase C P(IK)` 训练已改为 CPU-cache + mini-batch 搬运；
+    - cache hit 不再默认意味着“整包特征常驻 GPU”。
+  - 2026-03-11 新增 `intradataset ACC90` 分支：
+    - 只看单一数据集自己的 held-out pair ACC/AUC，
+    - 不再把 benchmark transfer 混进这一分支，
+    - 新入口：`scripts/run_phase_e_intradataset_suite.sh`
+
 ## 2. 近期关键实验结论
 
 1. Phase A/B 的基线价值已足够：流程可复现，指标可稳定产出。
@@ -61,6 +106,14 @@
 5. 仓库主线已正式改为：
    - 用有明确步骤监督的数据集先验证 BCR/value-head 思路，
    - 再把已验证的方法迁移回 StrategyQA。
+6. 社区/学界的最新结论也支持这条顺序：
+   - 跨数据集 PRM 泛化本身困难，
+   - 通常需要多域训练、更成熟的 preference/process 构造，或生成式 verifier，
+   - 因而不应把“单一数据集训练后立即迁移”作为第一性成功标准。
+7. `Math-Shepherd` seed3 的最新结果进一步说明：
+   - same-source held-out 可学性是存在的，
+   - 但 seed fragility 仍然明显，
+   - 所以下一步必须优先解决“checkpoint trustworthiness”，而不是只看最高分。
 
 ## 3. 运行入口
 
@@ -89,10 +142,27 @@ bash scripts/run_phase_c_pik_suite.sh
 bash scripts/run_phase_d_teacher_suite.sh
 ```
 
+### Phase E（benchmark-native learnability suites）
+```bash
+bash scripts/run_phase_e_suite.sh
+
+# Math-Shepherd trust matrix（推荐）
+bash scripts/run_phase_e_mathshepherd_trust_suite.sh
+
+# 多源数学混训主线（Stage A-E）
+bash scripts/run_phase_e_multisource_math_suite.sh
+
+# 单数据集 ACC90 专项套件
+bash scripts/run_phase_e_intradataset_suite.sh
+```
+
 ## 4. 文档导航
 
 - 总体路线与状态：`docs/readme.md`
 - 完整技术手册：`docs/readme_full.md`
+- Phase E 正式计划：`docs/phase_E_plan.md`
+- Phase E 多源数学混训计划：`docs/phase_E_multisource_math_plan.md`
+- Phase E 单数据集 ACC90 计划：`docs/phase_E_intradataset_acc90_plan.md`
 - Phase B 结果总表：`docs/phase_B_report.md`
 - Phase C 方案与诊断：`docs/phase_C_plan.md`, `docs/phase_C_fix_value_head.md`
 - Phase D 正式计划：`docs/phase_D_plan.md`

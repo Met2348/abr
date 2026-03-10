@@ -121,7 +121,7 @@ def main() -> int:
 
 def build_scan_specs(repo_root: Path) -> list[ScanSpec]:
     """Return the artifact families that should be scanned."""
-    # 中文：不同阶段产物的“完整性”定义并不一样。
+    # 不同阶段产物的“完整性”定义并不一样。
     # 例如 Phase C data 需要 rollout_targets，而 Phase C eval 只需要 metrics。
     # 因此不要用“一套通用必需文件”去硬套所有目录。
     return [
@@ -284,7 +284,7 @@ def scan_spec(spec: ScanSpec) -> list[dict[str, object]]:
         rows.append(
             {
                 "spec_name": spec.name,
-                # 中文：`path` 用 repo-relative，便于日志阅读；
+                # `path` 用 repo-relative，便于日志阅读；
                 # `abs_path` 保留绝对路径，删除时不依赖当前工作目录，避免误删失败。
                 "path": str(run_dir.relative_to(spec.root.parents[2])),
                 "abs_path": str(run_dir),

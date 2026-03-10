@@ -165,6 +165,7 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--posthoc-isotonic-min-points must be > 0")
     if float(args.feature_cache_lock_timeout_sec) <= 0.0:
         raise ValueError("--feature-cache-lock-timeout-sec must be > 0")
+    # Verify run/eval artifact compatibility before any inference so miswired inputs fail fast.
     # 先校验训练 run 和 eval 数据目录的契约一致性，再做任何推理。
     manifest_path = args.value_run_dir / "manifest.json"
     if not manifest_path.exists():
@@ -180,6 +181,7 @@ def main(argv: list[str] | None = None) -> int:
     train_metrics = json.loads(train_metrics_path.read_text(encoding="utf-8"))
     train_target_mean = float(train_metrics["train_target_mean"])
 
+    # Fall back to final when best is missing so interrupted runs remain re-evaluable.
     # `best` 不存在时回退到 final，避免因中断 run 无法复评。
     checkpoint_name = "best_value_head.pt" if args.checkpoint_name == "best" else "final_value_head.pt"
     checkpoint_path = args.value_run_dir / checkpoint_name
@@ -196,6 +198,7 @@ def main(argv: list[str] | None = None) -> int:
         args.eval_dir,
         max_variants=args.max_corruption_variants,
     )
+    # Keep eval-time target-source aligned with training unless the operator explicitly overrides it.
     # D3: 评估阶段与训练阶段保持同一 target-source，避免指标口径不一致。
     run_train_cfg = value_manifest.get("train_config", {})
     resolved_target_source = (
@@ -609,7 +612,7 @@ def _resolve_eval_targets(
 ) -> tuple[list[float], dict[str, Any]]:
     """Resolve standalone-eval targets from the selected D3 source.
 
-    中文要点
+    说明
     --------
     - standalone eval 默认应与训练 run 使用同一 target source。
     - 若 teacher/fused 有缺失，按 missing policy 处理并输出覆盖率统计。

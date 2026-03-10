@@ -353,7 +353,9 @@ def _resolve_c_reference(phase_c_logs_root: Path, dataset: str) -> dict[str, Any
             return preferred.index(gid)
         return len(preferred)
 
-    # 中文：这里不是简单取“最新 C2 结果”，而是优先取方法学上更可比的 reference。
+    # Prefer the most methodologically comparable reference instead of blindly taking the newest C2 run.
+    # 这里不是简单取“最新 C2 结果”，而是优先取方法学上更可比的 reference。
+    # Otherwise a smoke run or old ablation can become the baseline and distort the gate decision.
     # 否则 promotion gate 可能会把 smoke / 旧 ablation 当 baseline，导致判断失真。
     best_priority = min(_priority(item) for item in candidates)
     best = [item for item in candidates if _priority(item) == best_priority]
@@ -389,9 +391,10 @@ def _resolve_d6_group(phase_d_logs_root: Path, group_id: str) -> dict[str, Any] 
         label = str(row.get("label", "")).strip().lower()
         target_source = str(row.get("target_source", "")).strip().lower()
         if label == "mc" or target_source == "q_mean_smoothed":
-            # 中文：优先选 MC / q_mean_smoothed 这一行，是为了跟 C 阶段原始监督更可比。
-            # 若直接拿 fused/teacher 行去和 control 比，往往会把“监督源变化”与
-            # “模型能力变化”混在一起。
+            # Prefer the MC / q_mean_smoothed row so the control stays comparable to the original C-stage supervision.
+            # 优先选 MC / q_mean_smoothed 这一行，是为了跟 C 阶段原始监督更可比。
+            # Directly comparing against fused/teacher rows would mix supervision-source changes with model-capability changes.
+            # 若直接拿 fused/teacher 行去和 control 比，往往会把“监督源变化”与“模型能力变化”混在一起。
             picked = row
             break
     c2_eval_dir = picked.get("c2_eval_dir")
@@ -457,7 +460,8 @@ def _resolve_d6t_group(phase_d6t_logs_root: Path, group_id: str) -> dict[str, An
     auc_values = [_safe_float(row.get("ext_auc")) for row in seed_rows]
     pair_values = [v for v in pair_values if v is not None]
     auc_values = [v for v in auc_values if v is not None]
-    # 中文：这里用跨 seed 的均值和总体标准差做门控，而不是只看单次最好结果。
+    # Gate on cross-seed mean and population std, because D6-T cares about stable reproducibility rather than one lucky run.
+    # 这里用跨 seed 的均值和总体标准差做门控，而不是只看单次最好结果。
     # D6-T 的核心目标就是检验“稳定可复现”，所以最怕 cherry-pick 单个高分 seed。
     pair_mean = statistics.mean(pair_values) if pair_values else None
     auc_mean = statistics.mean(auc_values) if auc_values else None

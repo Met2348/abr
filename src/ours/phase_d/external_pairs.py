@@ -131,10 +131,16 @@ def summarize_external_pairs(rows: list[ExternalPairRecord]) -> dict[str, Any]:
     """Return lightweight summary stats for external pair rows."""
     by_source: dict[str, int] = {}
     by_domain: dict[str, int] = {}
+    by_pair_build_mode: dict[str, int] = {}
+    by_pair_semantics: dict[str, int] = {}
     confidence_sum = 0.0
     for row in rows:
         by_source[row.source_tag] = by_source.get(row.source_tag, 0) + 1
         by_domain[row.domain_tag] = by_domain.get(row.domain_tag, 0) + 1
+        pair_build_mode = str((row.metadata or {}).get("pair_build_mode", "unspecified")).strip() or "unspecified"
+        pair_semantics = str((row.metadata or {}).get("pair_semantics", "unspecified")).strip() or "unspecified"
+        by_pair_build_mode[pair_build_mode] = by_pair_build_mode.get(pair_build_mode, 0) + 1
+        by_pair_semantics[pair_semantics] = by_pair_semantics.get(pair_semantics, 0) + 1
         confidence_sum += float(row.pair_confidence)
     count = len(rows)
     return {
@@ -142,10 +148,11 @@ def summarize_external_pairs(rows: list[ExternalPairRecord]) -> dict[str, Any]:
         "mean_pair_confidence": (float(confidence_sum / count) if count > 0 else 0.0),
         "by_source": dict(sorted(by_source.items())),
         "by_domain": dict(sorted(by_domain.items())),
+        "by_pair_build_mode": dict(sorted(by_pair_build_mode.items())),
+        "by_pair_semantics": dict(sorted(by_pair_semantics.items())),
     }
 
 
 def _validate_non_empty_str(value: Any, name: str) -> None:
     if not isinstance(value, str) or value.strip() == "":
         raise ValueError(f"`{name}` must be a non-empty string")
-

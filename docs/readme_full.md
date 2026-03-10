@@ -2,7 +2,7 @@
 
 This repository is building an in-house reasoning-faithfulness pipeline from scratch.
 
-Current milestone status (2026-03-10):
+Current milestone status (2026-03-10, Phase E transition):
 - Phase A is concluded and stable (full-dataset benchmark contracts are reproducible).
 - Phase B core diagnosis is concluded:
   - StrategyQA can gain from PEFT under current pipeline,
@@ -11,7 +11,7 @@ Current milestone status (2026-03-10):
   - C0/C1/C2 value-head path,
   - P(IK) branch (`scripts/phase_c_prepare_pik_data.py`, `scripts/phase_c_train_pik.py`, `scripts/phase_c_eval_pik.py`),
   - CQR quality-first controls and two-stage rollout enrichment.
-- Phase D is the active execution track:
+- Phase D is now the direction-correction and bridge-evidence track:
   - D1 external PRM teacher scoring is implemented and validated,
   - D2 teacher+MC target fusion is implemented in C1,
   - D3 target-source ablation (`mc`, `teacher`, `fused`) is implemented in C2.
@@ -94,9 +94,53 @@ Current milestone status (2026-03-10):
         - `FOLIO`
         - `FoVer`
     - StrategyQA remains important, but only as:
-      - bridge continue-training target,
-      - downstream transfer benchmark,
-      - OOD stress test.
+    - bridge continue-training target,
+    - downstream transfer benchmark,
+    - OOD stress test.
+- Phase E is now the active execution track:
+  - purpose:
+    - validate value-head learnability on high-quality pair/process-supervision
+      benchmarks first,
+    - then reuse StrategyQA only for transfer/OOD evaluation.
+  - implementation status (2026-03-10, E0-E3 delivered):
+    - benchmark-native Phase E modules:
+      - `src/ours/phase_e/contracts.py`
+      - `src/ours/phase_e/pairs.py`
+      - `src/ours/phase_e/runtime.py`
+      - `src/ours/phase_e/training.py`
+      - `src/ours/phase_e/benchmark_eval.py`
+    - benchmark-native entrypoints:
+      - `scripts/phase_e_prepare_pairs.py`
+      - `scripts/phase_e_train_value.py`
+      - `scripts/phase_e_eval_benchmark.py`
+      - `scripts/run_phase_e_suite.sh`
+    - smoke validation already completed:
+      - direct `prepare -> train -> ProcessBench eval`
+      - one-click suite smoke `E1_MATH_SHEPHERD_PAIR_LEARN_SMOKE`
+  - latest Phase E diagnosis:
+    - `Math-Shepherd` has real same-source learnability,
+    - but seed fragility is still visible (`E2` has one collapsed seed),
+    - so the next official task is no longer "run one more baseline",
+      but "run the Math-Shepherd trust matrix and then move to same-family
+      multi-source math mixture training".
+  - runtime reliability hardening (2026-03-11):
+    - shared feature cache now tracks actual weight shards referenced by model
+      index files, not only metadata files
+    - corrupt cache entries now self-heal on rewrite instead of remaining
+      sticky forever
+    - stale cache lock files are reclaimed after timeout
+    - `Phase B` and `Phase C P(IK)` head-training loops now keep cache tensors
+      on CPU and move only the current mini-batch to GPU
+  - new Phase E multi-source entrypoint:
+    - `scripts/run_phase_e_multisource_math_suite.sh`
+    - this wrapper now covers:
+      - Stage A anchors,
+      - Stage B balanced two-source mixtures,
+      - Stage C tri-source main mixture,
+      - Stage D weak-source PRM800K ablations,
+      - Stage E staged curricula.
+  - Phase E source-of-truth:
+    - `docs/phase_E_plan.md`
   - Latest strict diagnosis (2026-03-07):
     - `DT4_MIXED_MS_PRM800K_SEED3_STABLE` does pass the external gate, but only
       marginally:
@@ -112,6 +156,7 @@ Current milestone status (2026-03-10):
 Primary roadmap:
 - `TODO_ours.md`
 - `phase_D_plan.md`
+- `phase_E_plan.md`
 
 ## 2026-03-10 Strategic Pivot (Authoritative)
 
@@ -132,6 +177,10 @@ What this means:
    supervision is genuinely strong.
 3. After the method is validated there, StrategyQA becomes the transfer test
    that tells us how much of the learned ranking prior can survive domain shift.
+4. The first Phase E question is now:
+   - "can we learn stable ranking/value behavior on the same benchmark family?"
+   not:
+   - "can one source dataset immediately generalize across benchmarks?"
 
 Operational decision:
 1. Freeze existing StrategyQA value-head results as:
@@ -164,6 +213,255 @@ External references that motivated the benchmark change:
    - https://huggingface.co/datasets/Qwen/ProcessBench
 6. PRMBench:
    - https://prmbench.github.io/
+7. ProcessBench paper:
+   - https://arxiv.org/abs/2412.06559
+8. VersaPRM:
+   - https://arxiv.org/abs/2502.06737
+9. ThinkPRM:
+   - https://arxiv.org/abs/2504.16828
+10. ThinkPRM official repo:
+   - https://github.com/mukhal/thinkprm
+11. R-PRM:
+   - https://arxiv.org/abs/2503.21295
+12. R-PRM official repo:
+   - https://github.com/NJUNLP/R-PRM
+13. LMs Mostly Know What They Know:
+   - https://arxiv.org/abs/2207.05221
+
+## 2026-03-10 Phase E Re-scope (Same-Benchmark First)
+
+Why this re-scope is necessary:
+1. Community evidence does not support the assumption that a PRM/value head
+   trained on a single source dataset should automatically generalize across
+   benchmarks.
+2. `ProcessBench` and `PRMBench` were created because current PRMs remain weak
+   on explicit process error detection.
+3. Recent follow-up work (`VersaPRM`, `ThinkPRM`, `R-PRM`) points toward:
+   - multi-domain training,
+   - stronger preference/process constructions,
+   - or even generative verifier designs
+   when cross-domain generalization is the goal.
+
+What our own newest evidence says:
+1. `Math-Shepherd smoke`:
+   - source held-out pair metrics are positive:
+     - `pair_acc=0.6787`
+     - `auc=0.6704`
+   - but `ProcessBench GSM8K` stays weak:
+     - `pair_acc=0.4661`
+     - `auc=0.5155`
+2. `PRM800K seed-3`:
+   - source held-out mean is weak:
+     - `mean_pair_acc=0.4783`
+     - `mean_auc=0.4855`
+   - `ProcessBench GSM8K` mean is also weak:
+     - `mean_pair_acc=0.4737`
+     - `mean_auc=0.4943`
+
+Operational consequence:
+1. Phase E no longer treats cross-dataset transfer as the first pass/fail gate.
+2. New gate order is:
+   - source-family held-out learnability first,
+   - benchmark-native eval second,
+   - StrategyQA transfer third.
+3. If later we want stronger cross-benchmark generalization, that becomes a
+   method-upgrade task, not the default expectation for the current recipe.
+
+## 2026-03-10 E15 Update (Why Phase E Moves To Multi-Source Math)
+
+Newest result:
+1. `E15_MATH_SHEPHERD_TRUST_ROBUST_SEED3`
+   - same-source held-out is now clearly positive:
+     - `mean_heldout_pair_acc=0.7518`
+     - `mean_heldout_auc=0.7280`
+   - but benchmark-native metrics remain weak:
+     - `ProcessBench GSM8K mean_auc=0.4834`
+     - `ProcessBench Math mean_auc=0.4746`
+
+Interpretation:
+1. Single-source `Math-Shepherd` is enough to prove learnability.
+2. It is not enough to produce a benchmark-trustworthy value head.
+3. Therefore the next official Phase E direction is:
+   - same-family multi-source math mixture training,
+   - not more isolated one-source transfer expectations.
+
+Current planned sources:
+1. `Math-Shepherd`
+2. `R-PRM`
+3. `PRMBench_Preview`
+4. `PRM800K` only as a weak-source ablation / low-weight auxiliary source
+
+Detailed plan:
+1. `docs/phase_E_multisource_math_plan.md`
+
+## 2026-03-10 Late Phase E Update (Post-Fix Anchor / Mixture Snapshot)
+
+This is the first post-fix snapshot after the `first_bad_edge_strict` repair
+and the first multi-source Stage A/B runs.
+
+What is now newly established:
+1. Post-fix `Math-Shepherd` trust selection is stronger than the older
+   `E15`-only view suggested.
+   - `MS2_MATH_SHEPHERD_TRUST_SEED3_MATRIX` now provisionally selects:
+     - `E14_MATH_SHEPHERD_TRUST_ANTISAT_SEED3`
+   - with:
+     - `mean_hold_pair=0.8246`
+     - `mean_hold_auc=0.7899`
+     - `pb_gsm_auc=0.4893`
+     - `pb_math_auc=0.4783`
+   - interpretation:
+     - the repair did improve same-family learnability,
+     - but it still did **not** solve `ProcessBench`.
+2. `E20_STAGEA_MS_ANCHOR_SEED3` now gives the cleanest post-fix
+   single-source `Math-Shepherd` anchor summary:
+   - `mean_heldout_pair_acc=0.6853`
+   - `mean_heldout_auc=0.6676`
+   - `mean_prmbench_preview_auc=0.5868`
+   - `mean_processbench_gsm8k_auc=0.4750`
+   - `mean_processbench_math_auc=0.4715`
+   - interpretation:
+     - `Math-Shepherd` can learn a real source-family ranking signal,
+     - and transfers somewhat to `PRMBench_Preview`,
+     - but remains weak on `ProcessBench`.
+3. `E21_STAGEA_RPRM_ANCHOR_SEED3` provides a different kind of signal:
+   - `mean_heldout_pair_acc=0.4381`
+   - `mean_heldout_auc=0.4953`
+   - `mean_prmbench_preview_auc=0.5623`
+   - `mean_processbench_gsm8k_auc=0.4744`
+   - `mean_processbench_math_auc=0.4626`
+   - one concrete run (`seed 44`) reaches:
+     - `PRMBench_Preview pair_acc=0.6001`
+     - `PRMBench_Preview auc=0.5937`
+   - interpretation:
+     - `R-PRM` is not a strong general anchor under our current recipe,
+     - but it is more aligned with `PRMBench_Preview` than with
+       `ProcessBench`.
+4. `E22_STAGEA_PRMBENCH_PREVIEW_ANCHOR_SEED3` is **not yet complete**.
+   - pair preparation and training started,
+   - but no final group summary is available yet,
+   - so no scientific conclusion should be written for `E22` at this point.
+5. `E24_STAGEB_MS_RPRM_MIX_SEED3` has not shown a positive mixture result yet.
+   - current smoke run failed before finishing the full group summary,
+   - partial seed-42 benchmark metrics are weak:
+     - `PRMBench_Preview auc=0.5207`
+     - `ProcessBench GSM8K auc=0.4682`
+     - `ProcessBench Math auc=0.3835`
+   - interpretation:
+     - there is no evidence yet that simple `MS + R-PRM` mixing is
+       automatically complementary.
+6. `CUR1_STAGEE_MS_TO_MSRPRM` is still incomplete as a curriculum claim.
+   - stage-1 warm-start (`E20`) completed,
+   - stage-2 (`E24`) has only partial progress so far,
+   - therefore `CUR1` currently provides no final curriculum conclusion.
+
+Project-level reading:
+1. The post-fix `Math-Shepherd` repair was necessary and scientifically
+   meaningful.
+2. The repository now has two different usable source signals:
+   - `Math-Shepherd`: stronger same-family anchor
+   - `R-PRM`: better `PRMBench_Preview` alignment
+3. The repository does **not** yet have evidence that:
+   - balanced mixture solves benchmark robustness,
+   - or that `ProcessBench` has become reliably positive.
+4. The next method question is therefore:
+   - not "did the fix solve Phase E?"
+   - but:
+   - "which source combination and training order best preserves the
+     `Math-Shepherd` anchor while adding `PRMBench`-style robustness?"
+
+## 2026-03-11 Cache/OOM Reliability Repair
+
+Why this matters:
+1. A code audit found a real trust risk in the shared feature-cache layer:
+   - cache provenance tracked config/index files,
+   - but not the actual weight shards those files referenced.
+2. This created a silent failure mode:
+   - swap checkpoint weights in-place,
+   - keep metadata files unchanged,
+   - old feature cache may still look reusable.
+3. A second risk was also confirmed in training:
+   - `Phase B` and `Phase C P(IK)` could move whole cached feature bundles to
+     GPU on cache hit,
+   - which made cache-heavy runs more likely to OOM during head-only training.
+
+What is now fixed:
+1. `src/ours/phase_b/feature_cache.py`
+   - schema bumped to `phase_feature_cache_v2`
+   - model directory signatures now include:
+     - tracked metadata files
+     - index-referenced shard files
+     - loose top-level weight files
+2. cache self-healing:
+   - corrupt payload/meta pairs are purged and rewritten
+   - stale `.write.lock` files are reclaimed after timeout
+3. `scripts/phase_b_train_value.py`
+   - cache payloads remain on CPU
+   - training/eval move only current mini-batches to the head device
+   - frozen backbone is released after encoding
+4. `scripts/phase_c_train_pik.py`
+   - same CPU-cache refactor applied
+5. `src/ours/phase_e/runtime.py`
+   - cached feature payload validation is stricter than before
+
+Operational implication:
+1. New cache-sensitive results should be interpreted under the `v2` cache
+   semantics.
+2. If a run looks suspiciously too fast after checkpoint swaps, treat old cache
+   reuse as suspect and rerun with:
+   - `FEATURE_CACHE_MODE=off`
+   - or a fresh cache root
+3. Full recursive OOM backoff still primarily covers:
+   - generation
+   - rollout generation
+   - feature encoding
+   - feature scoring
+4. Training loops are now safer because they no longer keep whole feature banks
+   on GPU, but they are not yet a universal backward-pass OOM splitter.
+
+## 2026-03-10 Data Semantics Risk Update
+
+This risk was real, and the code has now been tightened.
+
+Legacy issue:
+1. Old `Math-Shepherd` / `RLHFlow` / `PRM800K` fallback runs used one
+   nearest-negative converter over a single labeled trajectory.
+2. That produced different-depth prefix pairs and mixed:
+   - progress/depth signal,
+   - local error signal.
+3. Those old results should now be treated as `legacy` and should not be mixed
+   into post-fix summaries.
+
+Current fix:
+1. Default `step_label_pair_mode` is now `first_bad_edge_strict`.
+2. Single-trajectory `+/-` sources now only emit:
+   - the last clean prefix before the first negative step,
+   - versus the prefix that includes the first bad step.
+3. If no positive step exists before the first negative step, the sample is
+   dropped instead of being forced into a noisy pair.
+4. New artifacts explicitly expose:
+   - `pair_build_mode`
+   - `pair_semantics`
+5. New artifact stages:
+   - `phase_e_pairs_v2`
+   - `phase_d_external_pairs_v2`
+
+What this means scientifically:
+1. `Math-Shepherd` and `RLHFlow` are still not true same-step sibling-pair
+   datasets.
+2. They are now interpreted more narrowly and more honestly as:
+   - strict `first_bad_edge` supervision sources.
+3. `PRMBench_Preview` and `R-PRM` remain lower-risk sources.
+4. `PRM800K` stays mixed:
+   - official `completion_ratings` path is cleaner,
+   - fallback `+/-` path now also uses the stricter first-bad-edge builder.
+
+Operational consequence:
+1. New `Math-Shepherd` wins may now be narrated as:
+   - local first-bad-edge learnability inside the source family.
+2. They still should **not** be narrated as:
+   - exact same-step branch preference learning.
+3. Detailed audit record:
+   - `docs/data_semantics_risk_audit_20260310.md`
 
 ## 2026-03-07 D6-T Strict Diagnosis
 
@@ -3703,3 +4001,284 @@ PHASE_B_EVAL_BATCH_SIZE=8 \
 PHASE_B_EVAL_EXTRA_ARGS="--max-progress-lines 20 --log-every 25 --no-compare-latest-same-name" \
 bash scripts/run_phase_b_training_suite.sh
 ```
+
+## 11. Phase E Execution
+
+Phase E is now the benchmark-native learnability track.
+
+New code files:
+1. `src/ours/phase_e/contracts.py`
+2. `src/ours/phase_e/pairs.py`
+3. `src/ours/phase_e/runtime.py`
+4. `src/ours/phase_e/training.py`
+5. `src/ours/phase_e/benchmark_eval.py`
+6. `scripts/phase_e_prepare_pairs.py`
+7. `scripts/phase_e_train_value.py`
+8. `scripts/phase_e_eval_benchmark.py`
+9. `scripts/run_phase_e_suite.sh`
+
+What is already verified:
+1. external-pair-only training can run without any `Phase C` artifact dir
+2. `ProcessBench` benchmark-native evaluation is wired
+3. `PRMBench_Preview` benchmark-native evaluation is wired
+4. direct smoke and one-click suite smoke both ran through end-to-end
+5. `Math-Shepherd` seed-3 has now shown a mixed but important pattern:
+   - two strong held-out seeds,
+   - one collapsed seed,
+   - therefore the next engineering/science target is not "more transfer",
+     but "find a trustworthy Math-Shepherd checkpoint family".
+
+### 11.1 Minimal Direct Smoke
+
+```bash
+python -u scripts/phase_e_prepare_pairs.py \
+  --source-bundle math_shepherd \
+  --run-name phase_e_smoke_pairs \
+  --max-pairs-total 16 \
+  --max-pairs-per-source 16 \
+  --min-pair-confidence 0.55
+
+PAIR_DIR="$(ls -dt assets/artifacts/phase_e_pairs/phase_e_smoke_pairs__* | head -n 1)"
+
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_e_train_value.py \
+  --train-pairs-jsonl "$PAIR_DIR/train_pairs.jsonl" \
+  --eval-pairs-jsonl "$PAIR_DIR/validation_pairs.jsonl" \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_e_smoke_train \
+  --objective-mode ranking_only \
+  --num-train-epochs 1 \
+  --per-device-train-batch-size 8 \
+  --per-device-eval-batch-size 8 \
+  --learning-rate 5e-5 \
+  --max-length 512 \
+  --pair-weight-mode confidence \
+  --permutation-mode stable_hash \
+  --checkpoint-selection-metric ranking_score \
+  --feature-cache-root assets/artifacts/phase_e_feature_cache \
+  --feature-cache-mode read_write \
+  --require-cuda \
+  --strict-determinism
+
+RUN_DIR="$(ls -dt assets/artifacts/phase_e_runs/phase_e_smoke_train_* | head -n 1)"
+
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_e_eval_benchmark.py \
+  --value-run-dir "$RUN_DIR" \
+  --benchmark-id processbench_gsm8k \
+  --run-name phase_e_smoke_eval \
+  --max-samples 8 \
+  --batch-size 8 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --feature-cache-root assets/artifacts/phase_e_feature_cache \
+  --feature-cache-mode read_write \
+  --require-cuda
+```
+
+### 11.2 One-Click Smoke
+
+```bash
+ACTIVE_PHASE_E_GROUP=E1_MATH_SHEPHERD_PAIR_LEARN_SMOKE \
+RUN_PREFIX=phase_e_smoke_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_e_suite.sh
+```
+
+### 11.3 First Official Seed-3 Suites
+
+```bash
+ACTIVE_PHASE_E_GROUP=E2_MATH_SHEPHERD_PAIR_LEARN_SEED3 \
+RUN_PREFIX=phase_e_math_seed3_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_e_suite.sh
+
+ACTIVE_PHASE_E_GROUP=E4_RPRM_PRMBENCH_PREVIEW_SEED3 \
+RUN_PREFIX=phase_e_rprm_seed3_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_e_suite.sh
+
+ACTIVE_PHASE_E_GROUP=E5_PRM800K_PAIR_LEARN_SEED3 \
+RUN_PREFIX=phase_e_prm800k_seed3_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=3 \
+bash scripts/run_phase_e_suite.sh
+```
+
+### 11.4 Math-Shepherd Trust Candidate Search
+
+This is the new Phase E priority if the goal is to obtain one checkpoint that we
+may later rely on for RL-style value judgements.
+
+Direct matrix wrapper:
+
+```bash
+# Quick recipe comparison before spending overnight GPU time.
+ACTIVE_PHASE_E_MS_GROUP=MS1_MATH_SHEPHERD_TRUST_SMOKE \
+RUN_PREFIX=phase_e_ms_trust_smoke_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_e_mathshepherd_trust_suite.sh
+
+# Official candidate-search matrix.
+ACTIVE_PHASE_E_MS_GROUP=MS2_MATH_SHEPHERD_TRUST_SEED3_MATRIX \
+RUN_PREFIX=phase_e_ms_trust_seed3_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_e_mathshepherd_trust_suite.sh
+```
+
+What the wrapper runs:
+1. same-source control:
+   - `E7_MATH_SHEPHERD_SAME_SOURCE_SEED3`
+2. benchmark-aware baseline:
+   - `E2_MATH_SHEPHERD_PAIR_LEARN_SEED3`
+3. lower-LR stability probe:
+   - `E12_MATH_SHEPHERD_TRUST_LOWLR_SEED3`
+4. confidence-weight ablation:
+   - `E13_MATH_SHEPHERD_TRUST_UNWEIGHTED_SEED3`
+5. anti-saturation probe:
+   - `E14_MATH_SHEPHERD_TRUST_ANTISAT_SEED3`
+6. conservative robust candidate recipe:
+   - `E15_MATH_SHEPHERD_TRUST_ROBUST_SEED3`
+
+What it produces:
+1. group-level summary:
+   - `assets/artifacts/phase_e_logs/<RUN_PREFIX>/final_summary.md`
+2. candidate report:
+   - `assets/artifacts/phase_e_candidates/<RUN_PREFIX>_candidate/candidate_report.md`
+3. recommended checkpoint:
+   - one explicit `best_value_head.pt` path chosen by
+     `scripts/phase_e_select_candidate.py`
+
+Trust interpretation rule:
+1. do not freeze a checkpoint by one lucky seed,
+2. require:
+   - strong held-out same-source metrics,
+   - acceptable worst-seed behavior,
+   - low seed variance,
+   - non-trivial `ProcessBench GSM8K/Math` secondary metrics,
+3. if no group passes the full gate, the selector still returns one
+   **provisional** candidate so later stages can continue with explicit caveats.
+
+How to interpret the outputs:
+1. first look at held-out pair metrics inside `assets/artifacts/phase_e_runs/.../summary.md`
+2. then inspect benchmark-native metrics under `assets/artifacts/phase_e_eval/.../summary.md`
+3. finally compare cross-seed variance in `assets/artifacts/phase_e_logs/<RUN_PREFIX>/final_summary.md`
+
+### 11.5 Phase E Multi-Source Math Mainline
+
+This is the next official Phase E direction after the latest `E15` result.
+
+Direct Stage A-D matrix:
+
+```bash
+ACTIVE_PHASE_E_MM_GROUP=MM2_MULTISOURCE_MATH_STAGE_ABCD_SEED3 \
+RUN_PREFIX=phase_e_multisource_abcd_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_e_multisource_math_suite.sh
+```
+
+Stage E curriculum matrix:
+
+```bash
+ACTIVE_PHASE_E_MM_GROUP=MM3_MULTISOURCE_MATH_STAGEE_CURRICULUM_SEED3 \
+RUN_PREFIX=phase_e_multisource_curriculum_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_e_multisource_math_suite.sh
+```
+
+Full overnight program:
+
+```bash
+ACTIVE_PHASE_E_MM_GROUP=MM4_MULTISOURCE_MATH_FULL_PROGRAM \
+RUN_PREFIX=phase_e_multisource_full_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_e_multisource_math_suite.sh
+```
+
+What the wrapper now compares:
+1. Stage A anchors:
+   - `E20_STAGEA_MS_ANCHOR_SEED3`
+   - `E21_STAGEA_RPRM_ANCHOR_SEED3`
+   - `E22_STAGEA_PRMBENCH_PREVIEW_ANCHOR_SEED3`
+   - `E23_STAGEA_PRM800K_CTRL_SEED3`
+2. Stage B balanced two-source mixtures:
+   - `E24_STAGEB_MS_RPRM_MIX_SEED3`
+   - `E25_STAGEB_MS_PRMBENCH_MIX_SEED3`
+   - `E26_STAGEB_RPRM_PRMBENCH_MIX_SEED3`
+3. Stage C main three-source mixture:
+   - `E27_STAGEC_MS_RPRM_PRMBENCH_MIX_SEED3`
+4. Stage D weak-source ablations:
+   - `E28_STAGED_TRIMIX_PLUS_PRM800K_LOWWT_SEED3`
+   - `E29_STAGED_MS_PLUS_PRM800K_LOWWT_SEED3`
+5. Stage E curricula:
+   - `CUR1_STAGEE_MS_TO_MSRPRM`
+   - `CUR2_STAGEE_MS_TO_TRIMIX`
+   - `CUR3_STAGEE_MS_TO_MSRPRM_TO_TRIMIX`
+
+What each family is supposed to answer:
+1. Stage A:
+   - which single source deserves anchor status
+2. Stage B:
+   - whether two complementary sources already beat the anchors
+3. Stage C:
+   - whether the main same-family tri-mix is the best direct recipe
+4. Stage D:
+   - whether `PRM800K` helps only under explicit low-weight control, or should
+     be dropped from the mainline
+5. Stage E:
+   - whether warm-started staged training is better than one-shot mixing
+
+### 11.6 Phase E Intradataset ACC90 Branch
+
+This branch deliberately ignores:
+1. cross-dataset transfer,
+2. benchmark-native generalization,
+3. StrategyQA bridge pressure.
+
+It asks only:
+
+> Can one dataset by itself support a value head that reaches `>90%` held-out pair accuracy?
+
+Main wrapper:
+
+```bash
+ACTIVE_PHASE_E_INTRADATASET_GROUP=I5_ALL_ACC90_MATRIX \
+RUN_PREFIX=phase_e_all_acc90_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_e_intradataset_suite.sh
+```
+
+Per-dataset wrappers:
+
+```bash
+ACTIVE_PHASE_E_INTRADATASET_GROUP=I2_MS_ACC90_MATRIX \
+RUN_PREFIX=phase_e_ms_acc90_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_e_intradataset_suite.sh
+
+ACTIVE_PHASE_E_INTRADATASET_GROUP=I3_PRMBENCH_ACC90_MATRIX \
+RUN_PREFIX=phase_e_prmbench_acc90_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_e_intradataset_suite.sh
+
+ACTIVE_PHASE_E_INTRADATASET_GROUP=I4_RPRM_ACC90_MATRIX \
+RUN_PREFIX=phase_e_rprm_acc90_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_e_intradataset_suite.sh
+```
+
+Recipe families in this branch:
+1. `Math-Shepherd`
+   - `E40`, `E41`, `E42`, `E43`
+2. `PRMBench_Preview`
+   - `E44`, `E45`, `E46`
+3. `R-PRM`
+   - `E47`, `E48`, `E49`
+
+The new selector is:
+- `scripts/phase_e_select_intradataset_candidate.py`
+
+It only uses:
+1. held-out pair accuracy,
+2. held-out AUC,
+3. worst-seed floor,
+4. seed variance.
+
+It does not mix benchmark metrics into the ACC90 gate.

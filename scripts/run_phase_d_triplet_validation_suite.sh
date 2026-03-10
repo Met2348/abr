@@ -29,6 +29,7 @@ cd "$REPO_ROOT"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 ACTIVE_PHASE_D6T_GROUP="${ACTIVE_PHASE_D6T_GROUP:-DT1_MATH_SHEPHERD_SMOKE}"
 RUN_PREFIX="${RUN_PREFIX:-phase_d6t_triplet_suite}"
+D6T_STEP_LABEL_PAIR_MODE="${D6T_STEP_LABEL_PAIR_MODE:-first_bad_edge_strict}"
 CURRENT_STAGE="init"
 
 GROUP_DATASET="${GROUP_DATASET:-strategyqa}"
@@ -128,9 +129,10 @@ latest_phase_c_data_guess() {
 
   local dir=""
   for dir in "${candidates[@]}"; do
-    # 中文：这里只接受“完整可复用”的 Phase C 数据目录。
-    # 过去很多半截 artifact 只有 prefixes，没有 manifest/targets，
-    # 如果按名字直接取最新目录，suite 会在更后面的位置才炸，排查成本很高。
+    # Only accept fully reusable Phase C directories instead of blindly picking the newest name match.
+    # 这里只接受“完整可复用”的 Phase C 数据目录，而不是按名字盲取最新目录。
+    # Many partial artifacts contain prefixes only and fail much later, which is harder to diagnose.
+    # 过去很多半截 artifact 只有 prefixes，没有 manifest/targets，后面才炸会显著增加排查成本。
     if [[ -f "$dir/manifest.json" && -f "$dir/prefixes.jsonl" && -f "$dir/rollout_targets.jsonl" ]]; then
       printf '%s\n' "$dir"
       return 0
@@ -169,8 +171,8 @@ EOM
 summary_looks_complete() {
   local path="$1"
   [[ -f "$path" ]] || return 1
-  # 中文：若已经写出了聚合 gate 段，说明成功摘要基本完整。
-  # 这种情况下即便 shell 在 very-late stage 报错，也不应再把成功摘要覆盖成 failed。
+  # If the aggregated gate section already exists, preserve it even when a very-late shell step fails.
+  # 若已经写出了聚合 gate 段，说明成功摘要基本完整，不应被 very-late stage 的错误覆盖成 failed。
   grep -q '^## Aggregated Gate' "$path"
 }
 
@@ -284,9 +286,10 @@ resolve_group() {
       SEEDS=(42 43 44)
       USE_MATH_SHEPHERD=1
       USE_PRM800K=0
-      # 中文：这个组之所以存在，就是为了验证“外部 pair 学到的排序能力”
-      # 能不能迁移回我们自己的 C1 corruption 指标。因此这里必须硬性开启
-      # C1 standalone eval，不能再允许外部残留环境变量把它静默关掉。
+      # This group exists specifically to test whether external ranking skill transfers back to C1 corruption metrics.
+      # 这个组之所以存在，就是为了验证“外部 pair 学到的排序能力”能不能迁移回我们自己的 C1 corruption 指标。
+      # Force C1 standalone eval on here so leftover environment variables cannot silently disable the transfer check.
+      # 因此这里必须硬性开启 C1 standalone eval，不能再允许外部残留环境变量把它静默关掉。
       RUN_C1_STANDALONE_EVAL=1
       C2_EPOCHS="${C2_EPOCHS:-3}"
       C2_LR="${C2_LR:-5e-5}"
@@ -673,7 +676,8 @@ run_one_seed() {
 
   local split_seed="$seed"
   if [[ "$D6T_PAIR_SPLIT_MODE" == "shared" ]]; then
-    # 中文：shared 模式下，多个训练 seed 共用同一份 external pair train/val 切分。
+    # Shared split mode removes data-split noise so seed variance mostly reflects optimization behavior.
+    # shared 模式下，多个训练 seed 共用同一份 external pair train/val 切分。
     # 这样可以把“数据切分噪声”从“训练 seed 波动”里剥离出来，更适合做稳定性诊断。
     split_seed="$D6T_PAIR_SPLIT_SEED"
   fi
@@ -707,6 +711,7 @@ run_one_seed() {
       --max-pairs-per-source "$MAX_PAIRS_PER_SOURCE"
       --max-pairs-total "$MAX_PAIRS_TOTAL"
       --min-pair-confidence "$MIN_PAIR_CONFIDENCE"
+      --step-label-pair-mode "$D6T_STEP_LABEL_PAIR_MODE"
       --min-chars "$MIN_CHARS"
       --max-length-ratio "$MAX_LENGTH_RATIO"
       --max-token-overlap "$MAX_TOKEN_OVERLAP"
@@ -725,13 +730,15 @@ run_one_seed() {
     {
       log_line "[seed=${seed}] Prepare external triplet pairs"
       log_line "[seed=${seed}] pair_split_mode=$D6T_PAIR_SPLIT_MODE split_seed=$split_seed"
+      log_line "[seed=${seed}] step_label_pair_mode=$D6T_STEP_LABEL_PAIR_MODE"
       log_line "[seed=${seed}] Command: $PYTHON_BIN ${prep_args[*]}"
     } | tee -a "$SUITE_LOG_FILE" >/dev/null
     "$PYTHON_BIN" "${prep_args[@]}" 2>&1 | tee -a "$SUITE_LOG_FILE"
     pair_run_dir="$(latest_dir_for_prefix "${PAIR_OUTPUT_ROOT}/${pair_run_name}__*")"
     if [[ "$D6T_PAIR_SPLIT_MODE" == "shared" ]]; then
-      # 中文：shared split 只准备一次 pair 数据，后续 seed 直接复用。
-      # 否则 seed=43/44 又重建一遍，即使 split_seed 相同，也会增加无意义运行时间。
+      # Prepare shared pair data only once; rebuilding it for later seeds would add time but no new evidence.
+      # shared split 只准备一次 pair 数据，后续 seed 直接复用。
+      # 否则 seed=43/44 又重建一遍，即使 split_seed 相同，也只会增加无意义运行时间。
       SHARED_PAIR_RUN_DIR="$pair_run_dir"
     fi
   fi
@@ -762,8 +769,8 @@ print(f"train={num_train} val={num_val} total={num_total}")
 PY
 )"
   {
-    # 中文：这里把 pair 数量记录进 suite.log，方便后面诊断“训练没学到东西”
-    # 究竟是目标太难，还是根本没喂到足够监督。
+    # Log pair counts up front so later debugging can distinguish "too hard" from "too little supervision".
+    # 这里把 pair 数量记录进 suite.log，方便后面区分“目标太难”和“根本没喂到足够监督”。
     log_line "[seed=${seed}] external_pair_counts ${pair_count_guard}"
   } | tee -a "$SUITE_LOG_FILE" >/dev/null
 
@@ -909,6 +916,7 @@ main() {
     log_line "seeds=${SEEDS[*]}"
     log_line "pair_split_mode=${D6T_PAIR_SPLIT_MODE}"
     log_line "pair_split_seed=${D6T_PAIR_SPLIT_SEED}"
+    log_line "step_label_pair_mode=${D6T_STEP_LABEL_PAIR_MODE}"
     log_line "external_pair_perm_mode=${D6T_EXTERNAL_PAIR_PERM_MODE}"
     log_line "strict_determinism=${D6T_STRICT_DETERMINISM}"
     log_line "run_c1_standalone_eval=${RUN_C1_STANDALONE_EVAL}"

@@ -32,6 +32,7 @@ cd "$REPO_ROOT"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 ACTIVE_PHASE_D4_GROUP="${ACTIVE_PHASE_D4_GROUP:-D4ABC_STRATEGYQA_SMOKE}"
 RUN_PREFIX="${RUN_PREFIX:-phase_d4_external_suite}"
+STEP_LABEL_PAIR_MODE="${STEP_LABEL_PAIR_MODE:-first_bad_edge_strict}"
 CURRENT_STAGE="init"
 
 PAIR_OUTPUT_ROOT="${PAIR_OUTPUT_ROOT:-assets/artifacts/phase_d_external_pairs}"
@@ -423,6 +424,7 @@ run_one_stage() {
         --rlhflow-deepseek-path "$RLHFLOW_DEEPSEEK_PATH"
         --build-step-converted
         --min-pair-confidence "${D4B_MIN_PAIR_CONFIDENCE:-0.55}"
+        --step-label-pair-mode "${STEP_LABEL_PAIR_MODE}"
         --max-length-ratio "${D4B_MAX_LENGTH_RATIO:-3.5}"
         --max-token-overlap "${D4B_MAX_TOKEN_OVERLAP:-0.99}"
       )
@@ -445,6 +447,7 @@ run_one_stage() {
         --rlhflow-deepseek-path "$RLHFLOW_DEEPSEEK_PATH"
         --build-step-converted
         --min-pair-confidence "${D4C_MIN_PAIR_CONFIDENCE:-0.60}"
+        --step-label-pair-mode "${STEP_LABEL_PAIR_MODE}"
         --max-length-ratio "${D4C_MAX_LENGTH_RATIO:-3.0}"
         --max-token-overlap "${D4C_MAX_TOKEN_OVERLAP:-0.985}"
       )
@@ -599,6 +602,7 @@ main() {
     log_line "group_title=${GROUP_TITLE}"
     log_line "group_intention=${GROUP_INTENTION}"
     log_line "run_prefix=${RUN_PREFIX}"
+    log_line "step_label_pair_mode=${STEP_LABEL_PAIR_MODE}"
     log_line "phase_c_train_dir=${PHASE_C_TRAIN_DIR}"
     log_line "phase_c_eval_dir=${PHASE_C_EVAL_DIR}"
     log_line "stage_order=${STAGE_ORDER[*]}"

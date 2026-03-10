@@ -38,7 +38,7 @@ RUN_PREFIX="${RUN_PREFIX:-phase_c_value}"
 ENABLE_PERSISTED_LOGS="${ENABLE_PERSISTED_LOGS:-1}"
 CURRENT_STAGE="init"
 C1_PREP_EXTRA_ARGS_DEFAULT=""
-# 中文：ACTIVE_PHASE_C_GROUP 决定整套 C1->C2 配置；RUN_PREFIX 只影响产物命名与日志目录。
+# ACTIVE_PHASE_C_GROUP 决定整套 C1->C2 配置；RUN_PREFIX 只影响产物命名与日志目录。
 
 timestamp() {
   date "+%Y-%m-%d %H:%M:%S %z"
@@ -51,7 +51,7 @@ log_line() {
 
 append_extra_args() {
   # Append shell-split extra CLI args into one array variable by name.
-  # 中文：参数优先级通常是“命令里固定参数 < *_EXTRA_ARGS_DEFAULT < 用户 PHASE_C_*_EXTRA_ARGS”。
+  # 参数优先级通常是“命令里固定参数 < *_EXTRA_ARGS_DEFAULT < 用户 PHASE_C_*_EXTRA_ARGS”。
   local array_name="$1"
   local extra_text="$2"
   if [[ -z "$extra_text" ]]; then
@@ -171,7 +171,7 @@ trap 'on_exit $?' EXIT
 resolve_group() {
   # Map one group id to concrete C1/C2 settings.
   # 该函数是 Phase C value 主线最关键的“实验配方表”。
-  # 中文：这是 Phase C 的主控制台。新增组时优先从相近组复制，最小化改动并保留可比性。
+  # 这是 Phase C 的主控制台。新增组时优先从相近组复制，最小化改动并保留可比性。
   case "$ACTIVE_PHASE_C_GROUP" in
     C2_STRATEGYQA_SMOKE)
       GROUP_TITLE="Phase C2 StrategyQA Smoke Lifecycle"
@@ -591,7 +591,7 @@ run_c1_prepare() {
   if [[ -n "$max_samples" ]]; then
     cmd+=(--max-samples "$max_samples")
   fi
-  # 中文：默认 extra 用于“组内推荐配方”，用户 extra 用于临时试验覆盖。
+  # 默认 extra 用于“组内推荐配方”，用户 extra 用于临时试验覆盖。
   append_extra_args cmd "${C1_PREP_EXTRA_ARGS_DEFAULT:-}"
   append_extra_args cmd "${PHASE_C_PREP_EXTRA_ARGS:-}"
 
@@ -621,7 +621,7 @@ C2_STANDALONE_EVAL_RUN_NAME="${RUN_NAME}_c2_eval"
 FEATURE_CACHE_ROOT="${FEATURE_CACHE_ROOT:-assets/artifacts/phase_c_feature_cache}"
 FEATURE_CACHE_MODE="${FEATURE_CACHE_MODE:-read_write}"
 FEATURE_CACHE_LOCK_TIMEOUT_SEC="${FEATURE_CACHE_LOCK_TIMEOUT_SEC:-600}"
-# 中文：命名链固定后，后续“自动找最新目录”才能稳定命中本次产物。
+# 命名链固定后，后续“自动找最新目录”才能稳定命中本次产物。
 
 {
   log_line "Repo root      : $REPO_ROOT"
@@ -692,7 +692,7 @@ if [[ "$C2_USE_CONTRASTIVE" == "1" ]]; then
 else
   c2_train_cmd+=(--no-use-contrastive-loss)
 fi
-# 中文：若在 extra args 里再次传 contrastive 相关参数，会覆盖这里的默认值。
+# 若在 extra args 里再次传 contrastive 相关参数，会覆盖这里的默认值。
 append_extra_args c2_train_cmd "${C2_TRAIN_EXTRA_ARGS_DEFAULT:-}"
 append_extra_args c2_train_cmd "${PHASE_C_TRAIN_EXTRA_ARGS:-}"
 {

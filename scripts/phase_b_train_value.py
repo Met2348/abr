@@ -778,6 +778,7 @@ def _filter_corruptions_to_loaded_eval_examples(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse CLI arguments and optional config defaults."""
     parser = _build_parser()
+    # Parse in two passes so config-json defaults are loaded before explicit CLI overrides.
     # 两段解析：先吸收 config-json 默认值，再解析完整 CLI 覆盖。
     partial, _ = parser.parse_known_args(argv)
     if partial.config_json is not None:
@@ -900,6 +901,7 @@ def main(argv: list[str] | None = None) -> int:
     """Run the full C2 training and held-out evaluation workflow."""
     args = parse_args(argv)
 
+    # Stage 1 validates artifact contracts before any model load so dirty data fails fast on CPU.
     # Stage 1: 先做 artifact 契约检查，再加载模型，避免 GPU 时间浪费在脏数据上。
     train_examples, train_manifest = load_value_supervision_examples(
         args.train_dir,
@@ -924,8 +926,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     assert_phase_c_compatibility(train_manifest, eval_manifest)
 
+    # D3 centralizes target-source routing so missing teacher/fused labels never trigger silent fallbacks.
     # D3: 根据 target_source 选择监督目标列。
-    # 中文：这一步统一处理 teacher/fused 缺失策略，避免后续训练环节静默回退。
+    # 这一步统一处理 teacher/fused 缺失策略，避免后续训练环节静默回退。
     train_target_values, train_target_source_stats = _resolve_supervision_targets(
         examples=train_examples,
         target_source=str(args.target_source),
@@ -942,9 +945,9 @@ def main(argv: list[str] | None = None) -> int:
     external_pair_stats: dict[str, Any] | None = None
     external_domain_filter = _parse_csv_allow_list(str(args.external_pair_domain_filter))
     if args.external_pair_jsonl is not None:
-        # 中文：external pair 是 D 阶段从外部数据构造的排序监督。
-        # 这里先在 CPU 侧做 domain/confidence 过滤，避免后面把一堆无效 pair
-        # 也编码进 cache，白白消耗显存和编码时间。
+        # External pairs are D-stage ranking supervision, so filter them on CPU before any expensive encoding.
+        # external pair 是 D 阶段从外部数据构造的排序监督。
+        # 这里先在 CPU 侧做 domain/confidence 过滤，避免后面把一堆无效 pair 也编码进 cache。
         external_pairs, external_pair_stats = load_external_pair_jsonl(
             Path(args.external_pair_jsonl),
             max_samples=args.external_pair_max_train_samples,
@@ -952,8 +955,8 @@ def main(argv: list[str] | None = None) -> int:
             allowed_domains=external_domain_filter,
         )
         if args.external_pair_weight > 0.0 and not external_pairs:
-            # 中文：这是典型配置错误，例如 min_confidence 设太高。
-            # 必须在训练开始前显式失败，不能悄悄退化成“无 external pair”训练。
+            # Treat an empty filtered branch as a hard configuration error, not as an implicit ablation.
+            # 这是典型配置错误，例如 min_confidence 设太高，必须显式失败而不是悄悄退化成无 external pair。
             raise ValueError(
                 "External pair branch was enabled, but no external pairs survived filtering"
             )
@@ -974,9 +977,8 @@ def main(argv: list[str] | None = None) -> int:
         torch,
         strict_determinism=bool(args.strict_determinism),
     )
-    # 中文：seed 设置放在所有随机行为之前。
-    # 尤其 D6-T 里我们在追查 seed 方差问题，若这里顺序错了，会让“同 seed 复现”
-    # 变成假象，结果难以解释。
+    # Seed setup must happen before any random sampling, otherwise seed-stability diagnosis becomes meaningless.
+    # seed 设置必须放在所有随机行为之前，否则尤其在 D6-T 里会把“同 seed 复现”做成假象。
 
     train_cfg = TrainConfig(
         max_length=int(args.max_length),
@@ -1064,8 +1066,8 @@ def main(argv: list[str] | None = None) -> int:
 
     run_dir = args.output_root / f"{args.run_name}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    # 中文：所有中间/最终产物都显式落盘到 run_dir，避免只靠控制台输出复盘实验。
-    # 这也是后续 suite 汇总、门控脚本和对比诊断能工作的前提。
+    # Materialize every intermediate/final artifact so suites and gate scripts never depend on console logs.
+    # 所有中间/最终产物都显式落盘到 run_dir，后续 suite 汇总、门控脚本和诊断才能稳定工作。
     manifest_path = run_dir / "manifest.json"
     train_metrics_path = run_dir / "train_metrics.json"
     eval_metrics_path = run_dir / "eval_metrics.json"
@@ -1159,6 +1161,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     print("=" * 88)
 
+    # Stage 2 freezes the backbone and caches features once so the rest of training is cheap and comparable.
     # Stage 2: 冻结 backbone 并一次性缓存特征；后续仅训练小 value head。
     model_load_start = time.perf_counter()
     resolved_dtype = _resolve_dtype(args.dtype, torch)
@@ -1248,9 +1251,10 @@ def main(argv: list[str] | None = None) -> int:
                 _validate_cached_example_cache_payload(
                     cache=cached_payload,
                     expected_num_examples=len(train_examples),
+                    expected_hidden_size=int(hidden_size),
                     torch_module=torch,
                 )
-                train_cache = move_tensors_to_device(cached_payload, value_device, torch)
+                train_cache = cached_payload
                 feature_cache_stats["hits"] += 1
                 feature_cache_stats["entries"]["train_cache"] = {
                     "status": "hit",
@@ -1325,9 +1329,10 @@ def main(argv: list[str] | None = None) -> int:
                 _validate_cached_example_cache_payload(
                     cache=cached_payload,
                     expected_num_examples=len(eval_examples),
+                    expected_hidden_size=int(hidden_size),
                     torch_module=torch,
                 )
-                eval_cache = move_tensors_to_device(cached_payload, value_device, torch)
+                eval_cache = cached_payload
                 feature_cache_stats["hits"] += 1
                 feature_cache_stats["entries"]["eval_cache"] = {
                     "status": "hit",
@@ -1396,9 +1401,10 @@ def main(argv: list[str] | None = None) -> int:
                 _validate_cached_corruption_cache_payload(
                     cache=cached_payload,
                     expected_num_variants=len(eval_corruptions),
+                    expected_hidden_size=int(hidden_size),
                     torch_module=torch,
                 )
-                eval_corruption_cache = move_tensors_to_device(cached_payload, value_device, torch)
+                eval_corruption_cache = cached_payload
                 feature_cache_stats["hits"] += 1
                 feature_cache_stats["entries"]["eval_corruption_cache"] = {
                     "status": "hit",
@@ -1464,9 +1470,10 @@ def main(argv: list[str] | None = None) -> int:
                     _validate_cached_external_pair_cache_payload(
                         cache=cached_payload,
                         expected_num_pairs=len(external_pairs),
+                        expected_hidden_size=int(hidden_size),
                         torch_module=torch,
                     )
-                    external_pair_cache = move_tensors_to_device(cached_payload, value_device, torch)
+                    external_pair_cache = cached_payload
                     feature_cache_stats["hits"] += 1
                     feature_cache_stats["entries"]["external_pair_cache"] = {
                         "status": "hit",
@@ -1529,6 +1536,14 @@ def main(argv: list[str] | None = None) -> int:
             + ", ".join(str(item) for item in strata_summary["top_strata"]),
             flush=True,
         )
+
+    # Keep long-lived feature caches on CPU and release the frozen backbone once
+    # encoding is done; training should only move mini-batches to the head device.
+    # 长期缓存特征统一留在 CPU，编码结束后尽快释放 frozen backbone，训练阶段只搬小 batch。
+    del backbone
+    del tokenizer
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     # Stage 3: 仅在缓存特征上训练 value head，避免重复大模型前向。
     # Trick-3 (adaptive loss balancing):
@@ -1673,6 +1688,7 @@ def main(argv: list[str] | None = None) -> int:
             posthoc_calibration=args.posthoc_calibration,
             posthoc_temperature_config=posthoc_temperature_config,
             posthoc_isotonic_config=posthoc_isotonic_config,
+            batch_size=int(args.per_device_eval_batch_size),
             torch_module=torch,
         )
         curve_row = {
@@ -1746,6 +1762,7 @@ def main(argv: list[str] | None = None) -> int:
         posthoc_calibration=args.posthoc_calibration,
         posthoc_temperature_config=posthoc_temperature_config,
         posthoc_isotonic_config=posthoc_isotonic_config,
+        batch_size=int(args.per_device_eval_batch_size),
         torch_module=torch,
     )
     _write_posthoc_calibration_payload(
@@ -2007,6 +2024,7 @@ def _build_stratified_train_permutation(
     step_index = train_cache["prefix_step_index"].detach().cpu().tolist()
     corruption_types = list(train_cache["primary_corruption_type"])
 
+    # Each stratum is keyed by corruption type and coarse step bucket to keep batches mixed.
     # key = (corruption_type, step_bucket)，保证 batch 不会长期被单一类型占满。
     strata: dict[tuple[str, int], list[int]] = {}
     fallback_indices: list[int] = []
@@ -2032,6 +2050,7 @@ def _build_stratified_train_permutation(
 
     pointers: dict[tuple[str, int], int] = {key: 0 for key in strata}
     ordered: list[int] = []
+    # Interleave strata round-robin so one corruption family does not dominate long stretches of training.
     # 轮转交织：每轮从各活跃分层取 1 个样本，减少 type/step 偏置。
     while True:
         active = [
@@ -2123,9 +2142,9 @@ def _build_external_pair_permutation(
         pair_ids = [f"pair_{idx}" for idx in range(num_pairs)]
 
     def _stable_order(values: list[int]) -> list[int]:
-        # 中文：stable_hash 模式不依赖当前 seed 的随机打乱，
-        # 而是按 pair_id 的哈希排序。这样可以把“训练结果差异”更多归因于
-        # 优化过程本身，而不是每个 seed 恰好看到了不同 pair 顺序。
+        # stable_hash removes shuffle noise so cross-seed differences are less entangled with pair order.
+        # stable_hash 模式不依赖当前 seed 的随机打乱，而是按 pair_id 哈希排序。
+        # 这样“训练结果差异”更多归因于优化过程本身，而不是每个 seed 恰好看到了不同 pair 顺序。
         return sorted(
             values,
             key=lambda idx: hashlib.sha256(str(pair_ids[idx]).encode("utf-8")).hexdigest(),
@@ -2163,8 +2182,9 @@ def _build_external_pair_permutation(
         active = [key for key in key_order if pointers[key] < len(buckets[key])]
         if not active:
             break
-        # 中文：uniform balance 的目标不是“完全平均每个 source 的样本数”，
-        # 而是让训练遍历顺序不要长期被单一 source 垄断。
+        # Uniform balance means rotating over sources, not forcing exact per-source sample equality.
+        # uniform balance 的目标不是“完全平均每个 source 的样本数”，而是避免训练顺序长期被单一 source 垄断。
+        # That is why we round-robin buckets instead of concatenating them.
         # 因此这里采用分桶后轮转抽取，而不是简单 concat。
         if permutation_mode == "random" and len(active) > 1:
             shuffle_order = torch_module.randperm(len(active)).tolist()
@@ -2201,7 +2221,8 @@ def _next_external_pair_batch(
         empty = torch_module.zeros((0,), dtype=torch_module.long, device=device)
         return empty, 0, permutation
     if permutation is None or int(permutation.shape[0]) != num_pairs:
-        # 中文：当缓存第一次使用，或外部 pair 数发生变化时，重新建 permutation。
+        # Rebuild the traversal order whenever the cache is first seen or its size changes.
+        # 当缓存第一次使用，或外部 pair 数发生变化时，重新建 permutation。
         permutation = _build_external_pair_permutation(
             external_pair_cache=external_pair_cache,
             torch_module=torch_module,
@@ -2214,9 +2235,9 @@ def _next_external_pair_batch(
     chunks: list[Any] = []
     while needed > 0:
         if cursor >= num_pairs:
-            # 中文：走到尾部后重新洗牌/重排，但 batch 继续补齐。
-            # 这样一个 optimizer step 永远拿到固定 batch_size 的 pair，
-            # 不会因为尾 batch 太小而让 external branch 梯度抖动。
+            # Wrap around and rebuild order so each optimizer step still sees a full external-pair batch.
+            # 走到尾部后重新洗牌/重排，但 batch 继续补齐。
+            # 这样一个 optimizer step 永远拿到固定 batch_size 的 pair，不会因为尾 batch 太小而让梯度抖动。
             permutation = _build_external_pair_permutation(
                 external_pair_cache=external_pair_cache,
                 torch_module=torch_module,
@@ -2239,6 +2260,65 @@ def _next_external_pair_batch(
     if len(chunks) == 1:
         return chunks[0], cursor, permutation
     return torch_module.cat(chunks, dim=0), cursor, permutation
+
+
+def _move_batch_tensor(
+    tensor: Any,
+    *,
+    device: Any,
+    dtype: Any | None = None,
+) -> Any:
+    """Move one batch tensor to the requested device/dtype only when needed."""
+    target_dtype = tensor.dtype if dtype is None else dtype
+    if tensor.device == device and tensor.dtype == target_dtype:
+        return tensor
+    return tensor.to(device=device, dtype=target_dtype)
+
+
+def _score_feature_tensor_with_logits_in_batches(
+    *,
+    value_head: Any,
+    features: Any,
+    batch_size: int,
+    torch_module: Any,
+) -> tuple[list[float], Any]:
+    """Score a feature matrix in mini-batches and return CPU logits for calibration."""
+    head_device = next(value_head.parameters()).device
+    head_dtype = next(value_head.parameters()).dtype
+    scores: list[float] = []
+    logits_chunks: list[Any] = []
+    effective_bs = max(1, int(batch_size))
+    for start in range(0, int(features.shape[0]), effective_bs):
+        batch = _move_batch_tensor(
+            features[start : start + effective_bs],
+            device=head_device,
+            dtype=head_dtype,
+        )
+        outputs = value_head(batch)
+        scores.extend(float(v) for v in outputs["scores"].detach().cpu().tolist())
+        logits_chunks.append(outputs["logits"].detach().cpu())
+    if logits_chunks:
+        logits_tensor = torch_module.cat(logits_chunks, dim=0)
+    else:
+        logits_tensor = torch_module.zeros((0,), dtype=torch_module.float32)
+    return scores, logits_tensor
+
+
+def _score_feature_tensor_in_batches(
+    *,
+    value_head: Any,
+    features: Any,
+    batch_size: int,
+    torch_module: Any,
+) -> list[float]:
+    """Score a feature matrix in mini-batches."""
+    scores, _ = _score_feature_tensor_with_logits_in_batches(
+        value_head=value_head,
+        features=features,
+        batch_size=batch_size,
+        torch_module=torch_module,
+    )
+    return scores
 
 
 def _run_one_train_epoch(
@@ -2289,7 +2369,10 @@ def _run_one_train_epoch(
     """Train the head for one epoch over cached feature tensors."""
     value_head.train()
     num_examples = int(train_cache["clean_features"].shape[0])
+    head_device = next(value_head.parameters()).device
+    head_dtype = next(value_head.parameters()).dtype
     if bool(contrastive_stratified_sampling):
+        # Stratified sampling prevents long runs of batches from collapsing to one corruption family.
         # 分层采样避免 batch 被单一 corruption 类型主导。
         permutation = _build_stratified_train_permutation(
             train_cache=train_cache,
@@ -2332,13 +2415,25 @@ def _run_one_train_epoch(
         if max_steps is not None and global_step_offset + optimizer_steps >= max_steps:
             break
         batch_indices = permutation[batch_start : batch_start + batch_size]
-        clean_features = train_cache["clean_features"][batch_indices]
-        raw_targets = train_cache["targets"][batch_indices]
+        clean_features = _move_batch_tensor(
+            train_cache["clean_features"][batch_indices],
+            device=head_device,
+            dtype=head_dtype,
+        )
+        raw_targets = _move_batch_tensor(
+            train_cache["targets"][batch_indices],
+            device=head_device,
+            dtype=torch_module.float32,
+        )
         targets = _apply_target_smoothing(
             raw_targets,
             epsilon=float(calibration_target_smoothing),
         )
-        sample_weights = train_cache["calibration_weights"][batch_indices]
+        sample_weights = _move_batch_tensor(
+            train_cache["calibration_weights"][batch_indices],
+            device=head_device,
+            dtype=torch_module.float32,
+        )
         head_outputs = value_head(clean_features)
         loss_sat = torch_module.zeros((), device=clean_features.device)
         if anti_saturation_enabled:
@@ -2364,6 +2459,7 @@ def _run_one_train_epoch(
         loss_ctr_external = torch_module.zeros((), device=clean_features.device)
         used_ctr_pairs = False
         if enable_internal_contrastive and contrastive_enabled and lambda_contrastive > 0.0:
+            # Apply pair-quality gates before computing margin loss so noisy pairs do not dominate contrastive updates.
             # 对比分支先过 pair filter，再算 margin loss，尽量抑制噪声 pair。
             sample_mask = train_cache["has_primary_corruption"][batch_indices]
             sample_mask = _apply_contrastive_pair_filter(
@@ -2395,11 +2491,21 @@ def _run_one_train_epoch(
                 require_pair_pass_gate=bool(contrastive_require_pair_pass_gate),
             )
             if bool(candidate_mask.any().item()):
-                corrupt_features = train_cache["contrastive_corruption_features"][batch_indices][candidate_mask]
+                candidate_mask_cpu = candidate_mask
+                candidate_mask_device = _move_batch_tensor(
+                    candidate_mask_cpu,
+                    device=head_device,
+                    dtype=torch_module.bool,
+                )
+                corrupt_features = _move_batch_tensor(
+                    train_cache["contrastive_corruption_features"][batch_indices][candidate_mask_cpu],
+                    device=head_device,
+                    dtype=head_dtype,
+                )
                 expanded_clean_scores = head_outputs["scores"].unsqueeze(1).expand_as(
                     train_cache["contrastive_candidate_pair_weight"][batch_indices]
                 )
-                clean_scores_for_pairs = expanded_clean_scores[candidate_mask]
+                clean_scores_for_pairs = expanded_clean_scores[candidate_mask_device]
                 corrupt_outputs = value_head(corrupt_features)
                 corrupt_scores = corrupt_outputs["scores"]
                 if anti_saturation_enabled:
@@ -2410,7 +2516,11 @@ def _run_one_train_epoch(
                     )
                 pair_weights = None
                 if bool(contrastive_use_pair_weights):
-                    pair_weights = train_cache["contrastive_candidate_pair_weight"][batch_indices][candidate_mask]
+                    pair_weights = _move_batch_tensor(
+                        train_cache["contrastive_candidate_pair_weight"][batch_indices][candidate_mask_cpu],
+                        device=head_device,
+                        dtype=torch_module.float32,
+                    )
                 clean_scores_for_pairs, corrupt_scores, pair_weights = _apply_contrastive_score_gap_filter(
                     clean_scores_for_pairs=clean_scores_for_pairs,
                     corrupt_scores=corrupt_scores,
@@ -2441,8 +2551,16 @@ def _run_one_train_epoch(
                 permutation_mode=str(external_pair_permutation_mode),
             )
             if ext_indices.numel() > 0:
-                chosen_features = external_pair_cache["chosen_features"][ext_indices]
-                rejected_features = external_pair_cache["rejected_features"][ext_indices]
+                chosen_features = _move_batch_tensor(
+                    external_pair_cache["chosen_features"][ext_indices],
+                    device=head_device,
+                    dtype=head_dtype,
+                )
+                rejected_features = _move_batch_tensor(
+                    external_pair_cache["rejected_features"][ext_indices],
+                    device=head_device,
+                    dtype=head_dtype,
+                )
                 chosen_outputs = value_head(chosen_features)
                 rejected_outputs = value_head(rejected_features)
                 chosen_scores = chosen_outputs["scores"]
@@ -2460,7 +2578,11 @@ def _run_one_train_epoch(
                             torch_module=torch_module,
                         )
                     )
-                ext_weights = external_pair_cache["pair_weights"][ext_indices]
+                ext_weights = _move_batch_tensor(
+                    external_pair_cache["pair_weights"][ext_indices],
+                    device=head_device,
+                    dtype=torch_module.float32,
+                )
                 loss_ctr_external = contrastive_margin_loss(
                     chosen_scores,
                     rejected_scores,
@@ -2557,17 +2679,25 @@ def _evaluate_value_head(
     posthoc_calibration: str,
     posthoc_temperature_config: TemperatureCalibrationConfig,
     posthoc_isotonic_config: IsotonicCalibrationConfig,
+    batch_size: int,
     torch_module: Any,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     """Score the held-out eval set and compute C2 metrics."""
     value_head.eval()
     with torch_module.no_grad():
-        prefix_head_outputs = value_head(eval_cache["clean_features"])
-        prefix_scores_tensor = prefix_head_outputs["scores"]
-        prefix_logits_tensor = prefix_head_outputs["logits"]
-        prefix_scores = [float(v) for v in prefix_scores_tensor.detach().cpu().tolist()]
+        prefix_scores, prefix_logits_tensor = _score_feature_tensor_with_logits_in_batches(
+            value_head=value_head,
+            features=eval_cache["clean_features"],
+            batch_size=int(batch_size),
+            torch_module=torch_module,
+        )
+        prefix_scores_tensor = torch_module.tensor(
+            prefix_scores,
+            dtype=prefix_logits_tensor.dtype if prefix_logits_tensor.numel() > 0 else torch_module.float32,
+        )
         target_scores = [float(v) for v in eval_cache["targets"].detach().cpu().tolist()]
 
+    # Keep both raw and post-hoc calibration metrics so later analysis can separate training quality from calibration fixes.
     # 先算 raw 校准指标，再可选做 post-hoc，二者都保留方便复盘。
     calibration_raw = compute_calibration_summary(
         prefix_scores,
@@ -2647,8 +2777,12 @@ def _evaluate_value_head(
     corruption_rows: list[dict[str, Any]] = []
     if eval_corruptions:
         with torch_module.no_grad():
-            corrupt_scores_tensor = value_head(eval_corruption_cache["corruption_features"])["scores"]
-            corrupt_scores = [float(v) for v in corrupt_scores_tensor.detach().cpu().tolist()]
+            corrupt_scores = _score_feature_tensor_in_batches(
+                value_head=value_head,
+                features=eval_corruption_cache["corruption_features"],
+                batch_size=int(batch_size),
+                torch_module=torch_module,
+            )
         clean_scores = [prefix_score_by_id[variant.clean_prefix_id] for variant in eval_corruptions]
         corruption_metrics = compute_corruption_summary(
             clean_scores,
@@ -2691,11 +2825,18 @@ def _resolve_supervision_targets(
 ) -> tuple[list[float], dict[str, Any]]:
     """Resolve per-example scalar targets according to D3 target-source policy.
 
-    中文要点
-    --------
-    - `q_mean_smoothed`: 纯 MC 标签（Phase C 基线）。
-    - `q_teacher`: 纯 teacher 标签（D1 sidecar）。
-    - `q_fused`: D2 融合标签。
+    Notes
+    -----
+    - `q_mean_smoothed`: pure MC label (Phase C baseline)
+    - `q_teacher`: pure teacher label (D1 sidecar)
+    - `q_fused`: D2 fused label
+    - For missing values, `fail` aborts immediately and `fallback_mc` falls back to MC while recording the rate.
+
+    说明
+    ----
+    - `q_mean_smoothed`: 纯 MC 标签（Phase C 基线）
+    - `q_teacher`: 纯 teacher 标签（D1 sidecar）
+    - `q_fused`: D2 融合标签
     - 对于缺失值，`fail` 会直接中止；`fallback_mc` 会回退到 MC，且统计回退比例。
     """
     values: list[float] = []
@@ -3048,9 +3189,11 @@ def _build_calibration_sample_weights(
         elif mode == "confidence_parseable":
             weights = (confidence * parseable_clamped).clamp(0.0, 1.0)
         elif mode == "q_weight":
+            # q_weight comes from the C1 rollout CI-width mapping: wider uncertainty means lower weight.
             # q_weight 来自 C1 rollout 的 CI 宽度映射（越不确定，权重越低）。
             weights = q_weight.clamp(0.0, 1.0)
         elif mode == "q_weight_parseable":
+            # Combine uncertainty and parseability so unstable labels are down-weighted most aggressively.
             # 进一步叠加 parseable 约束，过滤“可解析性差 + 不确定性高”的样本。
             weights = (q_weight.clamp(0.0, 1.0) * parseable_clamped).clamp(0.0, 1.0)
         else:
@@ -3095,6 +3238,7 @@ def _apply_contrastive_pair_filter(
     label_z = train_cache["primary_pair_z_delta"][batch_indices]
     label_pair_weight = train_cache["primary_pair_weight"][batch_indices]
     label_pair_pass = train_cache["primary_pair_pass_gate"][batch_indices]
+    # label_quality uses C1-side metadata so filtering is based on precomputed pair quality, not noisy in-flight scores.
     # label_quality 分支使用 C1 预先估计的 pair 质量标签，而不是训练时瞬时分数。
     label_mask = (
         (label_delta_q >= float(label_delta_q_min))
@@ -3102,6 +3246,7 @@ def _apply_contrastive_pair_filter(
         & (label_pair_weight >= float(label_pair_weight_min))
     )
     if require_pair_pass_gate:
+        # Add the hard gate only when explicitly requested so old artifacts remain reusable by default.
         # 额外硬约束：只允许通过 pair_pass_gate 的样本参与对比学习。
         label_mask = label_mask & label_pair_pass
 
@@ -3243,9 +3388,10 @@ def _encode_example_cache(
         device=device,
     )
     target_confidence = torch_module.abs(targets - 0.5) * 2.0
-    # 中文：target_confidence 不是模型预测置信度，而是标签离 0.5 有多远。
-    # 目标越接近 0 或 1，说明 rollout 标签越“明确”；越接近 0.5，说明这个前缀本身
-    # 更不确定，后续做 sample weighting 或 pair filter 时会用到这个信号。
+    # target_confidence measures label sharpness, not model confidence.
+    # target_confidence 不是模型预测置信度，而是标签离 0.5 有多远。
+    # Targets near 0/1 are clearer rollout labels, while targets near 0.5 are inherently ambiguous.
+    # 目标越接近 0 或 1，说明 rollout 标签越明确；越接近 0.5，说明这个前缀本身更不确定。
     calibration_weights = _build_calibration_sample_weights(
         targets=targets,
         parseable=target_parseable,
@@ -3332,9 +3478,10 @@ def _encode_example_cache(
     max_candidates_in_batch = max((len(candidates) for candidates in candidate_lists), default=0)
     if max_candidates_in_batch <= 0:
         max_candidates_in_batch = 1
-    # 中文：这里把“每个样本可有 0..k 个 corruption 候选”的不规则结构，
-    # 显式打包成固定形状 tensor bank。这样后面的训练循环可以纯 tensor 化，
-    # 避免在每个 batch 中反复走 Python list，减少隐性 shape bug。
+    # Pack the irregular "0..k candidates per sample" structure into fixed-shape tensor banks up front.
+    # 这里把“每个样本可有 0..k 个 corruption 候选”的不规则结构，显式打包成固定形状 tensor bank。
+    # That keeps the training loop tensorized and avoids repeated Python-side shape handling in every batch.
+    # 这样后面的训练循环可以纯 tensor 化，避免在每个 batch 中反复走 Python list 和隐性 shape bug。
     hidden_size = int(clean_features.shape[1])
     corruption_features_bank = torch_module.zeros(
         (len(examples), max_candidates_in_batch, hidden_size),
@@ -3390,7 +3537,9 @@ def _encode_example_cache(
             )
             flat_corruption_positions.append((example_idx, candidate_idx))
     if flat_corruption_texts:
-        # 中文：先展平再统一编码，比“每个样本逐个编码 corruption”更稳定，也更高效。
+        # Flatten first and encode once so corruption features are produced by one stable batched pass.
+        # 先展平再统一编码，比“每个样本逐个编码 corruption”更稳定，也更高效。
+        # `flat_corruption_positions` maps the flat outputs back into `[sample, candidate]` coordinates.
         # `flat_corruption_positions` 负责把编码结果还原回 `[sample, candidate]` 坐标。
         encoded_corrupt = _encode_text_list_in_batches(
             texts=flat_corruption_texts,
@@ -3406,7 +3555,7 @@ def _encode_example_cache(
             corruption_features_bank[example_idx, candidate_idx] = encoded_corrupt[encoded_idx]
     corruption_features = corruption_features_bank[:, 0, :]
 
-    return {
+    payload = {
         "clean_features": clean_features,
         "targets": targets,
         "target_q_weight": target_q_weight,
@@ -3428,6 +3577,7 @@ def _encode_example_cache(
         "contrastive_candidate_z_delta": corruption_candidate_z_delta,
         "contrastive_candidate_pass_gate": corruption_candidate_pass_gate,
     }
+    return move_tensors_to_device(payload, torch_module.device("cpu"), torch_module)
 
 
 def _extract_contrastive_candidates(
@@ -3446,9 +3596,10 @@ def _extract_contrastive_candidates(
         raise ValueError("`max_items` must be > 0")
     candidates: list[dict[str, Any]] = []
     if example.corruption_candidates:
-        # 中文：新链路优先使用 C1 已经排好序、带质量字段的 top-k 候选。
-        # 这些候选往往已经包含 delta_q / z_delta / pair_weight / gate 结果，
-        # 比旧版“只给一个 primary corruption”信息更完整。
+        # Prefer the new C1 top-k candidates because they already carry ranking-quality metadata.
+        # 新链路优先使用 C1 已经排好序、带质量字段的 top-k 候选。
+        # Those candidates usually include delta_q / z_delta / pair_weight / gate results.
+        # 这些候选往往已经包含 delta_q / z_delta / pair_weight / gate 结果。
         for item in example.corruption_candidates:
             if len(candidates) >= max_items:
                 break
@@ -3475,8 +3626,8 @@ def _extract_contrastive_candidates(
         return candidates
     if example.primary_corruption_text is None:
         return candidates
-    # 中文：这里保留 legacy 回退，是为了兼容旧 artifact。
-    # 否则很多历史 Phase C 结果会因为缺少 `corruption_candidates` 字段而无法重跑。
+    # Keep the legacy fallback so older artifacts remain replayable without backfilling new fields.
+    # 这里保留 legacy 回退，是为了兼容旧 artifact，否则很多历史 Phase C 结果会无法重跑。
     candidates.append(
         {
             "corrupted_prefix_text": str(example.primary_corruption_text),
@@ -3504,7 +3655,11 @@ def _encode_corruption_variant_cache(
     if not variants:
         hidden_size = infer_backbone_hidden_size(backbone)
         empty = torch_module.zeros((0, hidden_size), dtype=torch_module.float32, device=_resolve_value_device(backbone, torch_module))
-        return {"corruption_features": empty}
+        return move_tensors_to_device(
+            {"corruption_features": empty},
+            torch_module.device("cpu"),
+            torch_module,
+        )
     corruption_features = _encode_text_list_in_batches(
         texts=[variant.corrupted_input_text() for variant in variants],
         backbone=backbone,
@@ -3515,7 +3670,11 @@ def _encode_corruption_variant_cache(
         progress_label="cache_eval_corruptions",
         progress_every_batches=32,
     )
-    return {"corruption_features": corruption_features}
+    return move_tensors_to_device(
+        {"corruption_features": corruption_features},
+        torch_module.device("cpu"),
+        torch_module,
+    )
 
 
 def _encode_external_pair_cache(
@@ -3534,7 +3693,8 @@ def _encode_external_pair_cache(
         device = _resolve_value_device(backbone, torch_module)
         empty_features = torch_module.zeros((0, hidden_size), dtype=torch_module.float32, device=device)
         empty_weights = torch_module.zeros((0,), dtype=torch_module.float32, device=device)
-        return {
+        return move_tensors_to_device(
+            {
             "num_pairs": 0,
             "chosen_features": empty_features,
             "rejected_features": empty_features.clone(),
@@ -3542,7 +3702,10 @@ def _encode_external_pair_cache(
             "pair_ids": [],
             "source_tags": [],
             "domain_tags": [],
-        }
+            },
+            torch_module.device("cpu"),
+            torch_module,
+        )
     chosen_features = _encode_text_list_in_batches(
         texts=[pair.chosen_input_text() for pair in pairs],
         backbone=backbone,
@@ -3572,7 +3735,7 @@ def _encode_external_pair_cache(
         dtype=torch_module.float32,
         device=device,
     )
-    return {
+    payload = {
         "num_pairs": int(len(pairs)),
         "chosen_features": chosen_features,
         "rejected_features": rejected_features,
@@ -3581,6 +3744,7 @@ def _encode_external_pair_cache(
         "source_tags": [str(pair.source_tag) for pair in pairs],
         "domain_tags": [str(pair.domain_tag) for pair in pairs],
     }
+    return move_tensors_to_device(payload, torch_module.device("cpu"), torch_module)
 
 
 def _build_value_example_cache_signature_payload(
@@ -3693,6 +3857,7 @@ def _validate_cached_example_cache_payload(
     *,
     cache: Any,
     expected_num_examples: int,
+    expected_hidden_size: int,
     torch_module: Any,
 ) -> None:
     """Validate loaded example-cache payload shape contract before reuse."""
@@ -3726,6 +3891,11 @@ def _validate_cached_example_cache_payload(
             "Example cache batch mismatch: "
             f"expected {expected_num_examples}, got {int(clean.shape[0])}"
         )
+    if int(clean.shape[1]) != int(expected_hidden_size):
+        raise ValueError(
+            "Example cache hidden mismatch: "
+            f"expected {expected_hidden_size}, got {int(clean.shape[1])}"
+        )
     for name in ("targets", "target_q_weight", "target_parseable", "target_confidence", "calibration_weights"):
         tensor = cache[name]
         if not torch_module.is_tensor(tensor) or tensor.ndim != 1:
@@ -3734,12 +3904,47 @@ def _validate_cached_example_cache_payload(
             raise ValueError(
                 f"Example cache `{name}` batch mismatch: expected {expected_num_examples}, got {int(tensor.shape[0])}"
             )
+    for name in ("has_primary_corruption", "primary_pair_delta_q", "primary_pair_z_delta", "primary_pair_weight", "primary_pair_pass_gate", "prefix_step_index"):
+        tensor = cache[name]
+        if not torch_module.is_tensor(tensor) or tensor.ndim != 1:
+            raise TypeError(f"Example cache `{name}` must be tensor[batch]")
+        if int(tensor.shape[0]) != int(expected_num_examples):
+            raise ValueError(
+                f"Example cache `{name}` batch mismatch: expected {expected_num_examples}, got {int(tensor.shape[0])}"
+            )
+    primary_types = cache["primary_corruption_type"]
+    if not isinstance(primary_types, list) or len(primary_types) != int(expected_num_examples):
+        raise TypeError("Example cache `primary_corruption_type` must be list[batch]")
+    primary_corrupt = cache["primary_corruption_features"]
+    if not torch_module.is_tensor(primary_corrupt) or primary_corrupt.ndim != 2:
+        raise TypeError("Example cache `primary_corruption_features` must be tensor[batch, hidden]")
+    if int(primary_corrupt.shape[0]) != int(expected_num_examples) or int(primary_corrupt.shape[1]) != int(expected_hidden_size):
+        raise ValueError("Example cache `primary_corruption_features` shape mismatch")
+    candidate_bank = cache["contrastive_corruption_features"]
+    if not torch_module.is_tensor(candidate_bank) or candidate_bank.ndim != 3:
+        raise TypeError("Example cache `contrastive_corruption_features` must be tensor[batch, k, hidden]")
+    if int(candidate_bank.shape[0]) != int(expected_num_examples) or int(candidate_bank.shape[2]) != int(expected_hidden_size):
+        raise ValueError("Example cache `contrastive_corruption_features` shape mismatch")
+    candidate_width = int(candidate_bank.shape[1])
+    for name in (
+        "contrastive_candidate_mask",
+        "contrastive_candidate_pair_weight",
+        "contrastive_candidate_delta_q",
+        "contrastive_candidate_z_delta",
+        "contrastive_candidate_pass_gate",
+    ):
+        tensor = cache[name]
+        if not torch_module.is_tensor(tensor) or tensor.ndim != 2:
+            raise TypeError(f"Example cache `{name}` must be tensor[batch, k]")
+        if int(tensor.shape[0]) != int(expected_num_examples) or int(tensor.shape[1]) != candidate_width:
+            raise ValueError(f"Example cache `{name}` shape mismatch")
 
 
 def _validate_cached_corruption_cache_payload(
     *,
     cache: Any,
     expected_num_variants: int,
+    expected_hidden_size: int,
     torch_module: Any,
 ) -> None:
     """Validate loaded corruption-cache payload shape contract before reuse."""
@@ -3755,12 +3960,18 @@ def _validate_cached_corruption_cache_payload(
             "Corruption cache batch mismatch: "
             f"expected {expected_num_variants}, got {int(feats.shape[0])}"
         )
+    if int(feats.shape[1]) != int(expected_hidden_size):
+        raise ValueError(
+            "Corruption cache hidden mismatch: "
+            f"expected {expected_hidden_size}, got {int(feats.shape[1])}"
+        )
 
 
 def _validate_cached_external_pair_cache_payload(
     *,
     cache: Any,
     expected_num_pairs: int,
+    expected_hidden_size: int,
     torch_module: Any,
 ) -> None:
     """Validate loaded external-pair cache payload contract before reuse."""
@@ -3790,6 +4001,10 @@ def _validate_cached_external_pair_cache_payload(
             raise ValueError(
                 f"External pair cache `{name}` batch mismatch: expected {expected_num_pairs}, got {int(tensor.shape[0])}"
             )
+        if int(tensor.shape[1]) != int(expected_hidden_size):
+            raise ValueError(
+                f"External pair cache `{name}` hidden mismatch: expected {expected_hidden_size}, got {int(tensor.shape[1])}"
+            )
     weights = cache["pair_weights"]
     if not torch_module.is_tensor(weights) or weights.ndim != 1:
         raise TypeError("External pair cache `pair_weights` must be tensor[batch]")
@@ -3807,6 +4022,10 @@ def _validate_cached_external_pair_cache_payload(
                 "External pair cache `pair_ids` length mismatch: "
                 f"expected {expected_num_pairs}, got {len(pair_ids)}"
             )
+    for name in ("source_tags", "domain_tags"):
+        values = cache[name]
+        if not isinstance(values, list) or len(values) != int(expected_num_pairs):
+            raise TypeError(f"External pair cache `{name}` must be list[batch]")
 
 
 def _encode_text_list_in_batches(

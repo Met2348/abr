@@ -1083,7 +1083,7 @@ def main(argv: list[str] | None = None) -> int:
                 (record.to_dict() for record in pair_quality_records),
             )
         # D2: 在 C1 阶段把 teacher sidecar 分数写回 clean rollout_targets。
-        # 中文说明：这一步是“标签增强”，不会改动 prefixes/corruptions 主体结构。
+        # 这一步是“标签增强”，不会改动 prefixes/corruptions 主体结构。
         if args.teacher_prefix_scores_jsonl is not None:
             rollout_targets, teacher_fusion_summary = _attach_teacher_scores_to_rollout_targets(
                 rollout_targets=rollout_targets,
@@ -1264,7 +1264,7 @@ def _build_rollout_targets(
 ) -> tuple[list[RolloutPredictionRecord], list[RolloutTargetRecord], dict[str, Any]]:
     """Generate rollout predictions and aggregate them into prefix targets.
 
-    中文要点
+    说明
     --------
     - 对每个 prefix 采样 K 次 continuation，并按最终答对情况评分。
     - 再把 K 次结果聚合为一个前缀价值目标（含不确定性统计）。
@@ -1583,7 +1583,7 @@ def _aggregate_rollout_targets(
 ) -> list[RolloutTargetRecord]:
     """Aggregate low-level rollout predictions into one target per prefix.
 
-    中文要点
+    说明
     --------
     - 同一前缀的多次 rollout 会被压缩成一条目标记录。
     - 目标不只是对错比例，还包含置信区间和权重信息。
@@ -1660,7 +1660,7 @@ def _attach_teacher_scores_to_rollout_targets(
     - Join diagnostics are returned and written into summary/manifest so team
       members can audit coverage and disagreement quickly.
 
-    中文要点
+    说明
     --------
     - 这是 D2 的核心：把 D1 的 teacher 分数接入 C1 标签层。
     - `q_teacher` 是教师监督，`q_fused` 是融合监督。
@@ -1711,7 +1711,7 @@ def _attach_teacher_scores_to_rollout_targets(
                 lambda_mc = float(fusion_lambda)
                 q_fused = (lambda_mc * q_mc) + ((1.0 - lambda_mc) * q_teacher)
             elif fuse_mode == "confidence":
-                # 中文：MC 区间越窄（越确定），越信任 MC；越宽则越信任 teacher。
+                # MC 区间越窄（越确定），越信任 MC；越宽则越信任 teacher。
                 lambda_mc = 1.0 - (float(target.q_ci_width) / max(float(confidence_ci_ref), 1e-8))
                 lambda_mc = float(min(max(lambda_mc, 0.0), 1.0))
                 q_fused = (lambda_mc * q_mc) + ((1.0 - lambda_mc) * q_teacher)
@@ -1781,7 +1781,7 @@ def _load_teacher_prefix_scores(
             continue
         if prefix_id in by_prefix:
             duplicates += 1
-            # 中文：重复 ID 取第一条，保证 join 可重复且不会随机漂移。
+            # 重复 ID 取第一条，保证 join 可重复且不会随机漂移。
             continue
         if "teacher_score_mean" not in row:
             continue
@@ -1882,7 +1882,7 @@ def _build_corruption_rollout_targets_and_pair_quality(
     - compare against clean-prefix Q estimates,
     - persist label-side delta/z statistics for robust filtering.
 
-    中文要点
+    说明
     --------
     - 先估计 corruption 前缀的经验 Q 值，再与 clean 前缀做配对比较。
     - 可选接入 teacher pair 共识门控，降低弱/反向 pair 噪声。
@@ -2215,7 +2215,7 @@ def _compute_target_quality_stats(
 ) -> dict[str, float]:
     """Compute uncertainty-aware target stats from Monte Carlo outcomes.
 
-    中文要点
+    说明
     --------
     - 以 Beta 平滑成功率作为 `q_mean_smoothed`。
     - 用近似标准误与区间宽度估计不确定性。

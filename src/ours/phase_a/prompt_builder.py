@@ -320,7 +320,7 @@ def build_prepared_sample(
     )
     ```
 
-    中文要点
+    说明
     --------
     - 本函数是 `Phase A -> Phase B/Phase C` 的监督桥梁。
     - 产出的 `target_text` 会直接进入后续 SFT 与前缀价值学习流程。
@@ -414,7 +414,7 @@ def _build_target_text(
     )
     ```
 
-    中文要点
+    说明
     --------
     - `answer_only`：只监督最终答案，过程信息较少。
     - `cot_then_answer`：监督“推理轨迹 + 最终答案”，更适合后续前缀级分析。

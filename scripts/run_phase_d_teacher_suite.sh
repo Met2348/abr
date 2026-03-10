@@ -155,7 +155,7 @@ on_exit() {
 trap 'on_exit $?' EXIT
 
 resolve_group() {
-  # 中文：这里集中定义 Phase D 成套实验配方，便于团队复用和对比。
+  # 这里集中定义 Phase D 成套实验配方，便于团队复用和对比。
   case "$ACTIVE_PHASE_D_GROUP" in
     D4_STRATEGYQA_SMOKE_3WAY)
       GROUP_TITLE="Phase D StrategyQA Smoke 3-Way Target Ablation"

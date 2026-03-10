@@ -148,7 +148,7 @@ def build_corruptions_for_prefixes(
 ) -> list[CorruptionArtifact]:
     """Build deterministic corruption artifacts for a list of clean prefixes.
 
-    中文要点
+    说明
     --------
     - 输入是 clean prefix 列表，输出是可追踪的 corruption 变体。
     - 目标是构造“最小但可复现”的扰动集，用于 clean/corrupt 对比评估。
@@ -197,7 +197,7 @@ def _build_corruptions_for_prefix(
 ) -> list[CorruptionArtifact]:
     """Build up to `max_corruptions_per_prefix` variants for one prefix.
 
-    中文要点
+    说明
     --------
     - 仅对当前前缀最后一个推理步施加局部扰动。
     - 优先保持上下文不变，便于把分数差异归因到局部步骤变化。

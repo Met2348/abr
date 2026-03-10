@@ -55,7 +55,7 @@ New BCR/ABR implementation work should go to new Phase B+ scripts/modules.
 
 ---
 
-## 0.2 Current Real Priorities (2026-03-10, Strategic Pivot)
+## 0.2 Current Real Priorities (2026-03-10, Phase E Kickoff)
 
 This is the operational priority list now. Earlier generic checklists below should
 be read in this order.
@@ -79,7 +79,23 @@ be read in this order.
    - bridge continue-training target,
    - downstream transfer benchmark,
    - OOD stress test.
-5. Only after the value-head/ranking method is validated on the new primary benchmarks:
+5. Phase E is now the active execution stage.
+   - immediate engineering focus:
+     - benchmark-native trainer decoupling,
+     - high-quality pair benchmark suites,
+     - external benchmark evaluation (`ProcessBench / PRMBench`)
+6. New Phase E methodological rule:
+   - do **not** treat cross-dataset transfer as the first success criterion.
+   - first prove same-benchmark learnability.
+7. Community evidence now supports this order:
+   - current PRMs often struggle on harder process-error benchmarks,
+   - stronger transfer usually needs multi-domain or more advanced verifier
+     training, not just single-source scalar-head fitting.
+8. New 2026-03-10 update after `E15`:
+   - single-source `Math-Shepherd` learnability is now proven strongly enough,
+   - but benchmark-native performance is still weak,
+   - so the next task is **same-family multi-source math mixture training**.
+6. Only after the value-head/ranking method is validated on the new primary benchmarks:
    - resume BCR-lite,
    - then ABR-lite router,
    - then router-only RL.
@@ -89,6 +105,8 @@ Immediate no-go rules:
 2. No router RL before the new primary benchmark track passes ranking gates.
 3. No joint LM/value/router RL as the first RL experiment.
 4. No final-checkpoint reporting on GSM8K when checkpoint sweep data exists.
+5. No "source held-out weak but benchmark transfer must still be good"
+   expectation. That is methodologically backwards.
 
 Override note:
 1. Later occurrences of "StrategyQA first" in this file are historical design
@@ -195,6 +213,63 @@ Workstream checklist:
   - freeze StrategyQA as transfer-only for value-head validation,
   - make `Math-Shepherd + PRM800K` the main supervised track,
   - wire `ProcessBench + PRMBench` as the main external evaluation gate.
+- [x] E0: Write and freeze `phase_E_plan.md`
+- [x] E1: Decouple value-head trainer from mandatory Phase C artifact dependency
+- [x] E2: Add benchmark-native Phase E suites
+- [x] E3: Add ProcessBench / PRMBench evaluation wiring
+- [ ] E4: Run first official same-benchmark learnability matrix
+  - `Math-Shepherd`
+  - `R-PRM + PRMBench_Preview`
+  - `PRM800K` as weak-source control
+- [x] E4.1: Add `Math-Shepherd` trust-matrix tooling
+  - new suite groups:
+    - `E12_MATH_SHEPHERD_TRUST_LOWLR_SEED3`
+    - `E13_MATH_SHEPHERD_TRUST_UNWEIGHTED_SEED3`
+    - `E14_MATH_SHEPHERD_TRUST_ANTISAT_SEED3`
+    - `E15_MATH_SHEPHERD_TRUST_ROBUST_SEED3`
+  - new wrapper:
+    - `scripts/run_phase_e_mathshepherd_trust_suite.sh`
+  - new selector:
+    - `scripts/phase_e_select_candidate.py`
+- [ ] E5: Freeze Phase E promotion thresholds from first official seed-3 suite results
+  - first checkpoint family to freeze should be chosen from the
+    `Math-Shepherd trust matrix`, not from a single lucky seed
+  - source-family held-out gate first
+  - benchmark-native gate second
+  - StrategyQA transfer gate third
+- [ ] E6: Decide whether cross-benchmark generalization is:
+  - already acceptable under current recipe,
+  - or requires a mature method upgrade (`VersaPRM`/`ThinkPRM`/`R-PRM` style)
+- [ ] E7: Re-run StrategyQA transfer only after E2/E3 pass
+- [ ] E8: Resume StrategyQA transfer only after at least one Phase E source family is reproducibly positive
+- [x] E4.2: Implement mixture bundles for:
+  - `math_shepherd_r_prm`
+  - `math_shepherd_prmbench_preview`
+  - `math_shepherd_r_prm_prmbench_preview`
+- [x] E4.3: Wire balanced two-source and three-source same-family math mixture groups
+  - implemented in `scripts/run_phase_e_suite.sh`
+- [x] E4.4: Add weak-source ablation with low-weight `PRM800K`
+  - implemented via `source_weight_overrides_json` in Phase E pair artifacts
+- [x] E4.5: Wire direct mixture vs staged curriculum comparison
+  - implemented in `scripts/run_phase_e_multisource_math_suite.sh`
+- [ ] E4.6: Run and analyze the official Stage A-E suites
+  - `MM2_MULTISOURCE_MATH_STAGE_ABCD_SEED3`
+  - `MM3_MULTISOURCE_MATH_STAGEE_CURRICULUM_SEED3`
+  - `MM4_MULTISOURCE_MATH_FULL_PROGRAM`
+- [x] E4.7: Add intradataset ACC90 branch
+  - new same-source groups:
+    - `E40`..`E49`
+  - new wrapper:
+    - `scripts/run_phase_e_intradataset_suite.sh`
+  - new selector:
+    - `scripts/phase_e_select_intradataset_candidate.py`
+  - new plan:
+    - `docs/phase_E_intradataset_acc90_plan.md`
+- [ ] E4.8: Run the official intradataset ACC90 matrices
+  - `I2_MS_ACC90_MATRIX`
+  - `I3_PRMBENCH_ACC90_MATRIX`
+  - `I4_RPRM_ACC90_MATRIX`
+  - `I5_ALL_ACC90_MATRIX`
 
 Promotion gates:
 1. calibration gate:

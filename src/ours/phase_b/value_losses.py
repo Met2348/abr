@@ -246,7 +246,7 @@ def _weighted_mean(
         )
     if bool((sample_weights < 0).any().item()):
         raise ValueError("`sample_weights` must be non-negative")
-    # 中文：即使过滤后所有权重都变成 0，也不允许出现 NaN。
+    # 即使过滤后所有权重都变成 0，也不允许出现 NaN。
     # 这里返回 0 附近的稳定值，比把整个 epoch 训练炸掉更容易诊断。
     denom = torch_module.sum(sample_weights).clamp_min(1e-8)
     return torch_module.sum(values * sample_weights) / denom

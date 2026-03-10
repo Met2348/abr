@@ -1,16 +1,47 @@
-"""Source adapters for building canonical Phase D external pair artifacts.
+"""Source adapters for building canonical external pair artifacts.
 
-Why this file exists
---------------------
-External process-supervision datasets use heterogeneous schemas. This module
-adapts those raw formats into one canonical `(prompt, chosen, rejected)` pair
-contract so Phase D can train/evaluate with deterministic behavior.
+English
+-------
+Public process-supervision datasets come in very different raw formats:
 
-What this file contains
------------------------
-1. Direct pair loaders (for example R-PRM, PRMBench preview).
-2. Step-label converters (for example Math-Shepherd, RLHFlow, PRM800K).
-3. Shared quality filters to prevent degenerate pair artifacts.
+1. some already provide direct `chosen/rejected` pairs,
+2. some provide one trajectory with step-level `+/-` labels,
+3. some provide multiple completions for the same step.
+
+The rest of the repo does not want to understand every source-specific schema.
+It only wants one canonical contract:
+
+1. `prompt_text`
+2. `chosen_text`
+3. `rejected_text`
+4. metadata explaining how the pair was built
+
+This file performs that normalization.
+
+中文
+----
+公开的 process supervision 数据源原始格式差别很大：
+
+1. 有些直接给 `chosen/rejected`；
+2. 有些只给一条轨迹和逐步 `+/-` 标签；
+3. 有些给的是同一步的多个 completion。
+
+但仓库后面的训练/评测代码不想理解每一种原始格式，它们只想消费统一 pair：
+
+1. `prompt_text`
+2. `chosen_text`
+3. `rejected_text`
+4. 以及说明 pair 如何构造出来的 metadata
+
+本文件就是把各种外部格式标准化成统一 pair contract 的地方。
+
+Important note / 关键提醒
+-------------------------
+For step-labeled sources, "convert to pair" is not a neutral ETL step.  It
+encodes a research assumption about what the supervision actually means.
+
+对于 step-labeled 数据源，把它“转换成 pair”并不是中性的 ETL 操作，而是在编码一种
+研究假设：这个监督信号到底代表什么。
 """
 
 from __future__ import annotations
@@ -27,12 +58,32 @@ from .external_pairs import ExternalPairRecord
 
 @dataclass(slots=True)
 class PairBuildConfig:
-    """Quality-control config shared by external-pair source adapters."""
+    """Quality-control config shared by external-pair source adapters.
+
+    English
+    -------
+    This config controls both:
+
+    1. ordinary quality filtering
+       - remove degenerate or low-information pairs
+    2. pair semantics for step-labeled sources
+       - choose how `+/-` trajectories become canonical pairs
+
+    中文
+    ----
+    这组配置不只是在做普通清洗，还同时决定两件事：
+
+    1. 质量过滤
+       - 去掉明显退化、信息量很低的 pair
+    2. step-labeled 数据的 pair 语义
+       - 决定 `+/-` 轨迹如何变成 canonical pair
+    """
 
     min_chars: int = 12
     max_length_ratio: float = 4.0
     max_token_overlap: float = 0.995
     max_pairs_per_sample: int = 2
+    step_label_pair_mode: str = "first_bad_edge_strict"
 
     def validate(self) -> None:
         if self.min_chars <= 0:
@@ -43,6 +94,11 @@ class PairBuildConfig:
             raise ValueError("`max_token_overlap` must be in [0, 1]")
         if self.max_pairs_per_sample <= 0:
             raise ValueError("`max_pairs_per_sample` must be > 0")
+        if self.step_label_pair_mode not in {"first_bad_edge_strict", "legacy_nearest"}:
+            raise ValueError(
+                "`step_label_pair_mode` must be one of "
+                "{'first_bad_edge_strict', 'legacy_nearest'}"
+            )
 
 
 def load_r_prm_dpo_pairs(
@@ -83,6 +139,8 @@ def load_r_prm_dpo_pairs(
                 "source_split": split,
                 "source_row_index": int(shard_idx),
                 "source_root": str(root),
+                "pair_build_mode": "r_prm_direct_pair",
+                "pair_semantics": "direct_preference_pair",
             },
             config=config,
         )
@@ -147,6 +205,8 @@ def load_prmbench_preview_pairs(
                         "classification": payload.get("classification"),
                         "error_step_index": int(idx),
                         "num_error_steps": int(len(error_steps)),
+                        "pair_build_mode": "prmbench_explicit_error_step",
+                        "pair_semantics": "local_modified_process_error_step",
                     },
                     config=config,
                 )
@@ -164,7 +224,33 @@ def load_math_shepherd_pairs(
     config: PairBuildConfig,
     max_pairs: int | None = None,
 ) -> list[ExternalPairRecord]:
-    """Convert Math-Shepherd step labels into pair candidates."""
+    """Convert Math-Shepherd step labels into local first-bad-edge pair candidates.
+
+    Important
+    ---------
+    Math-Shepherd only provides one labeled trajectory, not same-step sibling
+    alternatives. The safe default is therefore `first_bad_edge_strict`:
+
+    1. find the first negative step,
+    2. require at least one positive step before it,
+    3. compare the last clean prefix before that step against the prefix that
+       includes the first bad step.
+
+    This should be narrated as first-bad-edge supervision, not as exact
+    same-step branch preference supervision.
+
+    中文补充
+    --------
+    这里最容易让新手误解的一点是：Math-Shepherd 并没有给你严格的
+    “同一个 prefix 下，当前步的好候选 vs 坏候选”。
+
+    它给的是：
+    1. 一条过程轨迹
+    2. 每步好坏标签
+
+    所以当前最保守、最诚实的转换，是“最后一个好 prefix”对“第一个坏 prefix”。
+    这代表 local first-bad-edge，不代表严格 sibling-branch preference。
+    """
     config.validate()
     if not path.exists():
         raise FileNotFoundError(f"Math-Shepherd JSONL not found: {path}")
@@ -333,6 +419,7 @@ def _extract_prm800k_completion_pairs(
                     "rating_positive": float(positive[1]),
                     "rating_negative": float(non_positive[1]),
                     "pair_build_mode": "prm800k_completion_ratings",
+                    "pair_semantics": "same_step_completion_preference",
                 },
                 config=config,
             )
@@ -364,7 +451,7 @@ def load_rlhflow_pairs(
     config: PairBuildConfig,
     max_pairs_per_source: int | None = None,
 ) -> list[ExternalPairRecord]:
-    """Convert RLHFlow step-label conversations into pair candidates."""
+    """Convert RLHFlow step-label conversations into local first-bad-edge pairs."""
     config.validate()
     rows: list[ExternalPairRecord] = []
     if mistral_root is not None:
@@ -464,19 +551,50 @@ def _iter_parquet_rows(
     columns: Iterable[str],
 ) -> Iterable[dict[str, Any]]:
     """Yield parquet rows as plain dictionaries."""
+    column_names = list(columns)
     try:
         import pyarrow.parquet as pq
+        reader_mode = "pyarrow.parquet"
     except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(
-            "Failed to import `pyarrow.parquet` while reading external parquet shards. "
-            "Please fix your pyarrow runtime first, for example: "
-            "`python -m pip install -U pyarrow` "
-            "and make sure no mixed conda/pip binary conflict remains."
-        ) from exc
+        # Some of our lab environments end up with a mixed pyarrow install where
+        # `pyarrow.parquet` imports the broken fs/azure bindings, but the low-level
+        # parquet reader still works. 这里优先降级到 `_parquet`，避免整个 Phase E
+        # 因为 parquet runtime 的 ABI 冲突而完全不可用。
+        try:
+            import pyarrow._parquet as pq  # type: ignore[no-redef]
+            reader_mode = "pyarrow._parquet"
+        except Exception as fallback_exc:  # noqa: BLE001
+            raise RuntimeError(
+                "Failed to import a usable parquet reader while reading external parquet shards. "
+                "Tried `pyarrow.parquet` and fallback `pyarrow._parquet`. "
+                "Please fix your pyarrow runtime first, for example: "
+                "`python -m pip install -U pyarrow` "
+                "and make sure no mixed conda/pip binary conflict remains."
+            ) from fallback_exc
 
     for file_path in files:
-        pf = pq.ParquetFile(file_path)
-        for batch in pf.iter_batches(batch_size=1024, columns=list(columns)):
+        if reader_mode == "pyarrow.parquet":
+            pf = pq.ParquetFile(file_path)
+            batches = pf.iter_batches(batch_size=1024, columns=column_names)
+        else:
+            reader = pq.ParquetReader()
+            reader.open(
+                str(file_path),
+                use_memory_map=False,
+                read_dictionary=[],
+                buffer_size=0,
+                pre_buffer=False,
+            )
+            schema_names = list(reader.schema_arrow.names)
+            col_indices = [schema_names.index(name) for name in column_names]
+            row_groups = list(range(reader.num_row_groups))
+            batches = reader.iter_batches(
+                batch_size=1024,
+                row_groups=row_groups,
+                column_indices=col_indices,
+                use_threads=True,
+            )
+        for batch in batches:
             names = list(batch.schema.names)
             cols = [batch.column(i) for i in range(len(names))]
             for row_idx in range(batch.num_rows):
@@ -722,7 +840,167 @@ def _convert_step_labels_to_pairs(
     config: PairBuildConfig,
     base_metadata: dict[str, Any],
 ) -> list[ExternalPairRecord]:
-    """Convert `+/-` step labels into prefix-level chosen/rejected pairs."""
+    """Convert `+/-` step labels into local first-bad-edge or legacy pairs.
+
+    Important
+    ---------
+    Step-labeled sources such as Math-Shepherd / RLHFlow only provide one
+    trajectory with per-step `+/-` tags. They do *not* natively provide
+    same-step sibling alternatives.
+
+    Safe default:
+    1. `first_bad_edge_strict`
+       - find the first negative step,
+       - require at least one positive step before it,
+       - compare the last clean prefix against the prefix that includes the
+         first bad step.
+
+    Legacy mode remains available only for historical forensics:
+    1. `legacy_nearest`
+       - compare a positive-index prefix with the nearest negative-index prefix
+         from the same trajectory.
+       - This mixes depth/progress signal with local error signal and should
+         not be used for new mainline experiments.
+
+    中文
+    ----
+    这个分支点本身就有研究含义：
+
+    1. `first_bad_edge_strict`
+       - 语义更干净，更接近“局部第一次出错”
+       - 代价是会丢掉一部分难以严格构造的样本
+    2. `legacy_nearest`
+       - 样本可能更多
+       - 但会把“推理深度/进度”与“局部错误”混在一起
+
+    所以后面的实验结果怎么解释，很大程度取决于这里选的是哪条路径。
+    """
+    if config.step_label_pair_mode == "first_bad_edge_strict":
+        return _convert_step_labels_to_first_bad_edge_pairs(
+            prompt_text=prompt_text,
+            step_labels=step_labels,
+            source_tag=source_tag,
+            domain_tag=domain_tag,
+            config=config,
+            base_metadata=base_metadata,
+        )
+    if config.step_label_pair_mode == "legacy_nearest":
+        return _convert_step_labels_to_legacy_pairs(
+            prompt_text=prompt_text,
+            step_labels=step_labels,
+            source_tag=source_tag,
+            domain_tag=domain_tag,
+            config=config,
+            base_metadata=base_metadata,
+        )
+    raise ValueError(f"Unsupported step_label_pair_mode: {config.step_label_pair_mode!r}")
+
+
+def _convert_step_labels_to_first_bad_edge_pairs(
+    *,
+    prompt_text: str,
+    step_labels: list[tuple[str, str]],
+    source_tag: str,
+    domain_tag: str,
+    config: PairBuildConfig,
+    base_metadata: dict[str, Any],
+) -> list[ExternalPairRecord]:
+    """Build one strict local first-bad-edge pair from a labeled trajectory.
+
+    English
+    -------
+    Example:
+    1. step 0 = good
+    2. step 1 = good
+    3. step 2 = bad
+
+    Then we emit exactly one pair:
+    1. chosen = prefix through step 1
+    2. rejected = prefix through step 2
+
+    中文
+    ----
+    举例：
+    1. 第 0 步是好
+    2. 第 1 步是好
+    3. 第 2 步是坏
+
+    那么这里只会构造一个 pair：
+    1. chosen = 截到第 1 步的 prefix
+    2. rejected = 截到第 2 步的 prefix
+    """
+    first_negative_idx = next((idx for idx, (_, label) in enumerate(step_labels) if label == "-"), None)
+    if first_negative_idx is None:
+        return []
+    if int(first_negative_idx) <= 0:
+        # If the first negative label appears immediately, there is no reliable
+        # "last good prefix" to compare against.
+        # 如果一开始就出现负标签，就不存在可信的“最后一个好 prefix”。
+        #
+        # Keeping such rows would force us to invent a pseudo-positive sample,
+        # which would quietly change the semantics of the supervision.
+        # 这类样本如果强行保留，相当于硬造一个正样本，会悄悄改变监督语义。
+        return []
+
+    chosen_idx = int(first_negative_idx) - 1
+    rejected_idx = int(first_negative_idx)
+    chosen_text = _join_steps_as_prefix([step for step, _ in step_labels], chosen_idx)
+    rejected_text = _join_steps_as_prefix([step for step, _ in step_labels], rejected_idx)
+    record = _build_record(
+        source_tag=source_tag,
+        domain_tag=domain_tag,
+        prompt_text=prompt_text,
+        chosen_text=chosen_text,
+        rejected_text=rejected_text,
+        pair_confidence=0.74,
+        metadata={
+            **base_metadata,
+            "positive_step_index": int(chosen_idx),
+            "negative_step_index": int(rejected_idx),
+            "first_negative_index": int(first_negative_idx),
+            "num_step_labels": int(len(step_labels)),
+            "pair_build_mode": "step_label_first_bad_edge_strict",
+            "pair_semantics": "local_first_bad_edge",
+        },
+        config=config,
+    )
+    return [record] if record is not None else []
+
+
+def _convert_step_labels_to_legacy_pairs(
+    *,
+    prompt_text: str,
+    step_labels: list[tuple[str, str]],
+    source_tag: str,
+    domain_tag: str,
+    config: PairBuildConfig,
+    base_metadata: dict[str, Any],
+) -> list[ExternalPairRecord]:
+    """Legacy nearest-boundary converter retained for forensic reproducibility.
+
+    English
+    -------
+    This mode is kept so old experiments remain reproducible.  It should not be
+    the default interpretation for new mainline science.
+
+    The main problem is that chosen/rejected often terminate at different
+    depths in the same trajectory, so the model may learn:
+    1. progress depth,
+    2. position in trajectory,
+    3. or text length artifacts,
+    rather than purely local error discrimination.
+
+    中文
+    ----
+    这个模式保留主要是为了让旧实验还能复现，不该再作为新主线默认语义。
+
+    它的核心问题是 chosen/rejected 往往结束在同一条轨迹的不同深度，所以模型
+    可能学到的是：
+    1. 推理走了多远，
+    2. 当前在轨迹哪个位置，
+    3. 文本长度差异，
+    而不是真正的局部错误识别。
+    """
     positives = [idx for idx, (_, label) in enumerate(step_labels) if label == "+"]
     negatives = [idx for idx, (_, label) in enumerate(step_labels) if label == "-"]
     if not positives or not negatives:
@@ -733,9 +1011,15 @@ def _convert_step_labels_to_pairs(
     for pos_idx in positives:
         if len(rows) >= int(config.max_pairs_per_sample):
             break
-        # 中文：这里不是拿“任意一个负样本”，而是优先选距离最近的错误步骤。
-        # 目的不是构造最难/最强 pair，而是让 chosen/rejected 共享尽量多上下文，
-        # 这样 ranking 信号更像“这一步好坏”的差异，而不是整条长推理完全不同。
+        # Pick the nearest negative step rather than an arbitrary one so the
+        # pair shares as much context as possible.
+        # 这里优先选距离最近的错误步骤，而不是随便拿一个负样本，尽量让 pair 共享更多上下文。
+        #
+        # Caution: the two prefixes still end at different step indices, so
+        # this is only a heuristic same-trajectory comparison, not a true
+        # same-step local branch pair.
+        # 注意：这里比较的仍然是两个不同步数终止的 prefix，所以它只是“同轨迹近邻对比”，
+        # 不是严格意义上的“同一步分叉的局部好坏对比”。
         neg_idx = min(negatives, key=lambda n: abs(n - pos_idx))
         key = (pos_idx, neg_idx)
         if key in used_pairs:
@@ -744,8 +1028,10 @@ def _convert_step_labels_to_pairs(
         chosen_text = _join_steps_as_prefix([step for step, _ in step_labels], pos_idx)
         rejected_text = _join_steps_as_prefix([step for step, _ in step_labels], neg_idx)
         distance = abs(pos_idx - neg_idx)
-        # 中文：当前 confidence 是经验型启发式，不是假设它等于“真实概率”。
-        # 距离近说明两个 prefix 只在局部步骤附近分叉，通常更适合作为高质量排序监督。
+        # This confidence is heuristic metadata, not a calibrated probability.
+        # 当前 confidence 只是经验型启发式元数据，不是假设它等于“真实概率”。
+        # Shorter step distance usually means the two prefixes diverge only locally and make a cleaner ranking pair.
+        # 距离越近通常说明两个 prefix 只在局部步骤附近分叉，更适合作为高质量排序监督。
         confidence = 0.62 if distance <= 2 else 0.55
         record = _build_record(
             source_tag=source_tag,
@@ -759,6 +1045,8 @@ def _convert_step_labels_to_pairs(
                 "positive_step_index": int(pos_idx),
                 "negative_step_index": int(neg_idx),
                 "num_step_labels": int(len(step_labels)),
+                "pair_build_mode": "step_label_legacy_nearest_boundary",
+                "pair_semantics": "same_trajectory_depth_mixed",
             },
             config=config,
         )
@@ -787,15 +1075,26 @@ def _build_record(
     metadata: dict[str, Any],
     config: PairBuildConfig,
 ) -> ExternalPairRecord | None:
-    """Build one validated canonical pair record, or return None if filtered."""
+    """Build one validated canonical pair record, or return None if filtered.
+
+    English
+    -------
+    This is the final source-agnostic quality gate before a pair enters the
+    repo-wide canonical contract.
+
+    中文
+    ----
+    这是 source-specific pair 进入“全仓统一 canonical pair”之前的最后一道门。
+    如果这里不过滤，后面的训练和评测都会把它当成正式监督样本。
+    """
     flags = _compute_quality_flags(
         prompt_text=prompt_text,
         chosen_text=chosen_text,
         rejected_text=rejected_text,
     )
     if not _passes_quality_filter(flags=flags, config=config):
-        # 中文：质量过滤在 adapter 层提前做，而不是等到训练再发现坏样本。
-        # 这样 summary.json 能直接反映“外部 pair 源本身质量如何”，便于调数据。
+        # Reject low-quality pairs here so the adapter summary already reflects source quality.
+        # 质量过滤要在 adapter 层提前做，这样 summary.json 才能直接反映外部 pair 源本身质量。
         return None
     pair_id = _stable_hash(
         source_tag,
@@ -804,8 +1103,8 @@ def _build_record(
         _normalize_space(chosen_text),
         _normalize_space(rejected_text),
     )[:20]
-    # 中文：pair_id 由内容稳定哈希生成，而不是依赖行号。
-    # 好处是不同批次重建/合并多个来源时，去重和复现都更可靠。
+    # Content-hash ids make deduplication and reruns stable even when file order changes.
+    # 基于内容哈希的 pair_id 能让去重与复现不受文件顺序变化影响。
     record = ExternalPairRecord(
         pair_id=pair_id,
         source_tag=str(source_tag).strip(),
@@ -838,8 +1137,8 @@ def _compute_quality_flags(
     rejected_tokens = set(rejected_norm.split())
     union = chosen_tokens | rejected_tokens
     overlap = (len(chosen_tokens & rejected_tokens) / len(union)) if union else 1.0
-    # 中文：这里保留的是“可解释的质量特征”，而不是直接在此处做 hard filter。
-    # 后续 config 可以基于这些 flag 改阈值，避免把过滤逻辑散落在多处。
+    # Keep interpretable quality features here and centralize the actual thresholding elsewhere.
+    # 这里先保留可解释的质量特征，再由统一配置决定阈值，避免过滤逻辑散落多处。
     return {
         "chosen_chars": int(chosen_chars),
         "rejected_chars": int(rejected_chars),

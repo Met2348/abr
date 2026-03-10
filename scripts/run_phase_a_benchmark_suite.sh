@@ -35,7 +35,7 @@ cd "${REPO_ROOT}"
 # One-click selector.
 # -----------------------------------------------------------------------------
 ACTIVE_PARAM_GROUP="${ACTIVE_PARAM_GROUP:-A1}"
-# 中文：切换实验分组的唯一入口，改这里即可选择 A1/A2/...；不需要改主流程。
+# 切换实验分组的唯一入口，改这里即可选择 A1/A2/...；不需要改主流程。
 
 # Track which runtime knobs were explicitly provided by user env.
 # We use this so param groups can set sensible defaults without overriding user intent.
@@ -51,7 +51,7 @@ USER_SET_TRUNCATION_RECOVERY_REQUIRE_FINAL_SIGNAL="${TRUNCATION_RECOVERY_REQUIRE
 # -----------------------------------------------------------------------------
 # Global runtime knobs (override with env vars if needed).
 # -----------------------------------------------------------------------------
-# 中文：这里是“全局默认值层”，命令行前缀导出同名环境变量会覆盖这些默认值。
+# 这里是“全局默认值层”，命令行前缀导出同名环境变量会覆盖这些默认值。
 PYTHON_BIN="${PYTHON_BIN:-python}"
 DATASET="${DATASET:-strategyqa}"
 SOURCE_SPLIT="${SOURCE_SPLIT:-train}"
@@ -118,7 +118,7 @@ configure_a11_token_stress_variant() {
 
   # Keep these stress runs compute-aware: no additional repro run by default.
   # Aggregate summary remains report-ready across train/validation/test.
-  # 中文：GROUP_RUN_SPECS 每项格式固定为：
+  # GROUP_RUN_SPECS 每项格式固定为：
   # "label|input_kind|run_name|max_new_tokens|compare_mode"
   GROUP_RUN_SPECS=(
     "full_train_t${max_new_tokens}|cot_train|${RUN_PREFIX}_full_train_t${max_new_tokens}|${max_new_tokens}|no"
@@ -405,7 +405,7 @@ configure_param_group() {
   STRICT_TEMPLATE_ID="${BASE_STRICT_TEMPLATE_ID}"
   STRICT_TARGET_STYLE="${BASE_STRICT_TARGET_STYLE}"
 
-  # 中文：新增 A 组时，优先只改这一段（标题/意图/模板需求/GROUP_RUN_SPECS）。
+  # 新增 A 组时，优先只改这一段（标题/意图/模板需求/GROUP_RUN_SPECS）。
   case "${group_id}" in
     A1)
       # Intention:
@@ -830,10 +830,10 @@ execute_group_runs() {
   local input_jsonl run_dir
 
   for spec in "${GROUP_RUN_SPECS[@]}"; do
-    # 中文：spec 解析顺序不要改；后续路由与汇总都依赖这 5 段字段。
+    # spec 解析顺序不要改；后续路由与汇总都依赖这 5 段字段。
     IFS='|' read -r label input_kind run_name max_new_tokens compare_mode <<< "${spec}"
 
-    # 中文：input_kind 仅负责“选哪份 prepared jsonl”，不改变模型或解码器。
+    # input_kind 仅负责“选哪份 prepared jsonl”，不改变模型或解码器。
     case "${input_kind}" in
       direct)
         [[ -n "${DIRECT_VAL_JSONL}" ]] || die "Direct input is not prepared."

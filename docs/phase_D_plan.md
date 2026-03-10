@@ -7,11 +7,15 @@ Date baseline: 2026-03-03.
 Methodology correction update: 2026-03-05.
 
 Strategic benchmark-scope correction: 2026-03-10.
+Data-semantics repair update: 2026-03-10.
 
 ## 0. Document Governance (Source of Truth)
 
 Primary execution document:
-- `phase_D_plan.md` (this file)
+- historical / supporting after 2026-03-10:
+  - `phase_D_plan.md` (this file)
+- active execution document after 2026-03-10:
+  - `phase_E_plan.md`
 
 Supporting diagnosis/technical references:
 1. `phase_C_fix_value_head.md` (deep diagnosis, external-aid rationale, deployment caveats)
@@ -19,9 +23,16 @@ Supporting diagnosis/technical references:
 3. `TODO_ours.md` (task-level checklist and milestone tracking)
 
 Governance rule:
-1. Use this file for scope, order, and promotion gates.
-2. Use supporting files for evidence and implementation detail.
-3. If conflict exists, this file wins for execution sequencing.
+1. Before `2026-03-10`, this file is the scope/order source of truth for Phase D.
+2. After `2026-03-10`, this file becomes supporting evidence for:
+   - Phase D methodology correction,
+   - bridge evidence,
+   - benchmark-scope correction.
+3. For active execution sequencing after `2026-03-10`, `phase_E_plan.md` wins.
+4. Any old D4/D6T result that relied on pre-fix nearest-negative step-label
+   conversion should be treated as `legacy` evidence only.
+5. After the 2026-03-10 repair, single-trajectory `+/-` sources are only
+   interpreted as strict `first_bad_edge` supervision sources.
 
 ## 1. Why Phase D Starts Now
 
@@ -1463,6 +1474,15 @@ Task D4-2: source adapters
      confidence boosted by `error_steps` count and explicit classification tags.
    - `Math-Shepherd` and `RLHFlow`: build intra-question step pairs from `+/-`
      labels; keep only high-margin candidates.
+3. 2026-03-10 audit constraint:
+   - the current `Math-Shepherd` / `RLHFlow` converter is only a heuristic
+     same-trajectory prefix pairing rule, not a true same-step local branch
+     constructor;
+   - therefore outputs from `_convert_step_labels_to_pairs(...)` must not be
+     over-interpreted as ProcessBench-style first-error supervision;
+   - the same caution also applies to the fallback `+/-` path in `PRM800K`.
+4. detailed audit:
+   - `docs/data_semantics_risk_audit_20260310.md`
 
 Task D4-3: pair quality filters
 1. add module: `src/ours/phase_d/pair_filters.py`:

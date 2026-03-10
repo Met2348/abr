@@ -18,7 +18,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 ACTIVE_PHASE_C_PIK_GROUP="${ACTIVE_PHASE_C_PIK_GROUP:-PIK_STRATEGYQA_SMOKE}"
 RUN_PREFIX="${RUN_PREFIX:-phase_c_pik}"
 CURRENT_STAGE="init"
-# 中文：这个入口专门跑问题级 P(IK) 管线；切组只改 ACTIVE_PHASE_C_PIK_GROUP。
+# 这个入口专门跑问题级 P(IK) 管线；切组只改 ACTIVE_PHASE_C_PIK_GROUP。
 
 
 timestamp() {
@@ -149,7 +149,7 @@ trap 'on_exit $?' EXIT
 
 resolve_group() {
   # 组定义同时决定数据规模与训练配置，是复现实验的主入口。
-  # 中文：新增组时优先复制现有组，仅替换数据路径和训练超参，避免漏字段。
+  # 新增组时优先复制现有组，仅替换数据路径和训练超参，避免漏字段。
   case "$ACTIVE_PHASE_C_PIK_GROUP" in
     PIK_STRATEGYQA_SMOKE)
       GROUP_TITLE="Phase C P(IK) StrategyQA Smoke"
@@ -244,7 +244,7 @@ run_c1_prepare() {
   if [[ -n "$max_samples" ]]; then
     cmd+=(--max-samples "$max_samples")
   fi
-  # 中文：这里是 P(IK) C1 阶段唯一的用户注入口，适合临时改 rollout 参数。
+  # 这里是 P(IK) C1 阶段唯一的用户注入口，适合临时改 rollout 参数。
   append_extra_args cmd "${PHASE_C_PIK_PREP_EXTRA_ARGS:-}"
 
   CURRENT_STAGE="c1_prepare_${split_label}"
@@ -274,7 +274,7 @@ C2_STANDALONE_EVAL_RUN_NAME="${RUN_NAME}_c2_eval"
 FEATURE_CACHE_ROOT="${FEATURE_CACHE_ROOT:-assets/artifacts/phase_c_feature_cache}"
 FEATURE_CACHE_MODE="${FEATURE_CACHE_MODE:-read_write}"
 FEATURE_CACHE_LOCK_TIMEOUT_SEC="${FEATURE_CACHE_LOCK_TIMEOUT_SEC:-600}"
-# 中文：目录解析依赖这套命名后缀，改名规则会影响后续自动查找。
+# 目录解析依赖这套命名后缀，改名规则会影响后续自动查找。
 
 {
   log_line "Repo root      : $REPO_ROOT"
@@ -363,7 +363,7 @@ c2_eval_cmd=(
 )
 append_extra_args c2_eval_cmd "${C2_EVAL_EXTRA_ARGS_DEFAULT:-}"
 append_extra_args c2_eval_cmd "${PHASE_C_PIK_EVAL_EXTRA_ARGS:-}"
-# 中文：train/eval 的 extra args 分开传，避免把训练参数误注入评估脚本。
+# train/eval 的 extra args 分开传，避免把训练参数误注入评估脚本。
 {
   log_line "PIK C2 eval command : ${c2_eval_cmd[*]}"
 } | tee -a "$SUITE_LOG_FILE"

@@ -499,9 +499,10 @@ def main(argv: list[str] | None = None) -> int:
                 _validate_cached_pik_example_cache_payload(
                     cache=cached_payload,
                     expected_num_examples=len(train_examples),
+                    expected_hidden_size=int(hidden_size),
                     torch_module=torch,
                 )
-                train_cache = move_tensors_to_device(cached_payload, model_input_device, torch)
+                train_cache = cached_payload
                 feature_cache_stats["hits"] += 1
                 feature_cache_stats["entries"]["train_cache"] = {
                     "status": "hit",
@@ -568,9 +569,10 @@ def main(argv: list[str] | None = None) -> int:
                 _validate_cached_pik_example_cache_payload(
                     cache=cached_payload,
                     expected_num_examples=len(eval_examples),
+                    expected_hidden_size=int(hidden_size),
                     torch_module=torch,
                 )
-                eval_cache = move_tensors_to_device(cached_payload, model_input_device, torch)
+                eval_cache = cached_payload
                 feature_cache_stats["hits"] += 1
                 feature_cache_stats["entries"]["eval_cache"] = {
                     "status": "hit",
@@ -614,6 +616,13 @@ def main(argv: list[str] | None = None) -> int:
             feature_cache_stats["entries"]["eval_cache"]["write"] = True
 
     feature_cache_elapsed = time.perf_counter() - feature_cache_start
+
+    # Keep cache tensors on CPU and free the frozen backbone before the head-only loop starts.
+    # 长期缓存特征留在 CPU，编码结束后立即释放 frozen backbone，训练时只搬当前 mini-batch。
+    del backbone
+    del tokenizer
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     # Stage 3: 仅训练小 value head，并按 eval 指标保存 best checkpoint。
     optimizer = torch.optim.AdamW(
@@ -679,6 +688,7 @@ def main(argv: list[str] | None = None) -> int:
             posthoc_calibration=args.posthoc_calibration,
             posthoc_temperature_config=posthoc_temperature_config,
             posthoc_isotonic_config=posthoc_isotonic_config,
+            batch_size=int(args.per_device_eval_batch_size),
             torch_module=torch,
         )
         curve_row = {
@@ -738,6 +748,7 @@ def main(argv: list[str] | None = None) -> int:
         posthoc_calibration=args.posthoc_calibration,
         posthoc_temperature_config=posthoc_temperature_config,
         posthoc_isotonic_config=posthoc_isotonic_config,
+        batch_size=int(args.per_device_eval_batch_size),
         torch_module=torch,
     )
     _write_posthoc_calibration_payload(
@@ -874,6 +885,49 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _move_batch_tensor(
+    tensor: Any,
+    *,
+    device: Any,
+    dtype: Any | None = None,
+) -> Any:
+    """Move one batch tensor to the requested device/dtype only when needed."""
+    target_dtype = tensor.dtype if dtype is None else dtype
+    if tensor.device == device and tensor.dtype == target_dtype:
+        return tensor
+    return tensor.to(device=device, dtype=target_dtype)
+
+
+def _score_features_with_logits_in_batches(
+    *,
+    value_head: Any,
+    features: Any,
+    batch_size: int,
+    torch_module: Any,
+) -> tuple[Any, Any]:
+    """Score feature rows in mini-batches and return CPU score/logit tensors."""
+    head_device = next(value_head.parameters()).device
+    head_dtype = next(value_head.parameters()).dtype
+    score_chunks: list[Any] = []
+    logit_chunks: list[Any] = []
+    effective_bs = max(1, int(batch_size))
+    for start in range(0, int(features.shape[0]), effective_bs):
+        batch = _move_batch_tensor(
+            features[start : start + effective_bs],
+            device=head_device,
+            dtype=head_dtype,
+        )
+        outputs = value_head(batch)
+        score_chunks.append(outputs["scores"].detach().cpu())
+        logit_chunks.append(outputs["logits"].detach().cpu())
+    if score_chunks:
+        return torch_module.cat(score_chunks, dim=0), torch_module.cat(logit_chunks, dim=0)
+    return (
+        torch_module.zeros((0,), dtype=torch_module.float32),
+        torch_module.zeros((0,), dtype=torch_module.float32),
+    )
+
+
 def _run_one_train_epoch(
     *,
     value_head: Any,
@@ -896,6 +950,8 @@ def _run_one_train_epoch(
     """Run one epoch over cached question features."""
     value_head.train()
     num_examples = int(train_cache["features"].shape[0])
+    head_device = next(value_head.parameters()).device
+    head_dtype = next(value_head.parameters()).dtype
     permutation = torch_module.randperm(num_examples, device=train_cache["features"].device)
 
     running_total = 0.0
@@ -906,9 +962,17 @@ def _run_one_train_epoch(
         if max_steps is not None and global_step_offset + optimizer_steps >= max_steps:
             break
         batch_indices = permutation[batch_start : batch_start + batch_size]
-        features = train_cache["features"][batch_indices]
+        features = _move_batch_tensor(
+            train_cache["features"][batch_indices],
+            device=head_device,
+            dtype=head_dtype,
+        )
         targets = _apply_target_smoothing(
-            train_cache["targets"][batch_indices],
+            _move_batch_tensor(
+                train_cache["targets"][batch_indices],
+                device=head_device,
+                dtype=torch_module.float32,
+            ),
             epsilon=float(calibration_target_smoothing),
         )
         head_outputs = value_head(features)
@@ -961,14 +1025,18 @@ def _evaluate_pik_head(
     posthoc_calibration: str,
     posthoc_temperature_config: TemperatureCalibrationConfig,
     posthoc_isotonic_config: IsotonicCalibrationConfig,
+    batch_size: int,
     torch_module: Any,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Evaluate one checkpoint on held-out P(IK) question-level examples."""
     value_head.eval()
     with torch_module.no_grad():
-        outputs = value_head(eval_cache["features"])
-        scores_tensor = outputs["scores"]
-        logits_tensor = outputs["logits"]
+        scores_tensor, logits_tensor = _score_features_with_logits_in_batches(
+            value_head=value_head,
+            features=eval_cache["features"],
+            batch_size=int(batch_size),
+            torch_module=torch_module,
+        )
         scores = [float(v) for v in scores_tensor.detach().cpu().tolist()]
     target_scores = [float(v) for v in eval_cache["targets"].detach().cpu().tolist()]
 
@@ -1163,6 +1231,7 @@ def _validate_cached_pik_example_cache_payload(
     *,
     cache: Any,
     expected_num_examples: int,
+    expected_hidden_size: int,
     torch_module: Any,
 ) -> None:
     """Validate loaded P(IK) cache payload before reusing."""
@@ -1177,6 +1246,10 @@ def _validate_cached_pik_example_cache_payload(
     if int(features.shape[0]) != int(expected_num_examples):
         raise ValueError(
             f"PIK cache feature rows mismatch: expected {expected_num_examples}, got {int(features.shape[0])}"
+        )
+    if int(features.shape[1]) != int(expected_hidden_size):
+        raise ValueError(
+            f"PIK cache feature hidden mismatch: expected {expected_hidden_size}, got {int(features.shape[1])}"
         )
     for key in ("targets", "parseable"):
         tensor = cache[key]
@@ -1222,11 +1295,12 @@ def _encode_example_cache(
         dtype=torch_module.float32,
         device=device,
     )
-    return {
+    payload = {
         "features": features,
         "targets": targets,
         "parseable": parseable,
     }
+    return move_tensors_to_device(payload, torch_module.device("cpu"), torch_module)
 
 
 def _encode_text_list_in_batches(

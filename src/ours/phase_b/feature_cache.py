@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-FEATURE_CACHE_SCHEMA_VERSION = "phase_feature_cache_v1"
+FEATURE_CACHE_SCHEMA_VERSION = "phase_feature_cache_v2"
 _VALID_CACHE_MODES = {"off", "read", "write", "read_write"}
 
 
@@ -61,8 +61,8 @@ def hash_jsonable(payload: Any) -> str:
 
 def build_cache_key(namespace: str, signature_payload: dict[str, Any]) -> tuple[str, str]:
     """Build `(cache_key, signature_hash)` from namespace + signature payload."""
-    # 中文：cache_key 只取短 hash 便于作为目录名阅读；
-    # 真正的严格校验仍然依赖完整 signature_hash 存在 meta.json 中。
+    # The directory key uses a short hash for readability, while meta.json keeps the full strict hash.
+    # cache_key 只取短 hash 便于目录阅读；真正的严格校验仍依赖 meta.json 里的完整 hash。
     signature_hash = hash_jsonable(signature_payload)
     key = f"{namespace}_{signature_hash[:24]}"
     return key, signature_hash
@@ -112,6 +112,54 @@ def hash_int_list(values: list[int]) -> dict[str, Any]:
     }
 
 
+def _collect_file_signature(path: Path) -> dict[str, Any]:
+    """Return compact stat signature for one existing file path."""
+    st = path.stat()
+    return {
+        "exists": True,
+        "size": int(st.st_size),
+        "mtime_ns": int(st.st_mtime_ns),
+    }
+
+
+def _resolve_dynamic_tracked_files(dir_path: Path, tracked_files: list[str]) -> list[str]:
+    """Expand tracked file list with index-referenced shards and loose weight files.
+
+    Why this helper exists
+    ----------------------
+    Earlier cache provenance only tracked lightweight metadata files. That left a
+    dangerous hole: replacing actual model shards in-place could keep the same
+    cache signature and silently reuse stale features. We still avoid hashing
+    giant checkpoints, but we now at least bind the cache key to shard
+    size/mtime metadata.
+    """
+    tracked: set[str] = {str(rel) for rel in tracked_files}
+    for rel in list(tracked):
+        if not rel.endswith(".index.json"):
+            continue
+        index_path = dir_path / rel
+        if not index_path.exists() or not index_path.is_file():
+            continue
+        try:
+            payload = json.loads(index_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        weight_map = payload.get("weight_map") if isinstance(payload, dict) else None
+        if not isinstance(weight_map, dict):
+            continue
+        for shard_rel in weight_map.values():
+            if isinstance(shard_rel, str) and shard_rel.strip():
+                tracked.add(str(shard_rel))
+
+    # Also track loose top-level weight files for checkpoints that do not use an index.
+    for file_path in dir_path.iterdir():
+        if not file_path.is_file():
+            continue
+        if file_path.name.endswith((".safetensors", ".bin", ".pt", ".pth")):
+            tracked.add(file_path.name)
+    return sorted(tracked)
+
+
 def collect_path_signature(path: str | Path | None, *, tracked_files: list[str] | None = None) -> dict[str, Any]:
     """Collect lightweight path/file stat signature for cache provenance.
 
@@ -138,21 +186,16 @@ def collect_path_signature(path: str | Path | None, *, tracked_files: list[str] 
         return signature
 
     signature["kind"] = "dir"
-    # 中文：目录签名不去哈希所有大文件，避免对 7B/PRM 模型做昂贵全盘扫描。
-    # 这里只追踪 config/tokenizer/adapter 等“会改变编码语义”的关键文件。
-    tracked = tracked_files or []
+    # Directory signatures avoid hashing giant shards and instead track the files that change encoding semantics.
+    # 目录签名不会去哈希所有大文件，而是只追踪会改变编码语义的关键文件。
+    tracked = _resolve_dynamic_tracked_files(p, tracked_files or [])
     tracked_payload: dict[str, Any] = {}
     for rel in tracked:
         file_path = p / rel
         if not file_path.exists() or not file_path.is_file():
             tracked_payload[rel] = {"exists": False}
             continue
-        st = file_path.stat()
-        tracked_payload[rel] = {
-            "exists": True,
-            "size": int(st.st_size),
-            "mtime_ns": int(st.st_mtime_ns),
-        }
+        tracked_payload[rel] = _collect_file_signature(file_path)
     signature["tracked"] = tracked_payload
     return signature
 
@@ -232,8 +275,8 @@ def try_load_feature_cache(
     if str(metadata.get("cache_key")) != str(cache_key):
         return None, None, cache_dir
     if str(metadata.get("signature_hash")) != str(expected_signature_hash):
-        # 中文：签名不一致一律视为 cache miss，而不是“尽量复用”。
-        # 否则最危险的情况是模型/数据/参数已变，但旧特征还被静默拿来继续训练。
+        # Signature drift must be treated as a hard miss, never as a best-effort reuse.
+        # 签名不一致必须视为硬 miss，绝不能“尽量复用”旧特征继续训练。
         return None, None, cache_dir
 
     try:
@@ -247,6 +290,60 @@ def try_load_feature_cache(
     except Exception:  # noqa: BLE001
         return None, None, cache_dir
     return payload, metadata, cache_dir
+
+
+def _load_cache_metadata(meta_path: Path) -> dict[str, Any] | None:
+    """Load one cache metadata file defensively."""
+    try:
+        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    return metadata if isinstance(metadata, dict) else None
+
+
+def _load_cache_payload(payload_path: Path, torch_module: Any) -> Any | None:
+    """Load one cache payload defensively on CPU."""
+    try:
+        load_kwargs: dict[str, Any] = {"map_location": "cpu"}
+        load_sig = inspect.signature(torch_module.load)
+        if "weights_only" in load_sig.parameters:
+            load_kwargs["weights_only"] = True
+        return torch_module.load(str(payload_path), **load_kwargs)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _cache_entry_matches_signature(
+    *,
+    payload_path: Path,
+    meta_path: Path,
+    cache_key: str,
+    signature_hash: str,
+    torch_module: Any,
+) -> bool:
+    """Return whether one on-disk cache entry is both readable and signature-compatible."""
+    if not payload_path.exists() or not meta_path.exists():
+        return False
+    metadata = _load_cache_metadata(meta_path)
+    if metadata is None:
+        return False
+    if str(metadata.get("schema_version")) != FEATURE_CACHE_SCHEMA_VERSION:
+        return False
+    if str(metadata.get("cache_key")) != str(cache_key):
+        return False
+    if str(metadata.get("signature_hash")) != str(signature_hash):
+        return False
+    payload = _load_cache_payload(payload_path, torch_module)
+    return payload is not None
+
+
+def _purge_cache_entry_files(payload_path: Path, meta_path: Path) -> None:
+    """Best-effort removal of stale or corrupt cache files before rewrite."""
+    for path in (payload_path, meta_path):
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def save_feature_cache(
@@ -268,15 +365,23 @@ def save_feature_cache(
     lock_path = cache_dir / ".write.lock"
 
     with _exclusive_lock(lock_path=lock_path, timeout_sec=float(lock_timeout_sec)):
-        # 中文：拿到锁之后还要再检查一次，因为等待锁期间可能已有别的进程写完。
-        if payload_path.exists() and meta_path.exists():
+        # Re-check after the lock because another writer may have finished while we were waiting.
+        # 拿到锁之后还要再检查一次，因为等待锁期间可能已有别的进程写完。
+        if _cache_entry_matches_signature(
+            payload_path=payload_path,
+            meta_path=meta_path,
+            cache_key=str(cache_key),
+            signature_hash=str(signature_hash),
+            torch_module=torch_module,
+        ):
             return cache_dir
+        _purge_cache_entry_files(payload_path, meta_path)
 
         tmp_payload = cache_dir / f"payload.pt.tmp.{os.getpid()}.{uuid.uuid4().hex}"
         tmp_meta = cache_dir / f"meta.json.tmp.{os.getpid()}.{uuid.uuid4().hex}"
 
-        # 中文：统一转到 CPU 再落盘，避免把设备绑定的 GPU tensor 直接序列化进去。
-        # 否则换卡、换进程甚至无 GPU 环境下读 cache 都容易出现兼容问题。
+        # Always serialize CPU tensors so cache files stay portable across devices and processes.
+        # 统一转到 CPU 再落盘，避免 cache 文件绑定某块 GPU 或某个进程环境。
         payload_cpu = move_tensors_to_device(payload, torch_module.device("cpu"), torch_module)
         torch_module.save(payload_cpu, str(tmp_payload))
 
@@ -290,8 +395,8 @@ def save_feature_cache(
         }
         tmp_meta.write_text(json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
-        # 中文：必须先写临时文件，再用 os.replace 原子替换。
-        # 这样即便中途崩溃，也只会留下旧版本，不会留下半截 payload/meta。
+        # Write temp files first, then atomically swap them into place.
+        # 必须先写临时文件，再用原子替换，避免中途崩溃留下半截 payload/meta。
         os.replace(tmp_payload, payload_path)
         os.replace(tmp_meta, meta_path)
     return cache_dir
@@ -306,11 +411,31 @@ def _exclusive_lock(*, lock_path: Path, timeout_sec: float, poll_interval_sec: f
     while True:
         try:
             fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, f"pid={os.getpid()}\n".encode("utf-8"))
+            os.write(
+                fd,
+                (
+                    f"pid={os.getpid()}\n"
+                    f"created_at={datetime.now(timezone.utc).isoformat()}\n"
+                ).encode("utf-8"),
+            )
             break
         except FileExistsError:
-            # 中文：这里只做朴素轮询锁，不尝试更复杂的跨平台文件锁库。
-            # 原因是我们的 cache 写入时长短、并发模式简单，O_EXCL 足够稳健。
+            # A simple polling lock is enough here because writes are short and concurrency is low.
+            # 这里只做朴素轮询锁，因为 cache 写入时间短、并发模式简单，O_EXCL 已足够稳健。
+            try:
+                age_sec = max(0.0, time.time() - lock_path.stat().st_mtime)
+            except FileNotFoundError:
+                continue
+            if age_sec >= float(timeout_sec):
+                # Recover from abandoned lock files left by crashed writers.
+                # 如果旧进程崩溃遗留锁文件，就在超时阈值后清理它，避免后续 run 永久卡死。
+                try:
+                    lock_path.unlink()
+                    continue
+                except FileNotFoundError:
+                    continue
+                except Exception:  # noqa: BLE001
+                    pass
             if (time.time() - started) >= float(timeout_sec):
                 raise TimeoutError(f"Timed out waiting feature-cache lock: {lock_path}")
             time.sleep(float(poll_interval_sec))
@@ -330,8 +455,8 @@ def _exclusive_lock(*, lock_path: Path, timeout_sec: float, poll_interval_sec: f
 
 def move_tensors_to_device(payload: Any, device: Any, torch_module: Any) -> Any:
     """Recursively move tensor leaves in one nested payload to `device`."""
-    # 中文：cache payload 常常是“tensor + dict/list/tuple”混合嵌套结构，
-    # 所以这里做递归搬运，保证保存/加载前后的设备语义一致。
+    # Cache payloads are usually nested tensor/container mixtures, so device moves must recurse.
+    # cache payload 往往是 tensor 与容器混合嵌套，因此设备迁移必须递归处理。
     if torch_module.is_tensor(payload):
         return payload.to(device)
     if isinstance(payload, dict):
