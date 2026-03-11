@@ -81,7 +81,78 @@ def _count_parquet(path: Path) -> int:
         import pyarrow.parquet as pq
         return pq.read_table(path).num_rows
     except Exception:
-        return -1
+        try:
+            import duckdb
+
+            conn = duckdb.connect(database=":memory:")
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM read_parquet(?)",
+                    [str(path)],
+                ).fetchone()
+            finally:
+                conn.close()
+            return int(row[0]) if row is not None else -1
+        except Exception:
+            return -1
+
+
+def _read_parquet_preview(path: Path, *, limit: int = 1) -> dict[str, Any]:
+    """Read basic parquet metadata with a duckdb fallback for mixed pyarrow installs."""
+    try:
+        import pyarrow.parquet as pq
+
+        pf = pq.ParquetFile(path)
+        columns = list(pf.schema.names)
+        row_count = int(pf.metadata.num_rows)
+        preview_rows: list[dict[str, Any]] = []
+        if limit > 0 and row_count > 0:
+            table = pq.read_table(path).slice(0, int(limit))
+            preview_rows = table.to_pylist()
+        return {
+            "reader": "pyarrow",
+            "columns": columns,
+            "row_count": row_count,
+            "rows": preview_rows,
+        }
+    except Exception:
+        import duckdb
+
+        conn = duckdb.connect(database=":memory:")
+        try:
+            columns = [
+                str(row[0])
+                for row in conn.execute(
+                    "DESCRIBE SELECT * FROM read_parquet(?)",
+                    [str(path)],
+                ).fetchall()
+            ]
+            row_count_row = conn.execute(
+                "SELECT COUNT(*) FROM read_parquet(?)",
+                [str(path)],
+            ).fetchone()
+            preview_rows: list[dict[str, Any]] = []
+            if int(limit) > 0:
+                preview = conn.execute(
+                    f"SELECT * FROM read_parquet(?) LIMIT {int(limit)}",
+                    [str(path)],
+                )
+                preview_columns = [str(item[0]) for item in (preview.description or [])]
+                preview_rows = [
+                    {
+                        key: value
+                        for key, value in zip(preview_columns, row, strict=True)
+                    }
+                    for row in preview.fetchall()
+                ]
+        finally:
+            conn.close()
+        return {
+            "reader": "duckdb",
+            "columns": columns,
+            "row_count": int(row_count_row[0]) if row_count_row is not None else -1,
+            "rows": preview_rows,
+        }
 
 
 def _find_files(directory: Path, suffixes: tuple) -> list[Path]:
@@ -322,12 +393,12 @@ def verify_math_step_dpo() -> VerifyResult:
     fp = files[0]
     try:
         if fp.suffix == ".parquet":
-            import pyarrow.parquet as pq
-            table = pq.read_table(fp)
-            r.stat("columns", list(table.schema.names))
-            r.stat("row_count", table.num_rows)
+            preview = _read_parquet_preview(fp, limit=1)
+            r.stat("reader", preview["reader"])
+            r.stat("columns", preview["columns"])
+            r.stat("row_count", preview["row_count"])
             # Check for key fields
-            cols = table.schema.names
+            cols = list(preview["columns"])
             if "wrong_step" in cols:
                 r.stat("format", "xinlai_step_dpo (wrong_step column present)")
             elif "chosen" in cols and "rejected" in cols:
@@ -385,9 +456,9 @@ def verify_math_aps() -> VerifyResult:
         fp = files[0]
         try:
             if fp.suffix == ".parquet":
-                import pyarrow.parquet as pq
-                schema_names = pq.read_schema(fp).names
-                r.stat("columns", schema_names)
+                preview = _read_parquet_preview(fp, limit=0)
+                r.stat("reader", preview["reader"])
+                r.stat("columns", preview["columns"])
             elif fp.suffix == ".jsonl":
                 head = _load_jsonl_head(fp, 1)
                 if head:
@@ -424,15 +495,18 @@ def verify_eurus_prm() -> VerifyResult:
     fp = files[0]
     try:
         if fp.suffix == ".parquet":
-            import pyarrow.parquet as pq
-            table = pq.read_table(fp, columns=None)
-            r.stat("columns", list(table.schema.names))
-            r.stat("row_count", table.num_rows)
+            preview = _read_parquet_preview(fp, limit=1)
+            r.stat("reader", preview["reader"])
+            r.stat("columns", preview["columns"])
+            r.stat("row_count", preview["row_count"])
             # Check for Step K: format in text fields
-            text_cols = [c for c in table.schema.names if "text" in c.lower() or "content" in c.lower() or "response" in c.lower()]
+            text_cols = [
+                c for c in preview["columns"] if "text" in c.lower() or "content" in c.lower() or "response" in c.lower()
+            ]
             if text_cols:
-                col = table.column(text_cols[0])
-                sample = str(col[0].as_py())[:200]
+                sample = ""
+                if preview["rows"]:
+                    sample = str(preview["rows"][0].get(text_cols[0], ""))[:200]
                 has_step_fmt = "Step " in sample
                 r.stat("has_step_format", has_step_fmt)
         elif fp.suffix == ".jsonl":
@@ -471,9 +545,9 @@ def verify_ultrainteract() -> VerifyResult:
     fp = files[0]
     try:
         if fp.suffix == ".parquet":
-            import pyarrow.parquet as pq
-            schema_names = pq.read_schema(fp).names
-            r.stat("columns", schema_names)
+            preview = _read_parquet_preview(fp, limit=0)
+            r.stat("reader", preview["reader"])
+            r.stat("columns", preview["columns"])
             cnt = _count_parquet(fp)
             r.stat("row_count_first_file", cnt)
         elif fp.suffix == ".jsonl":
@@ -515,10 +589,10 @@ def verify_genprm_math() -> VerifyResult:
     fp = files[0]
     try:
         if fp.suffix == ".parquet":
-            import pyarrow.parquet as pq
-            table = pq.read_table(fp)
-            r.stat("columns", list(table.schema.names))
-            r.stat("row_count", table.num_rows)
+            preview = _read_parquet_preview(fp, limit=0)
+            r.stat("reader", preview["reader"])
+            r.stat("columns", preview["columns"])
+            r.stat("row_count", preview["row_count"])
         elif fp.suffix == ".jsonl":
             head = _load_jsonl_head(fp, 2)
             if head:
@@ -554,11 +628,11 @@ def verify_trl_prm800k() -> VerifyResult:
     fp = files[0]
     try:
         if fp.suffix == ".parquet":
-            import pyarrow.parquet as pq
-            table = pq.read_table(fp)
-            cols = list(table.schema.names)
+            preview = _read_parquet_preview(fp, limit=0)
+            cols = list(preview["columns"])
+            r.stat("reader", preview["reader"])
             r.stat("columns", cols)
-            r.stat("row_count", table.num_rows)
+            r.stat("row_count", preview["row_count"])
             if "prompt" in cols and "completions" in cols and "labels" in cols:
                 r.stat("trl_format_check", "PASS — has prompt/completions/labels")
             else:

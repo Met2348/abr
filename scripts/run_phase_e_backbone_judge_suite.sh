@@ -46,6 +46,10 @@ FROZEN_EPOCHS="${FROZEN_EPOCHS:-4}"
 FROZEN_TRAIN_BATCH="${FROZEN_TRAIN_BATCH:-64}"
 FROZEN_EVAL_BATCH="${FROZEN_EVAL_BATCH:-96}"
 FROZEN_LR="${FROZEN_LR:-3e-5}"
+RECIPE_RISK_POLICY="${RECIPE_RISK_POLICY:-error}"
+FROZEN_RANKING_TARGET_SPACE="${FROZEN_RANKING_TARGET_SPACE:-score}"
+FROZEN_PAIR_WEIGHT_MODE="${FROZEN_PAIR_WEIGHT_MODE:-none}"
+FROZEN_CHECKPOINT_SELECTION_METRIC="${FROZEN_CHECKPOINT_SELECTION_METRIC:-pair_acc}"
 # Default frozen runs to no-cache because stale Phase E feature caches can
 # silently poison small pilots with non-finite pooled features.
 # frozen 默认关缓存，因为旧的 Phase E feature cache 可能静默污染小规模 pilot，
@@ -59,6 +63,9 @@ LORA_EVAL_BATCH="${LORA_EVAL_BATCH:-8}"
 LORA_GRAD_ACCUM="${LORA_GRAD_ACCUM:-16}"
 LORA_LR="${LORA_LR:-2e-5}"
 LORA_MAX_LENGTH="${LORA_MAX_LENGTH:-768}"
+LORA_RANKING_TARGET_SPACE="${LORA_RANKING_TARGET_SPACE:-score}"
+LORA_PAIR_WEIGHT_MODE="${LORA_PAIR_WEIGHT_MODE:-none}"
+LORA_CHECKPOINT_SELECTION_METRIC="${LORA_CHECKPOINT_SELECTION_METRIC:-pair_acc}"
 # LoRA training can use a shorter max length for memory, but benchmark-facing
 # evaluation should stay on the longer budget unless truncation diagnostics say otherwise.
 # LoRA 训练时可以为了显存用更短上下文，但 benchmark 评测默认应保持更长预算，
@@ -178,11 +185,12 @@ train_frozen_case() {
     --lambda-ranking 1.0 \
     --lambda-bce 1.0 \
     --ranking-margin 0.02 \
-    --ranking-target-space logit \
-    --pair-weight-mode confidence_semantic \
+    --ranking-target-space "$FROZEN_RANKING_TARGET_SPACE" \
+    --pair-weight-mode "$FROZEN_PAIR_WEIGHT_MODE" \
     --source-balance none \
     --permutation-mode stable_hash \
-    --checkpoint-selection-metric ranking_score \
+    --checkpoint-selection-metric "$FROZEN_CHECKPOINT_SELECTION_METRIC" \
+    --recipe-risk-policy "$RECIPE_RISK_POLICY" \
     --head-architecture "$FROZEN_HEAD_ARCH" \
     --head-mlp-hidden-size 1024 \
     --head-dropout-prob 0.05 \
@@ -217,11 +225,12 @@ train_lora_case() {
     --lambda-ranking 1.0 \
     --lambda-bce 1.0 \
     --ranking-margin 0.02 \
-    --ranking-target-space logit \
-    --pair-weight-mode confidence_semantic \
+    --ranking-target-space "$LORA_RANKING_TARGET_SPACE" \
+    --pair-weight-mode "$LORA_PAIR_WEIGHT_MODE" \
     --source-balance none \
     --permutation-mode stable_hash \
-    --checkpoint-selection-metric ranking_score \
+    --checkpoint-selection-metric "$LORA_CHECKPOINT_SELECTION_METRIC" \
+    --recipe-risk-policy "$RECIPE_RISK_POLICY" \
     --head-architecture "$LORA_HEAD_ARCH" \
     --head-mlp-hidden-size 1024 \
     --head-dropout-prob 0.05 \

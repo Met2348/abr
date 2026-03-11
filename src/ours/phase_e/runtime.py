@@ -154,6 +154,151 @@ def attach_peft_adapter_for_inference(model: Any, adapter_path: Path):
     return PeftModel.from_pretrained(model, str(adapter_path))
 
 
+def apply_lora_to_backbone(
+    *,
+    backbone: Any,
+    lora_rank: int,
+    lora_alpha: float,
+    target_modules: list[str] | None = None,
+    num_top_layers: int | None = None,
+    lora_dropout: float = 0.05,
+) -> Any:
+    """Apply LoRA adapters to a Phase E backbone using PEFT.
+
+    English
+    -------
+    This function wraps the backbone with trainable LoRA layers.  After this
+    call the backbone is **no longer frozen**: the LoRA `A` and `B` matrices
+    are enabled for gradient computation while all original backbone weights
+    remain frozen.
+
+    The typical use-case is to call this function immediately after
+    `load_backbone_and_tokenizer`, then rebuild the optimizer to include both
+    value-head parameters and backbone LoRA parameters.
+
+    中文
+    ----
+    调用此函数后，backbone 不再完全冻结：LoRA A/B 矩阵可以接收梯度，
+    而原始 backbone 权重仍然被锁定。
+    通常在 `load_backbone_and_tokenizer` 之后立即调用，然后重建优化器，
+    同时包含 value head 参数和 backbone LoRA 参数。
+
+    Parameters
+    ----------
+    backbone:
+        A loaded HuggingFace model (output of `load_backbone_and_tokenizer`).
+    lora_rank:
+        LoRA rank `r`.  Larger rank = more capacity but more memory.
+        Typical: 8–32 for small GPUs, 64–128 for full fine-tuning.
+    lora_alpha:
+        LoRA scaling factor.  Effective scale = lora_alpha / lora_rank.
+        Commonly set to lora_rank (scale=1.0) or 2*lora_rank (scale=2.0).
+    target_modules:
+        List of module name patterns to apply LoRA to.  If None, defaults
+        to ["q_proj", "v_proj"] which is safe and memory-efficient for
+        Qwen2.5 / LLaMA-style architectures.
+    num_top_layers:
+        If set, only the top-N transformer layers receive LoRA adapters.
+        Useful when GPU memory is tight: attaching LoRA to all 28 layers
+        of Qwen2.5-7B requires ~1.5 GB extra; attaching to top 8 layers
+        requires ~430 MB.
+    lora_dropout:
+        Dropout applied inside LoRA adapters during training.  Default 0.05.
+    """
+    try:
+        from peft import LoraConfig, get_peft_model, TaskType  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "peft is required for LoRA training.  Install with: pip install peft>=0.10"
+        ) from exc
+
+    if lora_rank <= 0:
+        raise ValueError(f"lora_rank must be > 0, got {lora_rank}")
+    if lora_alpha <= 0.0:
+        raise ValueError(f"lora_alpha must be > 0, got {lora_alpha}")
+
+    # Default target modules for Qwen2.5 / LLaMA-style architectures.
+    # q_proj + v_proj is the minimum effective set (Hu et al. 2021 LoRA paper).
+    resolved_target_modules = target_modules if target_modules is not None else ["q_proj", "v_proj"]
+
+    # Build layer-selection filter if num_top_layers is specified.
+    # Qwen2.5-7B has 28 layers (model.layers[0..27]).  "Top" means closest to
+    # the output (highest indices), since those layers produce the most
+    # task-relevant representations for a value head.
+    layers_to_transform: list[int] | None = None
+    if num_top_layers is not None and num_top_layers > 0:
+        # Try to infer total layer count from the backbone config.
+        num_layers = getattr(getattr(backbone, "config", None), "num_hidden_layers", None)
+        if num_layers is None:
+            # Fall back: count children named "layers"
+            try:
+                layers_obj = backbone.model.layers  # type: ignore
+                num_layers = len(layers_obj)
+            except AttributeError:
+                num_layers = 32  # conservative default
+
+        start = max(0, int(num_layers) - int(num_top_layers))
+        layers_to_transform = list(range(start, int(num_layers)))
+
+    lora_config = LoraConfig(
+        task_type=TaskType.CAUSAL_LM,
+        r=int(lora_rank),
+        lora_alpha=float(lora_alpha),
+        target_modules=resolved_target_modules,
+        lora_dropout=float(lora_dropout),
+        bias="none",
+        layers_to_transform=layers_to_transform,
+    )
+
+    backbone = get_peft_model(backbone, lora_config)
+
+    # After get_peft_model the model is in train mode.  Only LoRA layers should
+    # receive gradients; everything else stays frozen.
+    for name, param in backbone.named_parameters():
+        if "lora_" in name:
+            param.requires_grad_(True)
+        else:
+            param.requires_grad_(False)
+
+    # Enable gradient checkpointing to avoid storing all intermediate activations.
+    # Without this, LoRA backprop through a 7B model at batch=4 seq=1024 easily
+    # exceeds 60 GB VRAM.  Gradient checkpointing trades ~30% extra compute for
+    # ~4-5× activation memory reduction, making LoRA feasible on A100-80GB.
+    #
+    # 开启梯度检查点，避免在反向传播时存储全部中间激活值。
+    # 不开的话，batch=4 seq=1024 下对 7B 模型做 LoRA 反传，激活内存超过 60 GB。
+    # 开启后以约 30% 额外计算换取 ~4-5 倍激活内存节省，让 A100-80G 能够运行 LoRA。
+    try:
+        # `enable_input_require_grads` ensures gradients flow into the first module.
+        # Required by PEFT's gradient checkpointing integration.
+        backbone.enable_input_require_grads()
+    except AttributeError:
+        # Some PEFT model wrappers may not have this; safe to skip.
+        pass
+    try:
+        backbone.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+    except (AttributeError, TypeError):
+        # Older transformers or models that do not support kwargs form.
+        try:
+            backbone.gradient_checkpointing_enable()
+        except AttributeError:
+            print("[LoRA][WARNING] Could not enable gradient checkpointing — may OOM on large batches")
+
+    # Print trainable parameter summary.
+    trainable = sum(p.numel() for p in backbone.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in backbone.parameters())
+    print(
+        f"[LoRA] Applied LoRA (rank={lora_rank}, alpha={lora_alpha}, "
+        f"modules={resolved_target_modules}, top_layers={num_top_layers}). "
+        f"Trainable backbone params: {trainable:,} / {total:,} "
+        f"({100.0 * trainable / total:.3f}%) | gradient_checkpointing=enabled"
+    )
+
+    return backbone
+
+
 def load_backbone_and_tokenizer(
     *,
     model_path: str,
@@ -392,16 +537,21 @@ def encode_texts_batched_oom_safe(
                 max_length=int(max_length),
                 torch_module=torch_module,
             )
+            # Force async CUDA kernel failures to surface inside this try block.
+            # 让异步 CUDA 错误在当前 try 块里暴露，避免后面的 `.cpu()` 才把真正的
+            # 容量问题或 kernel failure 报成更难读的泛化错误。
+            if torch_module.cuda.is_available():
+                torch_module.cuda.synchronize()
         except RuntimeError as exc:
             # Retry the same slice with a smaller batch on OOM instead of dropping data silently.
             # 遇到 OOM 就缩小 batch 重试同一段文本，绝不通过静默丢样本来“绕过”错误。
-            if "out of memory" not in str(exc).lower() or effective_bs <= 1:
+            if not _is_retryable_cuda_capacity_error(exc) or effective_bs <= 1:
                 raise
             if torch_module.cuda.is_available():
                 torch_module.cuda.empty_cache()
             current_batch_size = max(1, effective_bs // 2)
             print(
-                f"{log_prefix:16}: OOM backoff -> batch_size={current_batch_size}",
+                f"{log_prefix:16}: capacity backoff ({type(exc).__name__}) -> batch_size={current_batch_size}",
                 flush=True,
             )
             continue
@@ -421,6 +571,43 @@ def encode_texts_batched_oom_safe(
             )
     print(f"{log_prefix:16}: done", flush=True)
     return torch_module.cat(outputs, dim=0)
+
+
+def _is_retryable_cuda_capacity_error(exc: RuntimeError) -> bool:
+    """Return whether one encode-time CUDA failure should trigger batch backoff.
+
+    English
+    -------
+    In practice, long batched forwards can surface memory pressure in more than
+    one textual form:
+    1. the normal `CUDA out of memory`,
+    2. allocator-style failures such as `CUBLAS_STATUS_ALLOC_FAILED`,
+    3. or a later `device-side assert triggered` when an async kernel failure is
+       first synchronized on a subsequent CUDA call.
+
+    We only use this relaxed retry rule inside the frozen-feature encoding path.
+    The follow-up retry still encodes the exact same texts with a smaller batch,
+    so it does not silently drop data or alter semantics.
+
+    中文
+    ----
+    实际上，长批次前向的显存压力不一定总是以同一种报错字符串出现：
+    1. 常见的 `CUDA out of memory`，
+    2. 分配器类失败，如 `CUBLAS_STATUS_ALLOC_FAILED`，
+    3. 以及异步 kernel 在后续同步点才暴露成 `device-side assert triggered`。
+
+    这里放宽重试规则，只用于冻结特征编码路径。
+    后续 retry 仍然编码同一批文本，只是缩小 batch，不会静默丢样本或改变监督语义。
+    """
+    message = str(exc).lower()
+    return any(
+        token in message
+        for token in (
+            "out of memory",
+            "cublas_status_alloc_failed",
+            "device-side assert triggered",
+        )
+    )
 
 
 def score_feature_tensor(
@@ -529,41 +716,80 @@ def stable_hash_order(values: list[int], *, ids: list[str]) -> list[int]:
     )
 
 
+def resolve_checkpoint_resolution(
+    *,
+    value_run_dir: Path,
+    run_manifest: dict[str, Any],
+    checkpoint_name: str,
+    checkpoint_missing_policy: str = "fail",
+) -> dict[str, Any]:
+    """Resolve checkpoint path from one Phase E run manifest with explicit policy.
+
+    中文
+    ----
+    这里不再把 `best -> final` 当成理所当然的隐式行为。
+    默认策略应该是 `fail`，因为研究者请求 `best` 却评到了 `final`
+    会直接污染实验结论。只有显式允许时，才做回退。
+    """
+    files = dict(run_manifest.get("output_files", {}))
+    requested = str(checkpoint_name).strip().lower()
+    if requested not in {"best", "final"}:
+        raise ValueError(f"Unsupported checkpoint_name: {checkpoint_name!r}")
+    requested_path_text = str(files.get("best_value_head" if requested == "best" else "final_value_head") or "").strip()
+    final_path_text = str(files.get("final_value_head") or "").strip()
+    best_path = Path(requested_path_text) if requested == "best" and requested_path_text else None
+    final_path = Path(final_path_text) if final_path_text else None
+    resolved_checkpoint_name = requested
+    fallback_to_final = False
+
+    checkpoint_missing_policy = str(checkpoint_missing_policy).strip().lower()
+    if checkpoint_missing_policy not in {"fail", "fallback_final"}:
+        checkpoint_missing_policy = "fail"
+
+    if requested == "best":
+        if best_path is not None and best_path.exists():
+            resolved_path = best_path
+        elif checkpoint_missing_policy == "fallback_final" and final_path is not None and final_path.exists():
+            print(
+                "checkpoint_resolve: requested=best but best_value_head missing; "
+                f"falling back to final checkpoint at {final_path}",
+                flush=True,
+            )
+            resolved_path = final_path
+            resolved_checkpoint_name = "final"
+            fallback_to_final = True
+        else:
+            raise FileNotFoundError(
+                f"Requested checkpoint=best but best_value_head missing under {value_run_dir}; "
+                "rerun with explicit checkpoint-missing-policy=fallback_final only for legacy diagnostics."
+            )
+    else:
+        if final_path is None or not final_path.exists():
+            raise FileNotFoundError(f"Requested checkpoint=final but file missing in {value_run_dir}")
+        resolved_path = final_path
+
+    return {
+        "requested_checkpoint_name": requested,
+        "requested_checkpoint_path": requested_path_text,
+        "resolved_checkpoint_name": resolved_checkpoint_name,
+        "resolved_checkpoint_path": str(resolved_path),
+        "fallback_to_final": bool(fallback_to_final),
+        "checkpoint_missing_policy": checkpoint_missing_policy,
+    }
+
+
 def resolve_checkpoint_path(
     *,
     value_run_dir: Path,
     run_manifest: dict[str, Any],
     checkpoint_name: str,
+    checkpoint_missing_policy: str = "fail",
 ) -> Path:
-    """Resolve checkpoint path from one Phase E run manifest."""
-    files = dict(run_manifest.get("output_files", {}))
-    if checkpoint_name == "best":
-        best_path = files.get("best_value_head")
-        if isinstance(best_path, str) and best_path.strip():
-            path = Path(best_path)
-            if path.exists():
-                return path
-        # RISK WARNING:
-        # This fallback keeps older/incomplete runs evaluable, but it also means
-        # a caller asking for "best" may silently evaluate `final_value_head`
-        # instead.  That can invalidate experiment claims unless the resolved
-        # checkpoint path is surfaced explicitly in logs/reports.
-        final_path = files.get("final_value_head")
-        if isinstance(final_path, str) and final_path.strip():
-            path = Path(final_path)
-            if path.exists():
-                print(
-                    "checkpoint_resolve: requested=best but best_value_head missing; "
-                    f"falling back to final checkpoint at {path}",
-                    flush=True,
-                )
-                return path
-        raise FileNotFoundError(
-            f"Neither best nor final value-head checkpoint found under manifest: {value_run_dir}"
-        )
-    final_path = files.get("final_value_head")
-    if isinstance(final_path, str) and final_path.strip():
-        path = Path(final_path)
-        if path.exists():
-            return path
-    raise FileNotFoundError(f"Requested checkpoint=final but file missing in {value_run_dir}")
+    """Backward-compatible wrapper that returns only the resolved checkpoint path."""
+    resolution = resolve_checkpoint_resolution(
+        value_run_dir=value_run_dir,
+        run_manifest=run_manifest,
+        checkpoint_name=checkpoint_name,
+        checkpoint_missing_policy=checkpoint_missing_policy,
+    )
+    return Path(str(resolution["resolved_checkpoint_path"]))

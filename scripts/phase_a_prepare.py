@@ -375,12 +375,22 @@ def _prepare_one_dataset(
     }
 
     split_counts = {"train": 0, "validation": 0, "test": 0}
+    resolved_source_split_counts: dict[str, int] = {}
     try:
         for sample in samples:
+            # loader 可能会把请求 split 规范化到真正存在的 split。
+            # the loader may normalize the requested split to the actual split
+            # available in the dataset snapshot.
+            effective_source_split = str(
+                (sample.metadata or {}).get("source_split", source_split)
+            ).strip() or str(source_split)
+            resolved_source_split_counts[effective_source_split] = (
+                int(resolved_source_split_counts.get(effective_source_split, 0)) + 1
+            )
             # official: 全部样本保留在 source_split 对应桶；
             # hash: 由 sample_id + seed 稳定映射到 train/validation/test。
             if split_policy == "official":
-                target_split = source_split
+                target_split = effective_source_split
             else:
                 target_split = assign_split(sample.id, split_cfg)
 
@@ -395,7 +405,10 @@ def _prepare_one_dataset(
                 target_style=target_style,
                 template_id=template_id,
                 template_version=template_version,
-                extra_metadata={"source_split": source_split},
+                extra_metadata={
+                    "source_split": effective_source_split,
+                    "requested_source_split": source_split,
+                },
             )
             _write_jsonl(writers[target_split], prepared.to_dict())
             split_counts[target_split] += 1
@@ -409,6 +422,8 @@ def _prepare_one_dataset(
     summary = {
         "dataset": dataset,
         "source_split": source_split,
+        "requested_source_split": source_split,
+        "effective_source_splits": resolved_source_split_counts,
         "split_policy": split_policy,
         "n_total": n_total,
         "split_counts": split_counts,

@@ -164,3 +164,49 @@ def test_main_selects_best_group_across_repeated_suite_log_dirs(tmp_path: Path) 
     payload = json.loads(report_path.read_text(encoding="utf-8"))
     assert payload["selected_group"]["group_id"] == "E41_MS_ACC90_MLP_RANK_SEED3"
     assert len(payload["group_summaries"]) == 3
+
+
+def test_main_resolves_best_checkpoint_path_to_final_when_best_missing(tmp_path: Path) -> None:
+    module = _load_selector_module()
+    first = _write_suite_log_dir(
+        root=tmp_path,
+        group_id="E41_MS_ACC90_MLP_RANK_SEED3",
+        group_title="E41",
+        pair_acc=0.96,
+        auc=0.89,
+        ranking_score=0.93,
+    )
+    fake_run = first / "fake_run"
+    fake_run.mkdir(parents=True, exist_ok=True)
+    final_path = fake_run / "final_value_head.pt"
+    final_path.write_text("final\n", encoding="utf-8")
+    (fake_run / "manifest.json").write_text(
+        json.dumps(
+            {
+                "output_files": {
+                    "best_value_head": str(fake_run / "best_value_head.pt"),
+                    "final_value_head": str(final_path),
+                }
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output_root = tmp_path / "candidates"
+
+    exit_code = module.main(
+        [
+            "--run-name",
+            "candidate_checkpoint_resolution",
+            "--output-root",
+            str(output_root),
+            "--suite-log-dirs",
+            str(first),
+        ]
+    )
+
+    assert exit_code == 0
+    report_path = output_root / "candidate_checkpoint_resolution" / "candidate_report.json"
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert payload["selected_group"]["best_checkpoint_path"].endswith("final_value_head.pt")

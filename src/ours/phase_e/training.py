@@ -679,6 +679,217 @@ def build_pair_feature_cache(
     }
 
 
+def build_pair_tokenized_cache(
+    *,
+    pairs: list[ExternalPairRecord],
+    tokenizer: Any,
+    max_length: int,
+    pair_weight_mode: str,
+    torch_module: Any,
+) -> dict[str, Any]:
+    """Tokenize chosen/rejected texts and store raw input_ids for LoRA training.
+
+    English
+    -------
+    This is the LoRA-mode alternative to `build_pair_feature_cache`.  Instead of
+    running backbone forward passes up-front and caching feature vectors, we only
+    tokenize the texts and store the raw integer token tensors.
+
+    During LoRA training the backbone forward is executed per mini-batch with
+    gradient tracking enabled, so pre-cached features would be stale after any
+    LoRA weight update.
+
+    Returned dict keys:
+    - ``chosen_input_ids``       [N, max_length] int64 CPU tensor
+    - ``chosen_attention_mask``  [N, max_length] int64 CPU tensor
+    - ``rejected_input_ids``     [N, max_length] int64 CPU tensor
+    - ``rejected_attention_mask``[N, max_length] int64 CPU tensor
+    - ``pair_weights``           [N] float32 CPU tensor
+    - ``local_route_weights``    [N] float32 CPU tensor
+    - ``terminal_route_weights`` [N] float32 CPU tensor
+    - ``pair_ids``               list[str]
+    - ``source_tags``            list[str]
+    - ``num_pairs``              int
+
+    中文
+    ----
+    LoRA 模式下，backbone 权重在训练过程中会不断更新，预先缓存的特征会立刻过时。
+    这个函数只做 tokenization，存储原始的 input_ids，
+    供后续每个 mini-batch 用当前的 backbone 实时编码。
+    """
+    chosen_texts = [pair.chosen_input_text() for pair in pairs]
+    rejected_texts = [pair.rejected_input_text() for pair in pairs]
+
+    def _tokenize_texts(texts: list[str]) -> tuple[Any, Any]:
+        """Tokenize a list of texts → (input_ids, attention_mask) on CPU."""
+        enc = tokenizer(
+            texts,
+            return_tensors="pt",
+            padding="max_length",
+            truncation=True,
+            max_length=int(max_length),
+        )
+        return enc["input_ids"].cpu(), enc["attention_mask"].cpu()
+
+    chosen_ids, chosen_mask = _tokenize_texts(chosen_texts)
+    rejected_ids, rejected_mask = _tokenize_texts(rejected_texts)
+
+    # Build pair weights using existing helper (same logic as feature cache).
+    if pair_weight_mode not in {
+        "none",
+        "confidence",
+        "semantic",
+        "confidence_semantic",
+        "verdict_balance",
+        "confidence_verdict_balance",
+        "group_balance",
+        "confidence_group_balance",
+    }:
+        raise ValueError(f"Unsupported pair_weight_mode: {pair_weight_mode!r}")
+
+    verdict_counts: dict[str, int] = {}
+    if pair_weight_mode in {"verdict_balance", "confidence_verdict_balance"}:
+        for pair in pairs:
+            verdict = str((pair.metadata or {}).get("chosen_verdict", "")).strip().lower()
+            if verdict:
+                verdict_counts[verdict] = verdict_counts.get(verdict, 0) + 1
+
+    group_counts: dict[str, int] = {}
+    if pair_weight_mode in {"group_balance", "confidence_group_balance"}:
+        for pair in pairs:
+            group_label = _resolve_pair_balance_group_label(pair)
+            group_counts[group_label] = group_counts.get(group_label, 0) + 1
+
+    weights = compute_pair_weights(
+        pairs=pairs,
+        pair_weight_mode=pair_weight_mode,
+        verdict_counts=verdict_counts,
+        group_counts=group_counts,
+    )
+    local_route_weights, terminal_route_weights = compute_pair_route_weights(pairs=pairs)
+
+    return {
+        "chosen_input_ids": chosen_ids,
+        "chosen_attention_mask": chosen_mask,
+        "rejected_input_ids": rejected_ids,
+        "rejected_attention_mask": rejected_mask,
+        "pair_weights": torch_module.tensor(weights, dtype=torch_module.float32),
+        "local_route_weights": torch_module.tensor(local_route_weights, dtype=torch_module.float32),
+        "terminal_route_weights": torch_module.tensor(
+            terminal_route_weights, dtype=torch_module.float32
+        ),
+        "pairs": list(pairs),
+        "pair_ids": [pair.pair_id for pair in pairs],
+        "source_tags": [pair.source_tag for pair in pairs],
+        "num_pairs": int(len(pairs)),
+    }
+
+
+def encode_tokenized_cache_with_backbone(
+    *,
+    tokenized_cache: dict[str, Any],
+    backbone: Any,
+    torch_module: Any,
+    batch_size: int,
+    head_dtype: Any,
+    grad_enabled: bool = False,
+) -> dict[str, Any]:
+    """Encode a tokenized pair cache using the current backbone state.
+
+    English
+    -------
+    Converts a ``tokenized_cache`` (from ``build_pair_tokenized_cache``) into a
+    standard feature cache compatible with ``evaluate_pair_cache``.
+
+    The backbone runs on all pairs in mini-batches.  The returned feature
+    tensors are on CPU to avoid OOM during LoRA training where both the
+    backbone and the value head need GPU memory simultaneously.
+
+    When ``grad_enabled=True`` the call is wrapped in a context that preserves
+    the computation graph (for training).  When ``grad_enabled=False`` (default,
+    used at eval time) ``torch.no_grad`` is applied.
+
+    中文
+    ----
+    将 ``build_pair_tokenized_cache`` 产出的 tokenized cache 转换成标准 feature
+    cache 格式，与 ``evaluate_pair_cache`` 兼容。
+    backbone 在 mini-batch 下运行，结果放在 CPU，避免 LoRA 训练中骨干模型和
+    value head 同时竞争显存。
+    ``grad_enabled=True`` 时保留计算图（训练用）；
+    ``grad_enabled=False`` 时禁用梯度（eval 用）。
+    """
+    from ours.phase_b.value_head import pool_last_token, resolve_model_input_device  # type: ignore
+
+    backbone_device = resolve_model_input_device(backbone)
+    chosen_ids = tokenized_cache["chosen_input_ids"]
+    chosen_mask = tokenized_cache["chosen_attention_mask"]
+    rejected_ids = tokenized_cache["rejected_input_ids"]
+    rejected_mask = tokenized_cache["rejected_attention_mask"]
+    num_pairs = int(tokenized_cache["num_pairs"])
+
+    chosen_features_list: list[Any] = []
+    rejected_features_list: list[Any] = []
+
+    ctx = torch_module.enable_grad() if grad_enabled else torch_module.no_grad()
+    with ctx:
+        for sl in _batched_index_ranges(num_pairs, int(batch_size)):
+            # Chosen side
+            cids = chosen_ids[sl].to(backbone_device)
+            cmask = chosen_mask[sl].to(backbone_device)
+            c_out = backbone(
+                input_ids=cids,
+                attention_mask=cmask,
+                output_hidden_states=True,
+                use_cache=False,
+                return_dict=True,
+            )
+            c_last = c_out.hidden_states[-1]
+            c_mask_aligned = cmask.to(c_last.device)
+            c_pooled = pool_last_token(c_last, c_mask_aligned, torch_module=torch_module)
+            if grad_enabled:
+                chosen_features_list.append(c_pooled.to(dtype=head_dtype))
+            else:
+                chosen_features_list.append(c_pooled.detach().cpu().to(dtype=head_dtype))
+
+            # Rejected side
+            rids = rejected_ids[sl].to(backbone_device)
+            rmask = rejected_mask[sl].to(backbone_device)
+            r_out = backbone(
+                input_ids=rids,
+                attention_mask=rmask,
+                output_hidden_states=True,
+                use_cache=False,
+                return_dict=True,
+            )
+            r_last = r_out.hidden_states[-1]
+            r_mask_aligned = rmask.to(r_last.device)
+            r_pooled = pool_last_token(r_last, r_mask_aligned, torch_module=torch_module)
+            if grad_enabled:
+                rejected_features_list.append(r_pooled.to(dtype=head_dtype))
+            else:
+                rejected_features_list.append(r_pooled.detach().cpu().to(dtype=head_dtype))
+
+    chosen_features = torch_module.cat(chosen_features_list, dim=0)
+    rejected_features = torch_module.cat(rejected_features_list, dim=0)
+
+    device = chosen_features.device if grad_enabled else torch_module.device("cpu")
+    pair_weights = tokenized_cache["pair_weights"].to(device=device, dtype=head_dtype)
+    local_rw = tokenized_cache["local_route_weights"].to(device=device, dtype=head_dtype)
+    terminal_rw = tokenized_cache["terminal_route_weights"].to(device=device, dtype=head_dtype)
+
+    return {
+        "chosen_features": chosen_features,
+        "rejected_features": rejected_features,
+        "pair_weights": pair_weights,
+        "local_route_weights": local_rw,
+        "terminal_route_weights": terminal_rw,
+        "pair_ids": tokenized_cache["pair_ids"],
+        "source_tags": tokenized_cache["source_tags"],
+        "num_pairs": num_pairs,
+        "nonfinite_feature_summary": {},
+    }
+
+
 def _apply_nonfinite_feature_policy(
     *,
     pairs: list[ExternalPairRecord],

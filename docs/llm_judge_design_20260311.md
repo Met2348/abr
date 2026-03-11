@@ -430,6 +430,78 @@ def keep_pair(mc_label, prm_score, threshold_hi=0.6, threshold_lo=0.4):
    - 训练标签里更短但仍然正确的安全前缀，
    - 常被 judge 误判得不如更长但已引入错误的前缀。
 
+### 5.7 正式实验更新：selected relabel 与 benchmark-side hard-slice adjudication 都没有把 judge 提升到可主线化水准
+
+为了把第 5.6 节的方向判断真正落成正式实验，我们又新增并执行了两条完整流水线：
+
+1. `PRMBench_Preview` 上的 `selected relabel` 正式实验
+   - 全量训练集先由当前最强 same-source PRMBench value run 打分
+   - 选出 `lowest_abs_margin` 的 `64` 条最不确定边界样本
+   - 只对这 `64` 条跑 `pairwise + swap-debias judge`
+   - 把 judge 保留样本并回未触碰训练集
+   - 用和 baseline `E78` 一致的正式超参重训
+2. `ProcessBench` 的 benchmark-side `hard-slice adjudication`
+   - 直接从 `PBR2` 的 `ProcessBench math/gsm8k` eval artifact 中抽最难失败 slice
+   - 分成 `edge_fail` 与 `laterbad_fail` 两类 pair
+   - 再用同一 pairwise judge 合同做 benchmark-side 裁决
+
+新增脚本：
+
+1. `scripts/phase_e_slice_pairs_by_margin.py`
+2. `scripts/phase_e_materialize_selected_relabel_pairs.py`
+3. `scripts/phase_e_prepare_processbench_hardslice_pairs.py`
+4. `scripts/run_phase_e_prmbench_selected_relabel_suite.sh`
+5. `scripts/run_phase_e_processbench_hardslice_adjudication_suite.sh`
+
+关键 artifact：
+
+1. `selected relabel`
+   - [final_summary](../assets/artifacts/phase_e_logs/phase_e_prmbench_selected_relabel_formal_0311/final_summary.md)
+   - [slice_summary](../assets/artifacts/phase_e_pairs/phase_e_prmbench_selected_relabel_formal_0311_slice__20260311T092707Z/summary.md)
+   - [judge_summary](../assets/artifacts/phase_e_pairwise_judge/phase_e_prmbench_selected_relabel_formal_0311_pairjudge_20260311T092710Z/summary.json)
+2. `hard-slice adjudication`
+   - [final_summary](../assets/artifacts/phase_e_logs/phase_e_processbench_hardslice_adj_0311_r2/final_summary.md)
+   - [math_judge_summary](../assets/artifacts/phase_e_pairwise_judge/phase_e_processbench_hardslice_adj_0311_r2_processbench_math_hardslice_judge_20260311T091432Z/summary.json)
+   - [gsm_judge_summary](../assets/artifacts/phase_e_pairwise_judge/phase_e_processbench_hardslice_adj_0311_r2_processbench_gsm8k_hardslice_judge_20260311T091515Z/summary.json)
+
+正式结果：
+
+1. `PRMBench_Preview selected relabel`
+   - 5407 条训练 pair 中，baseline 已经有 `172` 条负 margin
+   - 最不确定的 `64` 条里，`58` 条是负 margin
+   - judge 在这 64 条上只有：
+     - `both_parse_ok_rate = 0.0469`
+     - `pair_acc_majority = 0.0312`
+     - `label_preserving_keep_rate = 0.0156`
+   - 最终只保住了 `1/64` 条，materialized 训练集变成 `5344` 条
+   - 重训结果是：
+     - baseline `E78`: `pair_acc = 0.9521`, `auc = 0.9071`
+     - selected relabel: `pair_acc = 0.9555`, `auc = 0.9207`
+
+2. `ProcessBench hard-slice adjudication`
+   - `math` slice：`29` 条
+     - `both_parse_ok_rate = 0.0345`
+     - `pair_acc_majority = 0.1034`
+     - `label_preserving_keep_rate = 0.0000`
+   - `gsm8k` slice：`27` 条
+     - `both_parse_ok_rate = 0.0370`
+     - `pair_acc_majority = 0.0000`
+     - `label_preserving_keep_rate = 0.0000`
+
+这两组结果要分开解释：
+
+1. `selected relabel` 的 held-out 提升不能被解释成“judge 成功完成了语义重标”
+   - judge 实际只保住了 `1` 条
+   - 更合理的解释是：我们删掉了最不确定、同时也更容易截断/塌缩的边界样本
+   - baseline 训练集的 `train frac_pairs_over_limit = 0.0146`，且有 `0.0074` 的 pair 在截断后塌缩
+   - materialized 训练集把这两个值降到了 `0.0067` 和 `0.0000`
+   - 因此这更像 `targeted pruning / truncation cleanup`，不是 `semantic relabel`
+
+2. `ProcessBench hard-slice adjudication` 则是一个更硬的负结论
+   - 当前本地 judge 不仅不适合训练侧 bulk filtering
+   - 甚至连 benchmark-side 最安全的 hard-slice 裁决都几乎不可用
+   - 也就是说，当前 judge 还不能作为可信的二级 benchmark adjudicator
+
 ## 6. 一句话总结给用户
 
 **当前最合理的 judge 主线不是“直接上最强模型做全量严格判题”，也不是“立刻做 bulk pair filter”，而是：用 `Qwen2.5-Math-7B-Instruct` 在轻合同下做 selected relabel / disagreement mining，用 `DeepSeek-R1-Distill-Qwen-14B` 只做少量难例复判，并优先推进 pairwise + swap-debias judge 实验。**
@@ -479,13 +551,14 @@ def keep_pair(mc_label, prm_score, threshold_hi=0.6, threshold_lo=0.4):
 
 本地验证：
 
-1. `Qwen2.5-Math-7B-Instruct` 在 `PRMBench_Preview train64` 上的 `label_preserving_keep_rate` 只有 `0.0469`。
-2. 在 `Math-Shepherd train64` 上甚至是 `0.0000`。
+1. `Qwen2.5-Math-7B-Instruct` 在 `PRMBench_Preview train64` 随机切片上的 `label_preserving_keep_rate` 只有 `0.0469`。
+2. 在正式 `lowest_abs_margin` 边界切片上更低，只有 `0.0156`，而且最终只保住了 `1/64` 条。
+3. 在 `Math-Shepherd train64` 上甚至是 `0.0000`。
 
 工程结论：
 
-1. 当前证据只支持 `selected relabel`。
-2. 不支持 `bulk relabel`。
+1. 当前证据不支持 `bulk relabel`。
+2. “selected relabel” 这个方向本身仍合理，但在当前本地 judge 质量下，它更像 `selected pruning`，不是可靠的 `semantic relabel`。
 
 ### 7.3 disagreement mining
 
@@ -519,13 +592,17 @@ def keep_pair(mc_label, prm_score, threshold_hi=0.6, threshold_lo=0.4):
 
 本地验证：
 
-1. 当前 judge 对 `ProcessBench` / `Math-Shepherd` 风格数据不够强，不适合直接拿来重写训练标签。
-2. 但它仍可用于 benchmark 侧的：
-   - pairwise adjudication
+1. 当前 judge 对 `ProcessBench` hard slice 的正式 pairwise adjudication 几乎完全失败：
+   - `math`: `both_parse_ok_rate = 0.0345`, `pair_acc_majority = 0.1034`
+   - `gsm8k`: `both_parse_ok_rate = 0.0370`, `pair_acc_majority = 0.0000`
+2. 因此它暂时不适合被当成可信的 benchmark-side adjudicator。
+3. 当前更稳妥的保留用途只剩：
    - disagreement audit
-   - hard-slice analysis
+   - hard-slice error analysis
+   - 在 `PRMBench_Preview` 这类更 judge-friendly pair 数据上做极保守的 selected pruning
 
 工程结论：
 
-1. `benchmark-side adjudication` 比 `training-side bulk filtering` 更现实。
-2. 这也是当前阶段最安全的 judge integration 方式。
+1. 理论上 `benchmark-side adjudication` 比 `training-side bulk filtering` 更安全。
+2. 但在当前本地 judge 水平下，这条线也还不能升成正式依赖。
+3. 当前阶段最现实的 judge integration 方式，是把 judge 降级为“生成诊断证据”的辅助工具，而不是“决定标签”的主工具。

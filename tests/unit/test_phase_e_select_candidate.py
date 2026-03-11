@@ -240,3 +240,52 @@ def test_main_resolves_best_checkpoint_path_to_final_when_best_missing(tmp_path:
     report_path = output_root / "candidate_checkpoint_resolution" / "candidate_report.json"
     payload = json.loads(report_path.read_text(encoding="utf-8"))
     assert payload["selected_group"]["best_checkpoint_path"].endswith("final_value_head.pt")
+
+
+def test_main_defaults_to_heldout_only_selection_policy(tmp_path: Path) -> None:
+    module = _load_selector_module()
+    heldout_better = _write_suite_log_dir(
+        root=tmp_path,
+        group_id="E30_HELDOUT_BETTER",
+        group_title="E30",
+        heldout_pair_acc=0.91,
+        heldout_auc=0.90,
+        heldout_ranking_score=0.89,
+        processbench_gsm8k_pair_acc=0.50,
+        processbench_gsm8k_auc=0.50,
+        processbench_math_pair_acc=0.50,
+        processbench_math_auc=0.50,
+    )
+    benchmark_better = _write_suite_log_dir(
+        root=tmp_path,
+        group_id="E31_BENCHMARK_BETTER",
+        group_title="E31",
+        heldout_pair_acc=0.85,
+        heldout_auc=0.84,
+        heldout_ranking_score=0.83,
+        processbench_gsm8k_pair_acc=0.95,
+        processbench_gsm8k_auc=0.95,
+        processbench_math_pair_acc=0.95,
+        processbench_math_auc=0.95,
+    )
+    _attach_fake_run_manifest(suite_dir=heldout_better, keep_best=True, keep_final=True)
+    _attach_fake_run_manifest(suite_dir=benchmark_better, keep_best=True, keep_final=True)
+    output_root = tmp_path / "candidates"
+
+    exit_code = module.main(
+        [
+            "--run-name",
+            "candidate_heldout_only_default",
+            "--output-root",
+            str(output_root),
+            "--suite-log-dirs",
+            str(heldout_better),
+            str(benchmark_better),
+        ]
+    )
+
+    assert exit_code == 0
+    report_path = output_root / "candidate_heldout_only_default" / "candidate_report.json"
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert payload["selection_policy"] == "heldout_only"
+    assert payload["selected_group"]["group_id"] == "E30_HELDOUT_BETTER"

@@ -121,6 +121,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=Path("assets/artifacts/phase_d_triplet_eval"),
     )
     parser.add_argument("--checkpoint-name", choices=["best", "final"], default="best")
+    parser.add_argument(
+        "--checkpoint-missing-policy",
+        choices=["fail", "fallback_final"],
+        default="fail",
+        help=(
+            "How to handle `--checkpoint-name best` when best_value_head.pt is missing. "
+            "`fail` is the safe default; `fallback_final` is only for legacy diagnostics."
+        ),
+    )
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--min-confidence", type=float, default=0.0)
     parser.add_argument("--allowed-sources", default="")
@@ -202,11 +211,13 @@ def main(argv: list[str] | None = None) -> int:
         raise FileNotFoundError(f"Missing C2 manifest: {manifest_path}")
     run_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    checkpoint_path = _resolve_checkpoint_path(
+    checkpoint_resolution = _resolve_checkpoint_path(
         value_run_dir=args.value_run_dir,
         run_manifest=run_manifest,
         checkpoint_name=str(args.checkpoint_name),
+        checkpoint_missing_policy=str(args.checkpoint_missing_policy),
     )
+    checkpoint_path = Path(str(checkpoint_resolution["resolved_checkpoint_path"]))
     value_head, _, _ = load_value_head_checkpoint(checkpoint_path)
 
     allowed_sources = _parse_csv_allow_list(str(args.allowed_sources))
@@ -260,6 +271,8 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 88)
     print(f"value_run_dir     : {args.value_run_dir}")
     print(f"checkpoint        : {checkpoint_path}")
+    print(f"checkpoint_policy : {args.checkpoint_missing_policy}")
+    print(f"checkpoint_fallback: {checkpoint_resolution['fallback_to_final']}")
     print(f"external_pairs    : {len(external_pairs)}")
     print(f"external_sources  : {external_stats.get('by_source', {})}")
     print(f"model_path        : {model_path}")
@@ -398,6 +411,7 @@ def main(argv: list[str] | None = None) -> int:
     _write_jsonl(pair_scores_path, pair_rows)
     metrics = {
         "n_pairs": int(len(pair_rows)),
+        "checkpoint_resolution": checkpoint_resolution,
         "pair_accuracy": float(pair_acc),
         "pair_accuracy_with_ties": float(pair_acc_ties),
         "auc_chosen_vs_rejected": float(auc),
@@ -443,6 +457,7 @@ def main(argv: list[str] | None = None) -> int:
         "truncation_diagnostics": truncation_diagnostics,
         "value_run_manifest": str(manifest_path),
         "value_head_checkpoint": str(checkpoint_path),
+        "checkpoint_resolution": checkpoint_resolution,
         "output_files": {
             "pair_scores": str(pair_scores_path),
             "metrics": str(metrics_path),
@@ -457,6 +472,9 @@ def main(argv: list[str] | None = None) -> int:
         f"- run_dir: `{run_dir}`",
         f"- value_run_dir: `{args.value_run_dir}`",
         f"- checkpoint: `{checkpoint_path}`",
+        f"- checkpoint_requested: `{checkpoint_resolution['requested_checkpoint_name']}`",
+        f"- checkpoint_resolved: `{checkpoint_resolution['resolved_checkpoint_name']}`",
+        f"- checkpoint_fallback: `{bool(checkpoint_resolution['fallback_to_final'])}`",
         f"- external_pair_jsonl: `{args.external_pair_jsonl}`",
         f"- n_pairs: `{metrics['n_pairs']}`",
         f"- pair_accuracy: `{metrics['pair_accuracy']:.6f}`",
@@ -509,34 +527,60 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _resolve_checkpoint_path(*, value_run_dir: Path, run_manifest: dict[str, Any], checkpoint_name: str) -> Path:
-    """Resolve checkpoint path from run manifest with safe fallback logic."""
+def _resolve_checkpoint_path(
+    *,
+    value_run_dir: Path,
+    run_manifest: dict[str, Any],
+    checkpoint_name: str,
+    checkpoint_missing_policy: str,
+) -> dict[str, Any]:
+    """Resolve checkpoint path from run manifest with explicit fallback policy."""
     files = dict(run_manifest.get("output_files", {}))
-    if checkpoint_name == "best":
-        best_path = files.get("best_value_head")
-        if isinstance(best_path, str) and best_path.strip():
-            path = Path(best_path)
-            if path.exists():
-                return path
-        # fallback keeps this script robust for runs without best checkpoint saved.
-        # RISK WARNING:
-        # When this fallback triggers, the operator asked for "best" but the
-        # script evaluates the final checkpoint instead.  That behavior is easy
-        # to miss in retrospective experiment analysis.
-        final_path = files.get("final_value_head")
-        if isinstance(final_path, str) and final_path.strip():
-            path = Path(final_path)
-            if path.exists():
-                return path
-        raise FileNotFoundError(
-            f"Neither best nor final value-head checkpoint found under manifest: {value_run_dir}"
-        )
-    final_path = files.get("final_value_head")
-    if isinstance(final_path, str) and final_path.strip():
-        path = Path(final_path)
-        if path.exists():
-            return path
-    raise FileNotFoundError(f"Requested checkpoint=final but file missing in {value_run_dir}")
+    requested = str(checkpoint_name).strip().lower()
+    policy = str(checkpoint_missing_policy).strip().lower()
+    if requested not in {"best", "final"}:
+        raise ValueError(f"Unsupported checkpoint_name: {checkpoint_name!r}")
+    if policy not in {"fail", "fallback_final"}:
+        raise ValueError(f"Unsupported checkpoint_missing_policy: {checkpoint_missing_policy!r}")
+    requested_path_text = str(files.get("best_value_head" if requested == "best" else "final_value_head") or "").strip()
+    final_path_text = str(files.get("final_value_head") or "").strip()
+    best_path = Path(requested_path_text) if requested == "best" and requested_path_text else None
+    final_path = Path(final_path_text) if final_path_text else None
+
+    if requested == "best":
+        if best_path is not None and best_path.exists():
+            resolved_path = best_path
+            resolved_name = "best"
+            fallback = False
+        elif policy == "fallback_final" and final_path is not None and final_path.exists():
+            print(
+                "checkpoint_resolve: requested=best but best_value_head missing; "
+                f"falling back to final checkpoint at {final_path}",
+                flush=True,
+            )
+            resolved_path = final_path
+            resolved_name = "final"
+            fallback = True
+        else:
+            raise FileNotFoundError(
+                f"Requested checkpoint=best but best_value_head missing under {value_run_dir}; "
+                "rerun with --checkpoint-missing-policy fallback_final only for legacy diagnostics."
+            )
+    else:
+        if final_path is None or not final_path.exists():
+            raise FileNotFoundError(f"Requested checkpoint=final but file missing in {value_run_dir}")
+        resolved_path = final_path
+        resolved_name = "final"
+        fallback = False
+
+    return {
+        "requested_checkpoint_name": requested,
+        "requested_checkpoint_path": requested_path_text,
+        "resolved_checkpoint_name": resolved_name,
+        "resolved_checkpoint_path": str(resolved_path),
+        "fallback_to_final": bool(fallback),
+        "checkpoint_missing_policy": policy,
+    }
 
 
 def _parse_csv_allow_list(text: str) -> set[str] | None:

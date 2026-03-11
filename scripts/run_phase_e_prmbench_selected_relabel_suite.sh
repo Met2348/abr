@@ -35,6 +35,7 @@ MIN_FILTER_CONFIDENCE="${MIN_FILTER_CONFIDENCE:-0.60}"
 SLICE_GPU="${SLICE_GPU:-0}"
 JUDGE_GPU="${JUDGE_GPU:-1}"
 TRAIN_GPU="${TRAIN_GPU:-0}"
+RECIPE_RISK_POLICY="${RECIPE_RISK_POLICY:-error}"
 
 LOG_DIR="assets/artifacts/phase_e_logs/${RUN_PREFIX}"
 LOG_FILE="${LOG_DIR}/suite.log"
@@ -145,6 +146,7 @@ CUDA_VISIBLE_DEVICES="$TRAIN_GPU" "$PYTHON_BIN" -u scripts/phase_e_train_value.p
   --source-balance none \
   --permutation-mode stable_hash \
   --checkpoint-selection-metric pair_acc \
+  --recipe-risk-policy "$RECIPE_RISK_POLICY" \
   --head-architecture mlp \
   --head-dropout-prob 0.0 \
   --head-init-std 0.02 \

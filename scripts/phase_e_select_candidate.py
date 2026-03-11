@@ -95,6 +95,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-heldout-auc-std", type=float, default=0.12)
     parser.add_argument("--min-benchmark-pair-acc", type=float, default=0.50)
     parser.add_argument("--min-benchmark-auc", type=float, default=0.50)
+    parser.add_argument(
+        "--selection-policy",
+        choices=["heldout_only", "hybrid"],
+        default="heldout_only",
+        help=(
+            "How candidate ranking should use benchmark metrics. "
+            "`heldout_only` keeps benchmarks as promotion gates / canaries only; "
+            "`hybrid` also mixes benchmark metrics into group and seed ranking "
+            "(legacy behavior, weaker leakage hygiene)."
+        ),
+    )
     parser.add_argument("--run-name", default="phase_e_candidate")
     parser.add_argument(
         "--output-root",
@@ -188,12 +199,26 @@ def _std(values: list[float]) -> float | None:
     return float(statistics.pstdev(values))
 
 
-def _seed_score(row: SeedCandidateRow, required_benchmark_ids: list[str]) -> float:
+def _seed_score(
+    row: SeedCandidateRow,
+    required_benchmark_ids: list[str],
+    *,
+    selection_policy: str,
+) -> float:
     # The per-seed score prefers ranking quality first, but still rewards
     # benchmark-native behavior. This is intentionally not a calibrated
     # probability; it is a checkpoint-promotion heuristic.
     # 这里的 seed score 首先看排序质量，其次看 benchmark-native 行为。
     # 它不是“真实概率”，只是一个固定的 checkpoint 晋级启发式。
+    normalized_policy = str(selection_policy).strip().lower()
+    if normalized_policy == "heldout_only":
+        return (
+            0.45 * float(row.heldout_pair_acc)
+            + 0.30 * float(row.heldout_auc)
+            + 0.25 * float(row.heldout_ranking_score)
+        )
+    if normalized_policy != "hybrid":
+        raise ValueError("selection_policy must be one of {'heldout_only', 'hybrid'}")
     benchmark_pair_mean = _mean(
         [float(row.benchmarks.get(bench_id, {}).get("pair_acc", 0.0)) for bench_id in required_benchmark_ids]
     )
@@ -331,31 +356,59 @@ def _build_group_summary(
             gate_pass = False
             notes.append(f"{bench_id} mean auc below threshold")
 
+    selection_policy = str(args.selection_policy).strip().lower()
     trust_score: float | None = None
     if eligible_for_candidate:
-        benchmark_pair_mean = _mean(
-            [benchmark_means[bench_id]["pair_acc"] for bench_id in required_benchmark_ids if bench_id in benchmark_means]
-        )
-        benchmark_auc_mean = _mean(
-            [benchmark_means[bench_id]["auc"] for bench_id in required_benchmark_ids if bench_id in benchmark_means]
-        )
         std_pair_term = 1.0 - min(float(std_pair or 0.0), 1.0)
         std_auc_term = 1.0 - min(float(std_auc or 0.0), 1.0)
-        trust_score = float(
-            0.30 * _mean(heldout_rankings)
-            + 0.20 * _mean(heldout_aucs)
-            + 0.20 * benchmark_pair_mean
-            + 0.20 * benchmark_auc_mean
-            + 0.05 * std_pair_term
-            + 0.05 * std_auc_term
-        )
+        if selection_policy == "heldout_only":
+            trust_score = float(
+                0.35 * _mean(heldout_pair_accs)
+                + 0.30 * _mean(heldout_aucs)
+                + 0.20 * _mean(heldout_rankings)
+                + 0.075 * std_pair_term
+                + 0.075 * std_auc_term
+            )
+            notes.append(
+                "selection_policy=heldout_only: benchmark metrics used only as promotion gates / canaries, not ranking"
+            )
+        elif selection_policy == "hybrid":
+            benchmark_pair_mean = _mean(
+                [benchmark_means[bench_id]["pair_acc"] for bench_id in required_benchmark_ids if bench_id in benchmark_means]
+            )
+            benchmark_auc_mean = _mean(
+                [benchmark_means[bench_id]["auc"] for bench_id in required_benchmark_ids if bench_id in benchmark_means]
+            )
+            trust_score = float(
+                0.30 * _mean(heldout_rankings)
+                + 0.20 * _mean(heldout_aucs)
+                + 0.20 * benchmark_pair_mean
+                + 0.20 * benchmark_auc_mean
+                + 0.05 * std_pair_term
+                + 0.05 * std_auc_term
+            )
+            notes.append(
+                "selection_policy=hybrid: benchmark metrics also influence ranking (legacy leakage-prone behavior)"
+            )
+        else:
+            raise ValueError("selection_policy must be one of {'heldout_only', 'hybrid'}")
 
     best_seed: int | None = None
     best_checkpoint_path: str | None = None
     best_seed_score: float | None = None
     if eligible_for_candidate:
         per_seed_scored = sorted(
-            ((_seed_score(row, required_benchmark_ids), row) for row in seed_rows),
+            (
+                (
+                    _seed_score(
+                        row,
+                        required_benchmark_ids,
+                        selection_policy=selection_policy,
+                    ),
+                    row,
+                )
+                for row in seed_rows
+            ),
             key=lambda item: item[0],
             reverse=True,
         )
@@ -519,6 +572,7 @@ def main(argv: list[str] | None = None) -> int:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "suite_log_dirs": [str(Path(item)) for item in args.suite_log_dirs],
         "required_benchmark_ids": [str(item) for item in args.required_benchmark_ids],
+        "selection_policy": str(args.selection_policy),
         "selected_mode": selected_mode,
         "selected_group": selected_group.to_dict() if selected_group is not None else None,
         "groups": [group.to_dict() for group in groups],

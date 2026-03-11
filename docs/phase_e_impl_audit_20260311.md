@@ -109,3 +109,54 @@ distort training or evaluation outcomes:
 - `pytest -q` on targeted regression tests
 - broader Phase E core regression set: `46 passed`
 
+## Late Addendum: Postfix Evaluation Hygiene Closure
+
+After the first Phase E implementation audit, one more postfix pass found three
+evaluation-side gaps that still affected the trust story.
+
+### 1. benchmark-informed candidate ranking leakage by default
+
+- File: `scripts/phase_e_select_candidate.py`
+- Risk:
+  - benchmark metrics still influenced seed/group ranking directly
+  - even when the benchmark was intended to act only as a promotion canary
+- Fix:
+  - default `selection_policy=heldout_only`
+  - legacy `hybrid` ranking remains available only as an explicit option
+- Regression:
+  - `tests/unit/test_phase_e_select_candidate.py`
+
+### 2. intradataset candidate reports could publish a bogus best-checkpoint path
+
+- File: `scripts/phase_e_select_intradataset_candidate.py`
+- Risk:
+  - older runs that only retained `final_value_head.pt` still published
+    `<run_dir>/best_value_head.pt` in candidate reports
+- Fix:
+  - manifest-aware best-checkpoint resolution with explicit fallback notes
+- Regression:
+  - `tests/unit/test_phase_e_select_intradataset_candidate.py`
+
+### 3. PRM-7B samefamily trust could crash on long batches with async CUDA failures
+
+- File: `src/ours/phase_e/runtime.py`
+- Risk:
+  - long candidate-node batches sometimes first surfaced as a later generic
+    `device-side assert triggered`, which made evaluation failure look like a
+    semantic model issue instead of a batch-capacity problem
+- Fix:
+  - explicit `cuda.synchronize()` inside the encoding retry block
+  - relaxed retry rule for allocator / async capacity failure strings
+- Regression:
+  - `tests/unit/test_phase_e_runtime.py`
+
+### Postfix interpretation
+
+These fixes did not by themselves make the best checkpoints RL-ready.
+
+What they did change:
+
+1. candidate promotion is now benchmark-cleaner by default,
+2. intradataset reports no longer publish misleading checkpoint paths,
+3. PRM-7B samefamily trust audits now complete robustly instead of aborting on
+   long-batch capacity spikes.

@@ -5,9 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from ours.phase_e.runtime import (
     _maybe_resize_embeddings_for_tokenizer,
+    _is_retryable_cuda_capacity_error,
     build_max_memory_map,
+    resolve_checkpoint_resolution,
     resolve_backbone_loader_family,
     resolve_checkpoint_path,
 )
@@ -36,8 +40,7 @@ def test_resolve_checkpoint_path_best_prefers_best_checkpoint(tmp_path: Path) ->
     assert resolved == best_path
 
 
-def test_resolve_checkpoint_path_best_falls_back_to_final_when_best_missing(tmp_path: Path) -> None:
-    """Audit the current silent fallback because it can skew experiment claims."""
+def test_resolve_checkpoint_path_best_fails_by_default_when_best_missing(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     final_path = run_dir / "final_value_head.pt"
@@ -49,13 +52,36 @@ def test_resolve_checkpoint_path_best_falls_back_to_final_when_best_missing(tmp_
         }
     }
 
-    resolved = resolve_checkpoint_path(
+    with pytest.raises(FileNotFoundError):
+        resolve_checkpoint_path(
+            value_run_dir=run_dir,
+            run_manifest=manifest,
+            checkpoint_name="best",
+        )
+
+
+def test_resolve_checkpoint_resolution_can_explicitly_fallback_to_final(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    final_path = run_dir / "final_value_head.pt"
+    final_path.write_text("final\n", encoding="utf-8")
+    manifest = {
+        "output_files": {
+            "best_value_head": str(run_dir / "missing_best_value_head.pt"),
+            "final_value_head": str(final_path),
+        }
+    }
+
+    resolved = resolve_checkpoint_resolution(
         value_run_dir=run_dir,
         run_manifest=manifest,
         checkpoint_name="best",
+        checkpoint_missing_policy="fallback_final",
     )
 
-    assert resolved == final_path
+    assert resolved["resolved_checkpoint_name"] == "final"
+    assert resolved["fallback_to_final"] is True
+    assert resolved["resolved_checkpoint_path"] == str(final_path)
 
 
 def test_build_max_memory_map_supports_gpu_and_cpu_caps() -> None:
@@ -151,3 +177,13 @@ def test_maybe_resize_embeddings_for_tokenizer_when_vocab_grows() -> None:
 
     assert resized is True
     assert backbone.resize_calls == [11]
+
+
+def test_is_retryable_cuda_capacity_error_accepts_async_capacity_signals() -> None:
+    assert _is_retryable_cuda_capacity_error(RuntimeError("CUDA out of memory"))
+    assert _is_retryable_cuda_capacity_error(RuntimeError("CUDA error: device-side assert triggered"))
+    assert _is_retryable_cuda_capacity_error(RuntimeError("CUBLAS_STATUS_ALLOC_FAILED"))
+
+
+def test_is_retryable_cuda_capacity_error_rejects_non_capacity_errors() -> None:
+    assert not _is_retryable_cuda_capacity_error(RuntimeError("index out of bounds"))

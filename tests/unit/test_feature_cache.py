@@ -91,8 +91,8 @@ def test_save_feature_cache_rewrites_corrupt_existing_entry(tmp_path: Path) -> N
     assert torch.equal(loaded["features"], payload["features"])
 
 
-def test_exclusive_lock_timeout_can_overlap_live_writer(tmp_path: Path) -> None:
-    """Audit the current timeout-based lock stealing behavior explicitly."""
+def test_exclusive_lock_times_out_instead_of_stealing_live_writer_lock(tmp_path: Path) -> None:
+    """A live writer must block contenders instead of being stolen via stale-mtime heuristics."""
     lock_path = tmp_path / ".write.lock"
     events: list[tuple[str, float]] = []
     failures: list[BaseException] = []
@@ -126,9 +126,11 @@ def test_exclusive_lock_timeout_can_overlap_live_writer(tmp_path: Path) -> None:
     thread_a.join()
     thread_b.join()
 
-    assert failures == []
+    assert len(failures) == 1
+    assert isinstance(failures[0], TimeoutError)
     timestamps = {name: ts for name, ts in events}
-    assert timestamps["b_enter"] < timestamps["a_exit"]
+    assert "b_enter" not in timestamps
+    assert timestamps["a_enter"] < timestamps["a_exit"]
 
 
 def test_save_feature_cache_recovers_from_stale_lock(tmp_path: Path) -> None:

@@ -26,6 +26,9 @@ MODEL_PATH="${MODEL_PATH:-assets/models/Qwen2.5-7B-Instruct}"
 ADAPTER_PATH="${ADAPTER_PATH:-}"
 MAX_GPU_MEMORY_GIB="${MAX_GPU_MEMORY_GIB:-48}"
 MAX_CPU_MEMORY_GIB="${MAX_CPU_MEMORY_GIB:-96}"
+RECIPE_RISK_POLICY="${RECIPE_RISK_POLICY:-error}"
+RANKING_TARGET_SPACE="${RANKING_TARGET_SPACE:-score}"
+CHECKPOINT_SELECTION_METRIC="${CHECKPOINT_SELECTION_METRIC:-pair_acc}"
 FEATURE_CACHE_ROOT="${FEATURE_CACHE_ROOT:-assets/artifacts/phase_e_feature_cache}"
 FEATURE_CACHE_MODE="${FEATURE_CACHE_MODE:-read_write}"
 PAIR_OUTPUT_ROOT="${PAIR_OUTPUT_ROOT:-assets/artifacts/phase_e_pairs}"
@@ -339,7 +342,7 @@ for spec in "${CONFIG_SPECS[@]}"; do
     --run-name "$VALUE_RUN_NAME"
     --output-root "$VALUE_OUTPUT_ROOT"
     --objective-mode joint
-    --ranking-target-space logit
+    --ranking-target-space "$RANKING_TARGET_SPACE"
     --lambda-ranking 1.0
     --lambda-bce 1.0
     --ranking-margin 0.02
@@ -358,7 +361,8 @@ for spec in "${CONFIG_SPECS[@]}"; do
     --anti-saturation-weight "$ANTI_SAT_WEIGHT"
     --anti-saturation-logit-threshold 3.5
     --reward-centering-weight "$REWARD_CENTER_WEIGHT"
-    --checkpoint-selection-metric ranking_score
+    --checkpoint-selection-metric "$CHECKPOINT_SELECTION_METRIC"
+    --recipe-risk-policy "$RECIPE_RISK_POLICY"
     --feature-cache-root "$FEATURE_CACHE_ROOT"
     --feature-cache-mode "$FEATURE_CACHE_MODE"
     --max-gpu-memory-gib "$MAX_GPU_MEMORY_GIB"

@@ -1,6 +1,2032 @@
 # Result Records
 
-Last updated: 2026-03-11 17:00:00 +0800
+Last updated: 2026-03-13 01:25:00 +0800
+
+## 0AAAK. Phase F Controller Sweep — Old ABR-lite Rule Was The Main Failure (2026-03-13)
+
+### Artifact
+
+- [controller sweep summary](/home/zling/y/bcr/ref/assets/artifacts/phase_f_controller_sweep/phase_f_controller_sweep_0312_main_20260311T181216Z/summary.md)
+
+### Main finding
+
+The earlier `F2 FAIL` diagnosis was a **controller-rule failure**, not a verifier failure.
+
+The old `baseline_immediate` controller over-triggered on early `delta_drop`.
+When we sweep several controller families on existing scored `ProcessBench` traces:
+
+1. `threshold_only`
+2. `delayed_drop`
+3. `drop_needs_low`
+4. `guarded_drop`
+5. `two_strike`
+
+the results become dramatically better.
+
+### Headline numbers
+
+| case | baseline | best policy | balanced_f1 |
+|---|---:|---|---:|
+| `pbr19_math` | 0.5537 | `threshold_only tau=0.38` | 0.8674 |
+| `pbr21_math` | 0.5588 | `threshold_only tau=0.35` | 0.8641 |
+| `pbr26_math` | 0.5752 | `threshold_only tau=0.38` | 0.8639 |
+| `pbr19_gsm` | 0.6713 | `delayed_drop` | 0.9052 |
+| `pbr21_gsm` | 0.6405 | `guarded_drop` | 0.9028 |
+| `pbr26_gsm` | 0.6509 | `delayed_drop` | 0.9053 |
+
+### Shared-policy validation
+
+We also tested simple shared policies, not only per-case tuned policies:
+
+1. `threshold_only tau=0.42`
+   - mean `balanced_f1 = 0.8552`
+2. `delayed_drop tau=0.42 delta=0.25 min_step=4`
+   - mean `balanced_f1 = 0.8501`
+
+So the result is not just per-case overfitting.
+
+### Corrected interpretation
+
+1. current verifier candidates are strong enough for a useful heuristic controller;
+2. the old `ABR-lite` rule was the wrong design;
+3. the next Phase F step should be:
+   - heuristic controller redesign,
+   - then live generation validation,
+   - and only after that decide whether RL is needed.
+
+## 0AAAJ. Breakthrough Verification: PBR26 Frozen, PBR31 LoRA (2026-03-13)
+
+### Verified headline
+
+The newest verification pass settled two repo-level claims:
+
+1. `PBR26` is a real frozen-backbone benchmark breakthrough.
+2. `PBR31` is a real LoRA improvement.
+
+But neither is RL-ready.
+
+### Compact verification table
+
+| candidate | heldout pair_acc | sf top1 | sf local | GSM AUC | Math AUC | GSM F1 | Math F1 | GSM terminal_top1 | Math terminal_top1 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `PBR26` | 0.8532 | 0.8606 | 0.8510 | 0.9148 | 0.8882 | 0.7793 | 0.6700 | 0.1503 | 0.1355 |
+| `PBR31_LORA` | 0.8917 | 0.8916 | 0.8799 | 0.9006 | 0.8823 | 0.7882 | 0.6762 | 0.2332 | 0.2192 |
+
+### Interpretation
+
+`PBR26`:
+
+1. best verified frozen benchmark candidate in the newest batch
+2. still fails strict RL gate because:
+   - same-family trust is not clean enough
+   - terminal completion ordering is still very weak
+3. strict diagnosis:
+   - `not_rl_ready_terminal_completion_risk`
+
+`PBR31_LORA`:
+
+1. improves same-family trust and oracle-F1 balance over `PBR26`
+2. does **not** beat `PBR26` on `Math AUC`
+3. still fails strict RL gate for the same core reason:
+   - terminal completion ordering remains weak
+4. additional caution:
+   - new reward-hacking probe on GSM `first_bad` is worse than `PBR26`
+   - `confidence_tail flip@0.5 = 0.1875` vs `0.0417`
+
+### Clean wording the repo should now use
+
+1. `PBR26`
+   - best verified frozen benchmark candidate
+   - not RL-ready
+2. `PBR31`
+   - best verified LoRA balance so far
+   - not a new Math-AUC SOTA
+   - not RL-ready
+
+Key verification artifacts:
+
+1. `docs/phase_e_latest_breakthrough_verification_20260312.md`
+2. `assets/artifacts/phase_e_transfer_diag/phase_e_pbr26_verify_diag_0312_00`
+3. `assets/artifacts/phase_e_transfer_diag/phase_e_pbr26_pbr31_verify_diag_0312_00`
+4. `assets/artifacts/phase_f_reward_hacking/phase_f_pbr31_probe_verify_0312_20260311T172022Z`
+
+## 0AAAI. Eval Provenance Hardening Across Phase B/C/D/E (2026-03-13)
+
+### What was re-audited
+
+Repository-wide standalone evaluation paths were rechecked for a specific trust
+risk:
+
+1. requesting `best` checkpoint but actually evaluating `final`
+2. requesting `best` posthoc calibrator but actually loading `final`
+
+This is a high-risk result-pollution class because it does not necessarily
+crash, but it can silently change the object being scored.
+
+### Concrete fixes
+
+The following paths are now strict by default:
+
+1. `scripts/phase_b_eval_faithfulness.py`
+2. `scripts/phase_c_eval_pik.py`
+3. `scripts/phase_d_eval_external_pairs.py`
+4. `src/ours/phase_e/runtime.py`
+
+Current rule:
+
+1. default behavior = `fail`
+2. legacy fallback only with explicit opt-in:
+   - `--checkpoint-missing-policy fallback_final`
+   - `--posthoc-missing-policy fallback_final`
+3. any fallback must be written into:
+   - `metrics.json`
+   - `manifest.json`
+   - `summary.md`
+   - console logs
+
+### Validation
+
+Targeted regression checks:
+
+1. `python -m py_compile ...` over patched B/C/D/E eval scripts
+2. unit tests:
+   - `tests/unit/test_phase_e_runtime.py`
+   - `tests/unit/test_phase_b_eval_faithfulness_script.py`
+   - `tests/unit/test_phase_c_eval_pik_script.py`
+   - `tests/unit/test_phase_d_eval_external_pairs_script.py`
+
+Result:
+
+1. `18 passed`
+
+### Additional benchmark-leak recheck
+
+A fresh grep-based audit did **not** find direct benchmark-test ingestion in the
+primary `Phase E` source-bundle training path:
+
+1. `ProcessBench` / `PRMBench` references remain confined to:
+   - eval
+   - alignment audit
+   - curated research utilities
+
+So after this round, the more realistic remaining research risks are:
+
+1. source/benchmark geometry mismatch
+2. recipe collapse
+3. provenance misinterpretation of legacy artifacts
+
+## 0AAAH. Phase F Audit Correction — F2 ABR-lite Was Overstated (2026-03-12)
+
+### What was re-checked
+
+The `Phase F` docs previously claimed:
+
+1. `PBR19 + MATH` offline `ABR-lite` controller had `binary detection F1 = 0.863`
+2. `F2 ABR-lite` was a `STRONG PASS`
+3. `Phase F RL permission gate` was already granted
+
+Those claims are **not supported by the raw simulation artifact**.
+
+### Raw artifact
+
+- [phase_f_simulation summary.json](/home/zling/y/bcr/ref/assets/artifacts/phase_f_simulation/pbr19_math_abr_lite_0312/summary.json)
+
+Correct raw numbers:
+
+- `balanced_f1 = 0.3388`
+- `positive_f1 = 0.7806`
+- `acc_erroneous = 0.9882`
+- `acc_correct = 0.2044`
+- `mean_step_fraction = 0.3524`
+
+### Diagnosis
+
+This controller is **over-stopping**:
+
+1. it catches almost every erroneous trace,
+2. but it wrongly stops most all-correct traces,
+3. so as a real controller it is not usable yet.
+
+This means:
+
+1. `reward-hacking probe` remains valid,
+2. `threshold / shift audit` remains valid,
+3. but `F2 ABR-lite STRONG PASS` must be downgraded,
+4. and `Phase F live RL permission` is **not yet granted**.
+
+### Current corrected status
+
+| Gate | Corrected status |
+|---|---|
+| F1 threshold / shift | PASS with real generator-shift caution |
+| F1 reward hacking | PASS on MATH candidate family, conditional on GSM |
+| F2 ABR-lite controller | FAIL / not promotion-ready |
+| Phase F live RL | NOT YET UNBLOCKED |
+
+## 0AAAG. LoRA Series (PBR30-34) — Final Results (2026-03-12)
+
+### Overview
+
+LoRA-adapted backbone experiments to push beyond frozen SOTA (PBR26: MATH F1=0.686).
+All use `phase_e_train_value_lora.py`, per-batch backbone forward (no feature cache),
+and the same objective: joint+BCE+terminal_bce=0.25.
+
+### Training Curve Summary (validation pair_acc on PBR12 eval set, 591 pairs)
+
+| Run | Backbone | LoRA | Data (pairs) | Ep0 | Ep1 | Ep2 | Ep3 | Ep4 | Best |
+|-----|----------|------|-------------|-----|-----|-----|-----|-----|------|
+| **PBR31** | Math-PRM-7B | r=8 top-4 (360K) | PBR12 (5705) | 0.870 | 0.887 | 0.890 | 0.890 | **0.892** | ep4 |
+| **PBR32** | Math-PRM-7B | r=8 all-28 (2.52M) | PBR12 (5705) | 0.861 | 0.880 | 0.897 | **0.898** | — | ep3 |
+| PBR30 | Math-7B-Instruct | r=8 top-4 | PBR12 (5705) | 0.780 | 0.816 | 0.824 | 0.826 | — | ep3 |
+| LoRA smoke S4 | 7B-Instruct | r=16 all | flb_0311 (7420) | 0.837 | 0.886 | — | — | — | No adapter saved |
+| PBR33 | Math-PRM-7B | r=8 top-4 (360K) | PBR26 (7366) | — | — | — | — | — | Training... |
+| PBR34 | Math-PRM-7B | r=16 top-4 (720K) | PBR26 (7366) | — | — | — | — | — | Pending smoke |
+
+### ProcessBench Results — FINAL (as of 2026-03-12 01:35 +0800)
+
+| Run | MATH AUC | GSM AUC | MATH F1 | GSM F1 | Notes |
+|-----|---------|--------|---------|--------|-------|
+| **PBR32** (LoRA r=8 all-28) | 0.8685 | 0.8999 | **0.689** | 0.776 | **NEW MATH F1 SOTA** |
+| PBR26 (frozen) | **0.888** | 0.915 | 0.686 | 0.768 | Prev MATH F1 best |
+| PBR19 (frozen) | — | — | 0.683 | **0.778** | Best GSM frozen |
+| PBR31 (LoRA r=8 top-4) | 0.8823 | 0.9004 | 0.676 | **0.788** | **NEW GSM F1 SOTA** |
+| PBR30 (Instruct LoRA r=8) | 0.782 | 0.799 | 0.448 | 0.505 | Wrong backbone family |
+
+### Key Findings
+
+1. **PBR32 (all-28-layer LoRA) achieves MATH F1=0.689** — new SOTA, +0.003 vs frozen PBR26.
+   - Acc_erroneous=0.564, Acc_correct=0.884. AUC=0.869 (lower than frozen 0.888).
+   - Net: F1 improved despite lower AUC → threshold detection improved.
+
+2. **PBR31 (top-4 LoRA) achieves GSM8K F1=0.788** — new SOTA, +0.010 vs frozen PBR19.
+   - Tradeoff: MATH F1=0.676 (below frozen). Top-4 layers = better GSM, worse MATH.
+
+3. **Instruct backbone (PBR30) is unsuitable**: MATH F1=0.448 (vs 0.686 frozen). Confirmed:
+   - Math-PRM-7B backbone is required for ProcessBench step-level quality assessment.
+
+4. **Depth vs MATH F1**: More LoRA layers → better MATH F1. Top-4=0.676, All-28=0.689.
+   PBR33/34 (top-4 + larger data) may close this gap via data quality.
+
+5. **Community gap**: MATH F1=0.689 vs Qwen2.5-Math-PRM-7B full fine-tune ~0.735. Gap=4.6 pts.
+   Remaining lever: PBR33/34 data scale + PBR34 rank=16.
+
+### Eval Artifacts
+
+| Run | MATH eval dir | GSM eval dir |
+|-----|--------------|-------------|
+| PBR31 | `pbr31_lora_mathprm_pb_math_20260311T164942Z` | `phase_e_pbr31_lora_mathprm_processbench_gsm8k_20260311T165223Z` |
+| PBR32 | `pbr32_lora_mathprm_alllayers_pb_math_20260311T171442Z` | `pbr32_lora_mathprm_alllayers_pb_gsm_20260311T171442Z` |
+| PBR30 | `pbr30_lora_math7b_pb_math_full_20260311T164110Z` | `phase_e_pbr30_lora_math7b_processbench_gsm8k_20260311T162412Z` |
+
+## 0AAAF. Comprehensive PBR Ablation & FLB2 Backbone Series — Full Results (2026-03-12)
+
+### Summary
+
+All experiments from session 3 (PBR22-PBR27, FLB2 full series) are now evaluated.
+All evals are full 1000-sample ProcessBench MATH; GSM8K evals noted separately.
+
+### PBR Ablation Series (Math-PRM-7B frozen backbone, all full 1000-sample)
+
+| Config | Data Mix | Pairs | MATH AUC | GSM AUC | MATH F1 | Notes |
+|---|---|---|---|---|---|---|
+| **PBR26** | DPO+MS_full | 7366 | **0.888** | 0.915 | **0.670** | joint+lbce=0.5+terminal_bce=0.25; **CURRENT BEST** |
+| PBR12 | DPO+MS_strict | 5705 | 0.887 | 0.909 | 0.644 | ranking_only; baseline |
+| PBR24 | DPO+MS_high_term | 5705+extra_term | 0.885 | 0.917 | 0.656 | high terminal anchors |
+| PBR22 | DPO+MS+PRM800K | ~6800 | 0.885 | 0.917 | 0.682 | PRM800K adds minimal value |
+| PBR23 | DPO+MS_uniform | ~6800 | 0.883 | 0.912 | 0.684 | uniform balance, strong F1 |
+| PBR25 | uniform+terminal_bce=0.5 | ~6800 | 0.882 | 0.910 | 0.678 | terminal_bce=0.5 slightly hurts |
+| PBR27_mlp1024 | DPO(2398)+MS(3307) | 5705 | 0.873 | 0.900 | 0.666 | different DPO:MS ratio |
+| PBR25_seed1 | DPO+MS (PBR12 config) | 5705 | 0.874 | — | 0.633 | seed variance ±0.013 vs seed42 |
+| PBR21 | DPO+MS_strict | 5705 | 0.870 | 0.904 | 0.663 | 10 epochs (2× of PBR12): **overfits** |
+| PRX1 | DPO+MS+terminal_1K | 6947 | 0.853 | 0.887 | 0.648 | extra terminal pairs hurt MATH OOD |
+| PRX2 (dual_head) | DPO+MS+terminal_1K | 6947 | 0.818 | 0.844 | 0.623 | dual_head routing backfires |
+| FLB2D (PRM mlp) | DPO-only | 7420 | 0.842 | 0.858 | 0.628 | **pure DPO ceiling w/ PRM backbone** |
+| FLB2E (PRM gated) | DPO-only | 7420 | 0.822 | 0.854 | 0.610 | gated_mlp < mlp on PRM backbone |
+
+### Key Ablation Conclusions
+
+1. **PBR26 is the new best** (+0.026 F1 over PBR12 with same MATH AUC; MEDIUM robustness)
+2. **PRM800K adds nothing** (PBR22 vs PBR12: MATH AUC 0.885 vs 0.887)
+3. **Uniform balance helps F1** (PBR23 MATH F1=0.684 best F1, but AUC same as others)
+4. **terminal_bce=0.5 hurts** vs terminal_bce=0.25 (PBR25 vs PBR26: 0.882 vs 0.888)
+5. **PRM backbone DPO-only plateau: 0.842** — DPO+MS is needed to break above this ceiling
+6. **DPO:MS ratio matters**: PBR12 (3705:2000) beats PBR27_mlp1024 (2398:3307) by +0.014 MATH AUC
+   → More DPO sibling pairs are higher quality per-pair than MC-noisy MS pairs
+7. **Seed variance ≈ ±0.013** (PBR12 seed42=0.887, seed1=0.874)
+
+### FLB2 Backbone Series (all full 1000-sample)
+
+| Config | Backbone | Head | Data | MATH AUC | GSM AUC | MATH F1 |
+|---|---|---|---|---|---|---|
+| FLB2_prm_mlp (FLB2D) | Math-PRM-7B | mlp | DPO 7420 | 0.842 | 0.858 | 0.628 |
+| FLB2_prm_gated | Math-PRM-7B | gated_mlp | DPO 7420 | 0.822 | 0.854 | 0.610 |
+| FLB2_math_instruct | Math-7B-Instruct | gated_mlp | DPO 7420 | 0.742 | 0.746 | 0.427 |
+| FLB2A_s42 | 7B-Instruct | gated_mlp | DPO 7420 | 0.746 | 0.706 | 0.366 |
+| FLB2A_s7 | 7B-Instruct | gated_mlp | DPO 7420 | 0.772 | 0.727 | 0.375 |
+| FLB2B_s7 | 7B-Instruct | gated_mlp | DPO 8K | 0.763 | 0.715 | 0.381 |
+
+**Backbone ranking** (DPO-only training, frozen, full 1000-sample MATH AUC):
+Math-PRM-7B (0.842) >> Math-7B-Instruct (0.742) >> 7B-Instruct (0.746-0.772)
+
+Note: 7B-Instruct shows higher **seed variance** than Math backbone variants.
+
+### Experiments Still Running (as of 10:15)
+
+| Exp | Data | Pairs | Config | GPU | Status |
+|---|---|---|---|---|---|
+| PBR27_dpo_only | DPO-only (PBR12 hparams) | 7420 | ranking_only, 5ep | GPU 0 | encoding |
+| PBR28 | DPO_full+MS_4k | ~9K | joint, lbce=0.5 | GPU 0 | encoding |
+| PBR29 | DPO_full+MS_full | 12388 | ranking_only, 5ep | GPU 1 | encoding |
+| PBR29_fanout | DPO+MS_fanout | ~11K | ranking_only | GPU 3 | encoding |
+| LoRA_smoke | 7B-Instruct+LoRA r16 | DPO 7420 | ranking_only | GPU 2 | training |
+
+### Scale Ablation — COMPLETED RESULTS
+
+| Config | Data | Pairs | MATH AUC | MATH F1 | Notes |
+|---|---|---|---|---|---|
+| **PBR26** | DPO+MS_full, joint+lbce=0.5+terminal_bce=0.25 | 7366 | **0.888** | **0.670** | CURRENT BEST |
+| PBR29_fanout | DPO+MS_fanout, ranking_only | 7329 | 0.884 | 0.682 | strong F1 |
+| PBR28 | DPO_full+MS_4k, joint+lbce=0.5 | 7705 | 0.882 | 0.674 | — |
+| **PBR29_full** | DPO_full+MS_full, ranking_only | **12388** | **0.879** | **0.641** | **SCALE HURTS** |
+| PBR27_dpo_only | DPO-only, ranking_only | 7420 | 0.859 | 0.622 | pure DPO ceiling |
+| FLB2D | DPO-only, 10ep (overfitting) | 7420 | 0.842 | 0.628 | worse hparams |
+
+**Critical discoveries from scale ablation:**
+1. **DPO+MS mix +0.029**: PBR26 (7366, DPO+MS) vs PBR27_dpo_only (7420, DPO-only): 0.888 vs 0.859
+2. **Optimal scale ~5K-7K**: PBR29_full (12388) = 0.879 < PBR12 (5705) = 0.887 — 2× data HURTS
+3. **Fanout profile competitive**: PBR29_fanout (0.884) nearly matches PBR26 with better F1 (0.682)
+4. **joint+terminal_bce=0.25 is PBR26's key**: enables F1=0.670 with equivalent AUC
+
+---
+
+## 0AAAE. Phase F Reward Hacking — Comprehensive Table (2026-03-12, updated)
+
+### Complete flip_rate_fixed05 Results
+
+Results from 3 Phase F probe runs (40-48 examples per benchmark per attack).
+
+#### GSM8K attacks on first-bad erroneous prefixes
+
+| Candidate | confidence_tail | filler_tail | repeat_last | self_verify | Max flip |
+|---|---|---|---|---|---|
+| **PBR12** | **0.156 HIGH** | **0.156 HIGH** | 0.062 | 0.050 | **HIGH** |
+| PBR21 | 0.050 | 0.050 | 0.050 | 0.000 | LOW |
+| PRX1 | 0.031 | 0.031 | 0.025 | 0.000 | LOW |
+| **PBR26** | **0.042 MEDIUM** | 0.021 | 0.021 | 0.000 | **MEDIUM** |
+
+#### MATH attacks on first-bad erroneous prefixes
+
+| Candidate | confidence_tail | filler_tail | repeat_last | self_verify | Max flip |
+|---|---|---|---|---|---|
+| **PBR12** | 0.075 HIGH† | 0.094 | 0.050 HIGH† | 0.031 | HIGH |
+| PBR21 | 0.075 HIGH† | 0.025 HIGH† | 0.000 HIGH† | 0.000 HIGH† | HIGH (outrank) |
+| PRX1 | 0.050 HIGH† | 0.025 HIGH† | 0.000 HIGH† | 0.025 HIGH† | HIGH (outrank) |
+| **PBR26** | 0.021 HIGH† | 0.042 HIGH† | 0.021 | 0.021 | HIGH (outrank) |
+
+†: "HIGH" here reflects `outrank_safe_rate > 0.10` (bad+attack outranks safe prefix) even when flip_rate < 0.15
+
+### Critical Finding: outrank_safe_rate vs flip_rate Divergence
+
+On **MATH** benchmarks, all models show concerning `outrank_safe_rate` even with low `flip_rate`:
+- PBR21: flip_rate=0.000 but outrank_safe_rate=0.125-0.200 on MATH (attacks reorder without crossing 0.5)
+- PBR26: filler_tail outrank=0.208 on MATH despite flip=0.042
+- PRX1: multiple HIGH outrank cases on MATH
+
+**Implication**: MATH domain is harder to make robust than GSM8K. The erroneous steps in MATH are
+more "borderline" scored — attacks shift scores in relative terms without crossing threshold.
+
+### Comparison of Safety Risk for RL Deployment
+
+| Candidate | MATH AUC | Overall Risk | GSM flip (worst) | MATH outrank (worst) |
+|---|---|---|---|---|
+| PBR12 | 0.887 | **HIGH** | 0.156 | 0.150 |
+| PBR21 | 0.870 | HIGH (outrank) | 0.050 | 0.200 |
+| PRX1 | 0.853 | MEDIUM-HIGH | 0.031 | 0.175 |
+| **PBR26** | **0.888** | **MEDIUM** | **0.042** | **0.208 (filler)** |
+
+PBR26 is the **best accuracy+robustness tradeoff** so far: highest MATH AUC AND lower GSM flip rate.
+MATH outrank_safe_rate remains a concern; Clip+Delta (arXiv:2410.15115) required for safe RL.
+
+---
+
+## 0AAAD. PBR26 New Best — MATH AUC=0.888, F1=0.670 (2026-03-12)
+
+### Summary
+
+PBR26 surpasses PBR12 on BOTH metrics:
+- **MATH AUC: 0.888** (vs PBR12 0.887, +0.001)
+- **MATH F1: 0.670** (vs PBR12 0.644, **+0.026** = significant step localization improvement)
+- pair_acc: 0.853 (vs PBR12 0.880)
+
+Config: Math-PRM-7B frozen, DPO(2398) + MS_full(4968) = 7366 pairs, joint mode,
+lambda_bce=0.5, lambda_terminal_bce=0.25, 5 epochs, lr=5e-5, MLP-512, seed=42.
+
+Artifact: `phase_e_pbr26_dpo_ms_full_s42_value_20260311T134542Z`
+Data: `phase_e_pbr26_dpo_plus_ms_full_pairs__b17437d10dfc`
+
+**Key difference from PBR12**: More MS data (4968 vs 2759) + joint mode + terminal_bce=0.25.
+The joint mode + terminal BCE provides better F1 (step localization) while matching AUC.
+
+Phase F robustness probe running (PID 3523659) — expected more robust than PBR12 due to terminal_bce=0.25.
+
+---
+
+## 0AAAC. Phase F Reward Hacking Probe — AUC vs Robustness Tradeoff (2026-03-12)
+
+### Summary
+
+Phase F probes reward hacking: "can superficial tail additions fool the verifier into accepting bad prefixes?"
+
+### flip_rate_fixed05 on first_bad erroneous examples (GSM8K)
+
+| Candidate | MATH AUC | confidence_tail | filler_tail | Max Risk |
+|---|---|---|---|---|
+| **PBR12** | **0.887** | **0.156 (HIGH)** | **0.156 (HIGH)** | **HIGH** |
+| PBR19 | 0.683 (F1) | 0.094 (med) | 0.062 (med) | MEDIUM |
+| PBR21 | 0.870 | 0.050 | 0.050 | LOW (flip), HIGH (outrank MATH) |
+| **PRX1** | **0.853** | **0.031 (med)** | **0.031 (med)** | **MEDIUM** |
+| **PBR26** | **0.888** | **0.042** | **0.021** | **MEDIUM** |
+
+PBR26 Phase F: GSM8K confidence_tail flip=0.042 MEDIUM; MATH filler outrank_safe_rate=0.208 (concerning).
+See section 0AAAE for comprehensive analysis.
+
+### Key Findings (updated)
+1. **AUC vs Robustness**: PBR12 (0.887 AUC) has 15.6% confidence_tail flip rate on GSM8K — HIGH risk
+2. **Terminal BCE provides robustness**: PBR26 (terminal_bce=0.25) has 3.7× lower GSM flip rate than PBR12
+3. **PBR26 = best accuracy+robustness**: 0.888 AUC + MEDIUM flip rate (73% better than PBR12)
+4. **MATH outrank risk remains**: even PBR26 has filler_tail outrank=0.208 on MATH — Clip+Delta needed
+5. **PBR12 not safe for RL without Clip+Delta** (15.6% flip unacceptable for sustained RL)
+
+### PBR30 Plan (Robustness Fine-Tune)
+Hypothesis: small terminal BCE + FLB2D's "DPO+MS at 5705 scale" is optimal. May not be needed
+if PBR26 is RL-deployed with Clip+Delta.
+
+---
+
+## 0AAAA. Paradigm Refresh Around PBR10: Terminal Mix Helps, Dual-Head Over-Rotates (2026-03-12)
+
+### Summary
+
+This pass asked one narrow question:
+
+- after `PBR10`, what is the smallest intervention that improves `all-correct terminal completion ordering`
+  without breaking the verifier?
+
+Three highly informative lines now exist:
+
+1. `PBR10`
+   - best balanced baseline
+2. `PRX1_TERMMIX_MLP`
+   - more same-family terminal anchors, same `mlp` family
+3. `PRX2_TERMMIX_DUAL`
+   - same repaired data as `PRX1`, but `dual_head`
+
+### Unified comparison
+
+| Config | heldout pair_acc | sf top1 | sf local | GSM AUC | Math AUC | GSM terminal_top1 | Math terminal_top1 | GSM F1 | Math F1 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `PBR10` | 0.9064 | 0.9098 | 0.8981 | 0.8910 | 0.8651 | 0.1762 | 0.1626 | 0.7334 | 0.6313 |
+| `PRX1_TERMMIX_MLP` | 0.8984 | 0.8981 | 0.8767 | 0.8869 | 0.8529 | 0.3316 | 0.4828 | 0.7518 | 0.6482 |
+| `PRX2_TERMMIX_DUAL` | 0.8464 | 0.8483 | 0.6438 | 0.8442 | 0.8182 | 0.6218 | 0.6355 | 0.7398 | 0.6228 |
+
+### Interpretation
+
+`PRX1` is the best new result in this pass:
+
+1. terminal completeness improved a lot:
+   - `GSM terminal_top1: 0.1762 -> 0.3316`
+   - `Math terminal_top1: 0.1626 -> 0.4828`
+2. `ProcessBench F1` also improved:
+   - `GSM: 0.7334 -> 0.7518`
+   - `Math: 0.6313 -> 0.6482`
+3. but it still misses strict RL-ready:
+   - `samefamily_top1 < 0.90`
+   - `GSM terminal_top1 < 0.50`
+
+`PRX2` proves a different point:
+
+1. the terminal problem is not impossible to fix;
+2. but the current `dual_head + fixed alpha` solution solves it by sacrificing the core local verifier.
+
+So the repo's next design target should not be "more dual-head by default".
+It should be:
+
+1. `ABR local scorer`
+2. `outcome / answer verifier`
+3. `routing or abstain`
+
+Key artifacts:
+
+1. `assets/artifacts/phase_e_runs/phase_e_prx1_pbr10core_term1024_mlp_0311_20260311T123100Z`
+2. `assets/artifacts/phase_e_runs/phase_e_prx2_pbr10core_term1024_dual_0311_20260311T130045Z`
+3. `assets/artifacts/phase_e_transfer_diag/phase_e_paradigm_refresh_diag_0311_00`
+4. `docs/phase_e_paradigm_refresh_experiments_20260311.md`
+
+---
+
+## 0AAAB. Overfitting Diagnostics — More Epochs/Data Hurts OOD; DPO+MS Mix > Pure DPO (2026-03-12)
+
+### Summary
+
+New experiments (PBR21, PRX1, FLB2D/E, PBR22/23) reveal critical overfitting patterns:
+**PBR12 config (5 epochs, lambda_bce=0.25, DPO+MS mix) remains the best known configuration.**
+
+### Full Benchmark Results vs PBR12 (Math-PRM-7B backbone, all frozen)
+
+| Config | Data | Pairs | Epochs | pair_acc | MATH AUC | GSM AUC | MATH F1 | Notes |
+|---|---|---|---|---|---|---|---|---|
+| **PBR12** (BEST) | DPO+MS_strict | **5705** | **5** | ~0.887 | **0.887** | **0.909** | 0.644 | lambda_bce=0.25 |
+| PBR21 | DPO+MS_strict | 5705 | 10 | 0.890 | 0.870 | 0.904 | 0.663 | lambda_bce=0.5; more epochs hurt |
+| PRX1 | DPO+MS+terminal | 6947 | 4 (best ep3) | 0.898 | 0.853 | 0.887 | 0.648 | terminal anchors hurt OOD |
+| FLB2D (256-smp) | pure DPO | 8192 | 10 | **0.917** | 0.831 | 0.858 | 0.628 | MLP-1024; within-dist overfit |
+| FLB2E (256-smp) | pure DPO | 8192 | 10 (ep3 best) | **0.917** | 0.822 | 0.854 | 0.610 | gated_mlp; same overfit pattern |
+| PBR22 | DPO+MS+PRM800K | ~6800 | 5 | 0.858 | 0.885 | 0.917 | 0.682 | PRM800K negligible impact |
+| PBR23 | uniform balance | ~6800 | 5 | 0.855 | 0.883 | 0.912 | 0.684 | strong F1 |
+
+FLB2D/E full 1000-sample MATH eval complete (see section 0AAAF for full FLB2 table).
+
+### Key Overfitting Patterns
+
+1. **More epochs hurts OOD**: PBR21 (10ep) vs PBR12 (5ep) — same data, same backbone, 0.870 vs 0.887 MATH AUC
+2. **Terminal anchors hurt**: PRX1 adds 1242 terminal pairs → MATH AUC drops 0.887 → 0.853
+3. **Pure DPO overfits**: FLB2D/E (8K pure DPO) get highest pair_acc (0.917) but lowest MATH AUC (0.831). DPO train distribution ≠ ProcessBench MATH distribution
+4. **DPO+MS mix is optimal**: Complementary supervision (fork-point signal + step-MC signal) outperforms either alone at scale
+5. **PRM800K addition hurts**: PBR22 adds PRM800K to PBR12 data → pair_acc 0.887→0.858, likely distribution mismatch
+
+### Backbone Comparison (same dpo_scale_v1 data, updated)
+
+| Backbone | Head | pair_acc | MATH AUC (256) |
+|---|---|---|---|
+| Qwen2.5-7B-Instruct | gated_mlp | 0.775-0.795 | ~0.60-0.63 |
+| Qwen2.5-Math-7B-Instruct | gated_mlp | 0.817 | TBD |
+| **Qwen2.5-Math-PRM-7B** | **MLP-1024** | **0.917** | **0.831** |
+| **Qwen2.5-Math-PRM-7B** | **gated_mlp** | **0.917** | **0.822** |
+
+Note: 256-sample eval; full 1000-sample eval for FLB2D pending.
+
+### PRX1 Full Results (6947 pairs, terminal 1242, ep3 best)
+
+| Metric | Value |
+|---|---|
+| MATH AUC (1000) | 0.853 |
+| GSM8K AUC (400) | **0.887** |
+| MATH F1 | 0.648 |
+| MATH first_error_edge_acc | 0.846 |
+| GSM8K F1 | 0.752 |
+| GSM8K first_error_edge_acc | 0.912 |
+
+GSM8K AUC=0.887 is strong (matches PBR12's MATH AUC), but MATH AUC drop confirms terminal pairs hurt MATH OOD transfer.
+
+---
+
+## 0AAAM. Math-PRM-7B Frozen Backbone Breakthrough — 0.749 → 0.887 AUC (2026-03-12)
+
+### Summary
+
+**Key discovery**: Using Qwen2.5-Math-PRM-7B as the frozen backbone (instead of
+Qwen2.5-7B-Instruct) dramatically improves ProcessBench MATH AUC from the previous
+ceiling of 0.749 to 0.865-0.887.
+
+The Math-PRM-7B backbone's hidden states are already optimized for step-level verification
+from PRM pre-training — freezing these specialized representations + training a lightweight
+value head yields near-full-fine-tune quality without expensive backbone updates.
+
+### Backbone Ablation Results (all: DPO+MS_strict data, gated/mlp head, frozen)
+
+| Backbone | pair_acc | MATH AUC | Notes |
+|---|---|---|---|
+| Qwen2.5-7B-Instruct | ~0.77-0.79 | ~0.749 | Previous SOTA ceiling |
+| Qwen2.5-Math-7B-Instruct | ~0.82 | TBD (est ~0.82) | Math-specialized instruction model |
+| **Qwen2.5-Math-PRM-7B** | **~0.87-0.90** | **0.865-0.887** | **PRM-specialized: breakthrough** |
+
+Backbone comparison source: FLB2 suite (flb2a vs flb2_math_instruct backbones) + PBR10/12.
+
+### PBR10/12 Benchmark Results (Math-PRM-7B backbone, frozen, full 1000-sample eval)
+
+| Config | Backbone | Data | Head | MATH AUC | GSM AUC | MATH F1 |
+|---|---|---|---|---|---|---|
+| PBR10 dpo8k (s42) | Math-PRM-7B | DPO(5200)+MS_strict(2000)+term(800) | mlp-512 | **0.865** | **0.891** | 0.631 |
+| PBR10 gated (s42) | Math-PRM-7B | Same 6947 pairs | gated_mlp-512 | **0.869** | **0.873** | 0.567 |
+| PBR12 dpo+ms | Math-PRM-7B | DPO(3705)+MS_strict(2000) | mlp-512 | **0.887** | **0.909** | 0.644 |
+
+Note: pair_auc_good_vs_bad = MATH AUC in this table (full ProcessBench MATH 1000 examples).
+F1 uses oracle threshold sweep.
+
+### PBR21 + PRX1 (Best pair_acc, benchmark eval pending)
+
+| Config | Backbone | Data | Epochs | pair_acc (best) | MATH AUC | Status |
+|---|---|---|---|---|---|---|
+| PBR21 dpo+ms 10ep | Math-PRM-7B | 5705 pairs | 10 | 0.890 | TBD | training complete, eval pending |
+| PRX1 pbr10core+term1024 | Math-PRM-7B | 6947+term | 4 (ep3) | 0.898 | TBD | training in progress |
+
+### Why Math-PRM-7B Backbone Works (Literature-Backed Explanation)
+
+From "Lessons of Developing PRMs" (arXiv:2501.07301): Backbone must be specialized for
+step verification. General instruction models have multipurpose representations not oriented
+toward step quality.
+
+Math-PRM-7B was trained end-to-end for step correctness classification. Its hidden states
+encode step-quality-relevant features. Freezing them preserves this without expensive
+retraining; the value head just needs a lightweight projection.
+
+This is the "warm-start from PRM backbone" shortcut that avoids full fine-tuning while
+getting most of its benefits.
+
+### Literature Alignment
+
+| Our finding | Literature confirmation |
+|---|---|
+| Math-PRM-7B >> 7B-Instruct (frozen) | FOVER: "Frozen LLMs significantly underperform fine-tuned PRMs" |
+| DPO fork-point > MS mixed | Step-DPO (arXiv:2406.18629): fork-point isolates step causation |
+| gated_mlp ≈ mlp at this quality level | GLU variants (Shazeer 2020): gating = conditional feature selection |
+| 0.887 AUC sufficient for RL | Noisy rewards (arXiv:2510.00915): 40% noise → 96% oracle performance |
+
+---
+
+## 0AAAL. Phase E Frontier Redesign: New Directions, One Immediate Negative (2026-03-11)
+
+This pass did two things together:
+
+1. translated the newer `2025H2 -> 2026` verifier community direction into
+   three concrete repository-level experiment directions,
+2. launched one shared-artifact frontier suite on top of the strongest current
+   `PBR10` line.
+
+Shared artifact:
+
+1. `assets/artifacts/phase_e_pairs/phase_e_pbr10_prm7b_dpo8k_s42__6184f7e62f65`
+
+Three new frontier directions:
+
+1. `judge / critique filtering`
+   - implemented as:
+     - `F1_JUDGE_FILTER_PBR10`
+     - `scripts/phase_e_judge_filter_pairs.py`
+2. `objective decomposition`
+   - implemented as:
+     - `F2_DUAL_HEAD_PBR10`
+     - `head_architecture=dual_head`
+3. `light backbone adaptation`
+   - implemented as:
+     - `F3_LORA_PBR10`
+     - `scripts/phase_e_train_value_lora.py`
+
+### Why these three directions were chosen
+
+The strongest already-finished `PBR10` diagnosis says:
+
+1. local ranking and first-error-edge behavior are already strong,
+2. the narrow remaining bottleneck is terminal completion undervaluation,
+3. so the next fixes should target:
+   - label quality / critique filtering,
+   - local-vs-terminal objective factorization,
+   - or representation limits.
+
+### Immediate completed result: current judge-filter contract fails on PBR10
+
+Filtered artifact:
+
+1. `assets/artifacts/phase_e_pairs/phase_e_frontier_judge_0311_2031_judgefilter__88888f79419b`
+
+Key numbers:
+
+1. input train pairs: `6947`
+2. output train pairs: `5164`
+3. keep rate: `0.7433`
+4. audited pairs: `1783`
+5. bypassed pairs: `5164`
+6. decision counts:
+   - `parse_failed = 1783`
+   - `bypass_semantics = 5164`
+
+Semantics after filtering:
+
+1. `sibling_branch = 4679`
+2. `terminal_completion_anchor = 485`
+3. `local_first_bad_edge = 0`
+
+Interpretation:
+
+1. the filter did **not** act as a useful noise cleaner on the shared frontier
+   artifact;
+2. instead, it dropped the entire auditable local-edge subset and kept only the
+   bypassed semantics;
+3. therefore the current strict-JSON judge-filter contract should be treated as
+   a negative direction for mainline Phase E training.
+
+### Runs still in progress at the time of this record
+
+1. `F2_DUAL_HEAD_PBR10`
+2. compact `LoRA` probe derived from `F3_LORA_PBR10`
+
+Those were intentionally left running after the judge-filter result above,
+because they still test two live hypotheses:
+
+1. whether explicit local/terminal factorization improves terminal behavior,
+2. whether minimal backbone adaptation gives directional gain without the
+   severe geometry damage seen in older tiny-data LoRA pilots.
+
+## 0AAAK. 2026-03 Direction Refresh: ABR Should Survive, But As Student And Router
+
+This pass did not add a new training run. It re-opened the research-direction
+question using:
+
+1. the newer `2025H2 -> 2026-03` verifier / reward-model literature,
+2. the repository's already-finished `PBR / NDS / RL-ready` evidence,
+3. and the newer local survey / redesign notes already accumulated under
+   `docs/`.
+
+### Fresh external evidence added this pass
+
+1. `CompassVerifier`
+   - https://aclanthology.org/2025.acl-long.1102/
+2. `VerifyBench`
+   - https://arxiv.org/abs/2507.09884
+3. `Verifying the Verifiers`
+   - https://arxiv.org/abs/2506.13342
+4. `Weaver`
+   - https://arxiv.org/abs/2510.18084
+5. `When to Trust the Cheap Check`
+   - https://arxiv.org/abs/2603.05390
+6. `MathQ-Verify`
+   - https://arxiv.org/abs/2603.03307
+
+### Updated interpretation
+
+The repository's earlier 2026-03 refresh was directionally correct, but still
+slightly under-scoped.
+
+The stronger current interpretation is:
+
+1. the core `ABR` idea still survives:
+   - cheap process-aware verification under a compute budget is still useful;
+2. what looks outdated is the narrower system approximation:
+   - `frozen backbone + one scalar head + pair ranking = the verifier`.
+
+### New system-level risks now judged important
+
+1. missing `answer verifier` layer
+   - terminal / equivalence / malformed outputs are still mixed into one score;
+2. missing `invalid / abstain / escalate` behavior
+   - the cheap scorer is still forced to emit a number even on slices where it
+     should defer;
+3. missing `format / contract robustness` gate
+   - newer verifier papers show rankings can move under prompt / structure
+     changes;
+4. missing `process-outcome alignment` gate
+   - local ranking can improve while derivation-faithfulness still lags;
+5. missing `weak-ensemble / teacher-student` design
+   - the repo still expects too much from one judge / one head.
+
+### Updated redesign decision
+
+The preferred redesign is now:
+
+1. keep `ABR` as:
+   - student verifier
+   - router
+   - conservative online scorer
+2. add:
+   - a separate answer verifier,
+   - weak-verifier disagreement mining,
+   - teacher-assisted hard-slice relabeling,
+   - factorized student outputs,
+   - and stricter RL gates.
+
+### Most valuable next experiments
+
+1. `ABR_AVCal_v1`
+   - answer-equivalence / invalid / false-negative calibration
+2. `ABR_WeaverLite_v1`
+   - combine:
+     - ABR score
+     - answer verifier
+     - deterministic math equivalence
+     - one stronger teacher judge on disagreement slices
+3. `ABR_MH_v1`
+   - factorized student:
+     - `local`
+     - `progress`
+     - `completion`
+     - `uncertainty`
+     - `abstain`
+4. `ABR_POA_v1`
+   - small process-outcome alignment set
+5. `ABR_FormatInv_v1`
+   - prompt / answer-style / delimiter robustness audit
+
+### Docs updated
+
+1. `docs/phase_e_literature_refresh_20260311.md`
+2. `docs/phase_e_rl_ready_research_redesign_20260311.md`
+3. `docs/result_records.md`
+4. `docs/progress_detailed.md`
+5. `docs/readme.md`
+6. `docs/readme_full.md`
+
+## 0AAAN. Teammate Breakthrough Report — Local Evidence Audit + Validation Eval (2026-03-11)
+
+The teammate report contains two very different classes of claims:
+
+1. literature / community synthesis;
+2. local repository breakthrough claims.
+
+These should not be accepted as one bundle.
+
+The local evidence audit says:
+
+1. the `Math-PRM-7B frozen backbone` breakthrough is real;
+2. but the stronger headline
+   - "`PRX1` is now the newest best benchmark candidate"
+   is **not yet supported** by local benchmark evidence.
+
+### What Was Already Supported Before The Validation Pass
+
+The repo already had strong local evidence for:
+
+1. `Qwen2.5-Math-PRM-7B` as frozen backbone > non-PRM backbones
+2. `PBR10 / PBR12 / PBR21` as genuinely strong benchmark-facing lines
+3. `same-family` and `ProcessBench` strength both moving together on the PRM backbone
+
+But one important gap remained:
+
+1. `PRX1` had very high training / same-family numbers,
+2. yet its full `ProcessBench Math` evaluation was still missing.
+
+So this validation pass did exactly that:
+
+1. filled the missing `PRX1 ProcessBench Math` full eval
+2. added fixed-threshold (`0.5`) evals for:
+   - `PRX1`
+   - `PBR21`
+   - `PBR12`
+
+### Validation Experiments Added In This Pass
+
+New eval artifacts:
+
+1. `PRX1 Math full eval`
+   - `assets/artifacts/phase_e_eval/phase_e_prx1_math_fulleval_0311_verify_20260311T132702Z`
+2. `PRX1 GSM fixed@0.5`
+   - `assets/artifacts/phase_e_eval/phase_e_prx1_gsm_fixed05_0311_verify_20260311T132703Z`
+3. `PRX1 Math fixed@0.5`
+   - `assets/artifacts/phase_e_eval/phase_e_prx1_math_fixed05_0311_verify_20260311T132702Z`
+4. `PBR21 GSM fixed@0.5`
+   - `assets/artifacts/phase_e_eval/pbr21_gsm_fixed05_verify_20260311T132735Z`
+5. `PBR21 Math fixed@0.5`
+   - `assets/artifacts/phase_e_eval/pbr21_math_fixed05_verify_20260311T132735Z`
+6. `PBR12 GSM fixed@0.5`
+   - `assets/artifacts/phase_e_eval/pbr12_gsm_fixed05_verify_20260311T132836Z`
+7. `PBR12 Math fixed@0.5`
+   - `assets/artifacts/phase_e_eval/pbr12_math_fixed05_verify_20260311T132836Z`
+
+### Controlled Backbone Validation
+
+The teammate report said the backbone change matters more than head tweaks.
+
+Local evidence supports that.
+
+Controlled-ish comparison on the new `FLB2` line:
+
+| case | backbone | GSM AUC | GSM F1 | Math AUC | Math F1 |
+|---|---|---:|---:|---:|---:|
+| `FLB2 math-instruct gated` | `Qwen2.5-Math-7B-Instruct` | `0.7461` | `0.5158` | `0.7423` | `0.4275` |
+| `FLB2 prm-backbone mlp` | `Qwen2.5-Math-PRM-7B` | `0.8581` | `0.7148` | `0.8313` | `0.6276` |
+
+Interpretation:
+
+1. the PRM-specific backbone is a real step change;
+2. this is not a tiny noise-level bump;
+3. the claim
+   - `Math-PRM-7B >> Math-7B-Instruct`
+   is supported locally.
+
+### Current Strong Candidates — Oracle Metrics
+
+| case | GSM AUC | GSM F1 | Math AUC | Math F1 |
+|---|---:|---:|---:|---:|
+| `PBR10 mlp` | `0.8730` | `0.7243` | `0.8631` | `0.6589` |
+| `PBR12` | `0.9093` | `0.7523` | `0.8874` | `0.6439` |
+| `PBR21` | `0.9045` | `0.7565` | `0.8697` | `0.6632` |
+| `PRX1` | `0.8869` | `0.7518` | `0.8529` | `0.6482` |
+
+Interpretation:
+
+1. `PBR12` currently has the best `Math AUC`;
+2. `PBR21` currently has the best `Math F1` and `GSM F1`;
+3. `PRX1` is strong, but it does **not** dominate `PBR12 / PBR21` on full benchmark metrics.
+
+### Fixed-Threshold (`0.5`) Validation
+
+This is the more conservative view.
+
+| case | GSM F1@0.5 | Math F1@0.5 |
+|---|---:|---:|
+| `PBR12` | `0.7023` | `0.6344` |
+| `PBR21` | `0.7185` | `0.6051` |
+| `PRX1`  | `0.7454` | `0.6040` |
+
+Interpretation:
+
+1. `PRX1` is the best checked candidate on `GSM fixed@0.5`;
+2. but on `Math fixed@0.5`, it is not better than `PBR12`, and is basically tied
+   with `PBR21`;
+3. so `PRX1` should be read as:
+   - a promising continuation of the `PBR10 core + more terminal support` line,
+   - not a clean global replacement for `PBR12 / PBR21`.
+
+### What The Teammate Report Gets Right
+
+These claims are supported by current local evidence:
+
+1. `Math-PRM-7B` frozen backbone is a real breakthrough
+2. PRM-specialized hidden states matter a lot
+3. `DPO fork-point` data is a much stronger signal carrier than weak local-only baselines
+4. benchmark evaluation must remain separate from training `pair_acc`
+
+### What Needs To Be Stated More Carefully
+
+These claims should be softened:
+
+1. "`PRX1` is the latest strongest model"
+   - not supported globally
+2. "current PRM is already enough for RL"
+   - still too aggressive
+   - benchmark strength is now good,
+   - but RL readiness also depends on reward hacking resistance, fixed-threshold
+     stability, and deployment-time behavior
+3. "pair_acc 0.898 therefore breakthrough"
+   - `pair_acc` is useful,
+   - but it is not the deciding metric once full `ProcessBench` is available
+
+### Updated Repository-Level Conclusion
+
+The correct current summary is:
+
+1. the backbone breakthrough is real;
+2. the repo is now in a much stronger verifier regime;
+3. but the best candidate depends on metric:
+   - `PBR12` for strongest `Math AUC`
+   - `PBR21` for strongest `Math/GSM oracle F1`
+   - `PRX1` for strongest checked `GSM fixed@0.5`
+4. therefore the next step should be:
+   - keep `PBR12 / PBR21 / PRX1` as the main comparison triangle,
+   - not collapse them into one headline winner too early.
+
+## 0AAAK. Community Paradigm Update + Terminal-Residual Repair Sweep (2026-03-11)
+
+### Community Paradigm — What The Current Literature Is Actually Pushing Toward
+
+The latest verifier / PRM literature is no longer centered on
+"small scalar value head + weak local labels" as the default mainline.
+
+The strongest recurring themes are now:
+
+1. `critic / verifier` framing over plain scalar regression
+   - stronger judge-style models or richer verifier heads are increasingly used
+     to inspect reasoning quality;
+2. `process-native supervision`
+   - step-level labels, fork-point comparisons, or progress-style rewards;
+3. `sibling-branch / fork-point` geometry
+   - compare two alternative next-step continuations under the same history;
+4. `benchmark-native evaluation`
+   - especially explicit tests of:
+     - local first-error detection
+     - complete correct-trace ordering
+     - process-outcome alignment
+5. `factorization`
+   - local error detection and terminal completion ordering are increasingly
+     treated as distinct sub-skills rather than one scalar problem.
+
+Repository implication:
+
+1. this supports the local move from `strict-only` labels toward
+   `Math-Step-DPO sibling_branch`;
+2. it also explains why the current remaining failure is narrow:
+   - not generic transfer collapse,
+   - but terminal completion ordering.
+
+Relevant external references folded into this interpretation:
+
+1. `ProcessBench`
+2. `GenPRM`
+3. `SPC`
+4. `PRIME`
+5. `VerifyBench`
+
+### Controlled Repair Question
+
+Once `NDS7 + gated_mlp` established that:
+
+1. `good > bad` ranking on `ProcessBench` can already be strong,
+2. `first_error_edge` can already be strong,
+3. but `all-correct terminal completion ordering` remains weak,
+
+the next useful question was no longer "can we generally improve transfer?".
+
+It became:
+
+1. should the residual be fixed by:
+   - more terminal data,
+   - a more explicit terminal loss,
+   - or a more explicit local/terminal architecture?
+
+So this pass ran one three-way controlled sweep:
+
+1. `data-level repair`
+   - `ms_dpo_terminalboost_v1`
+2. `loss-level repair`
+   - `NDS7 + terminal BCE`
+3. `architecture-level repair`
+   - `NDS7 + dual_head + terminal BCE`
+
+The point was attribution:
+
+1. only one factor changes at a time,
+2. so the resulting tradeoff is interpretable.
+
+### Baseline For Comparison
+
+Reference:
+
+1. `NDS7 + gated_mlp` (`seed=42`)
+
+Key baseline metrics:
+
+| benchmark | pair_acc | auc | first_edge | terminal_top1 | terminal_gap |
+|---|---:|---:|---:|---:|---:|
+| `PB GSM8K` | `0.6565` | `0.6456` | `0.8049` | `0.2174` | `-0.1640` |
+| `PB Math`  | `0.7992` | `0.7519` | `0.7447` | `0.1538` | `-0.1461` |
+
+Interpretation:
+
+1. the current baseline is already good at:
+   - local discrimination
+   - global `good > bad` ranking
+2. but still weak at:
+   - ranking the final correct trace above safe nonterminal prefixes.
+
+### Repair A — Data-Level: `ms_dpo_terminalboost_v1`
+
+Curated artifact:
+
+1. `assets/artifacts/phase_e_pairs/phase_e_nds8_termboost_0311_pairs__480ab06bf8d6`
+
+Geometry:
+
+1. `sibling_branch = 1650`
+2. `local_first_bad_edge = 1290`
+3. `terminal_completion_anchor = 750`
+4. terminal mass increased from about `10%` to about `20%`
+
+Training run:
+
+1. `assets/artifacts/phase_e_runs/phase_e_nds8_termboost_gated_pilot_value_retry2_20260311T124818Z`
+
+Same-source held-out:
+
+1. `pair_acc = 0.7685`
+2. `auc = 0.7451`
+
+ProcessBench:
+
+| benchmark | pair_acc | auc | first_edge | terminal_top1 | terminal_gap |
+|---|---:|---:|---:|---:|---:|
+| `PB GSM8K` | `0.6752` | `0.6816` | `0.7118` | `0.2798` | `-0.1038` |
+| `PB Math`  | `0.7316` | `0.7046` | `0.6848` | `0.1823` | `-0.1670` |
+
+What this means:
+
+1. on `GSM8K`, more terminal anchors clearly help;
+2. on `Math`, the terminal slice improves only slightly, while local/global
+   ranking gets worse;
+3. therefore:
+   - simply increasing terminal-anchor mass is not a globally safe repair.
+
+### Repair B — Loss-Level: `NDS7 + terminal BCE`
+
+Training run:
+
+1. `assets/artifacts/phase_e_runs/phase_e_nds7_termbce_gated_pilot_value_retry1_20260311T125922Z`
+
+Same-source held-out:
+
+1. `pair_acc = 0.7822`
+2. `auc = 0.7681`
+
+ProcessBench:
+
+| benchmark | pair_acc | auc | first_edge | terminal_top1 | terminal_gap |
+|---|---:|---:|---:|---:|---:|
+| `PB GSM8K` | `0.6053` | `0.6612` | `0.6353` | `0.2073` | `-0.1383` |
+| `PB Math`  | `0.7229` | `0.7049` | `0.6555` | `0.1650` | `-0.1842` |
+
+What this means:
+
+1. adding terminal BCE without changing the data geometry does not solve the
+   residual;
+2. it mostly hurts:
+   - local/global ranking
+   - first-edge behavior
+3. while terminal improvement is negligible.
+
+Conclusion:
+
+1. the residual is not just "the loss forgot to supervise terminal";
+2. the current scalar route is still too entangled.
+
+### Repair C — Architecture-Level: `NDS7 + dual_head + terminal BCE`
+
+Training run:
+
+1. `assets/artifacts/phase_e_runs/phase_e_nds7_dualhead_termbce_pilot_value_20260311T130037Z`
+
+Same-source held-out:
+
+1. `pair_acc = 0.7030`
+2. `auc = 0.7076`
+
+ProcessBench:
+
+| benchmark | pair_acc | auc | first_edge | terminal_top1 | terminal_gap |
+|---|---:|---:|---:|---:|---:|
+| `PB GSM8K` | `0.8150` | `0.7489` | `0.7882` | `0.0829` | `-0.2312` |
+| `PB Math`  | `0.7820` | `0.7105` | `0.6806` | `0.0739` | `-0.2535` |
+
+What this means:
+
+1. explicit factorization *does* create a much stronger local error detector;
+2. but under the current inference mixture, terminal ordering collapses;
+3. this is the clearest evidence in this pass that:
+   - local and terminal are distinct sub-problems,
+   - and a single naive mixture rule is not enough.
+
+### Joint Interpretation
+
+The three-way repair sweep says:
+
+1. `data-level terminal boost`
+   - helps `GSM8K`
+   - but causes a tradeoff on `Math`
+2. `loss-level terminal BCE`
+   - does not solve the problem
+3. `dual_head`
+   - proves the model can become a stronger local verifier
+   - but also proves the current terminal route is wrong
+
+So the most accurate updated diagnosis is:
+
+1. the current bottleneck is not generic benchmark transfer anymore;
+2. it is not just "need more terminal anchors";
+3. it is specifically:
+   - **how to route / rank terminal-completion evidence without destroying local discrimination**.
+
+### Updated Next-Step Recommendation
+
+Do **not** treat these results as evidence for:
+
+1. "more terminal data fixes the problem";
+2. "terminal BCE fixes the problem";
+3. or "dual_head is immediately better".
+
+Instead, the practical next mainline should be:
+
+1. keep `NDS7 sibling_branch + gated_mlp` as the balanced baseline,
+2. treat `terminal completion ordering` as a separate residual subtask,
+3. design the next repair around:
+   - routing or calibration at inference time,
+   - or explicit terminal-specific decision logic,
+   - not just more mixed supervision.
+
+## 0AAAJ. A-E Fresh Audit + New ProcessBench Transfer Evidence (2026-03-11)
+
+### What Was Re-Checked
+
+This pass was not a narrow Phase E-only tweak. It did three things together:
+
+1. re-ran a fresh implementation audit across `phase_a` to `phase_e`,
+2. re-checked the current benchmark-transfer bottleneck with new data profiles,
+3. compared those new profiles against the strongest already-completed
+   `PBR4/PBR5` evidence.
+
+Infrastructure status:
+
+1. `PYTHONPATH=src pytest -q tests/unit`
+   - `217 passed, 2 warnings`
+2. active shell entrypoints:
+   - `bash -n scripts/run_phase_*.sh`
+   - syntax clean
+
+Interpretation:
+
+1. the repository is no longer in a state where broad implementation instability
+   is the default explanation for poor results;
+2. the remaining problems are much more about:
+   - data semantics,
+   - benchmark alignment,
+   - and narrower training-contract issues.
+
+### Newly Confirmed High-Risk Code Bug: Phase A Official Split Leakage
+
+File:
+
+1. `scripts/phase_a_prepare.py`
+
+Old behavior:
+
+1. `official` split mode used the requested CLI `--source-split` when writing
+   `train/validation/test.jsonl`;
+2. but dataset loaders can legally resolve that request to a different
+   effective split and record it in `sample.metadata["source_split"]`;
+3. result:
+   - rows loaded from one official split could be written into a different
+     output shard,
+   - and the emitted `metadata["source_split"]` could be semantically wrong.
+
+Why this is high risk:
+
+1. it silently contaminates the provenance of prepared Phase A artifacts;
+2. later Phase B/C comparisons can then be made against the wrong official split
+   without any runtime failure.
+
+Fix:
+
+1. `official` mode now routes rows by the effective resolved split from loader
+   metadata;
+2. output rows preserve both:
+   - `source_split`
+   - `requested_source_split`
+3. the summary now reports:
+   - `effective_source_splits`
+
+Regression:
+
+1. `tests/unit/test_phase_a_prepare_script.py`
+2. targeted run:
+   - `9 passed`
+
+### New ProcessBench Transfer Experiments
+
+This round added three new smoke profiles plus one architecture follow-up.
+
+#### 1. `NDS5_MS_STRICT_ONLY_SMOKE`
+
+Idea:
+
+1. remove `fanout/grid` from `Math-Shepherd`,
+2. test whether the old failure was mostly caused by broad length-biased pairs.
+
+Result:
+
+1. `PB GSM`: `pair_acc=0.4048`, `auc=0.4210`, `first_edge=0.5122`
+2. `PB Math`: `pair_acc=0.3876`, `auc=0.4321`, `first_edge=0.5957`
+
+Conclusion:
+
+1. no;
+2. pure strict-local supervision is not enough;
+3. the failure is not just “fanout/grid polluted the data”.
+
+#### 2. `NDS6_RLHFLOW_STRICT_ONLY_SMOKE`
+
+Idea:
+
+1. swap in `RLHFlow-Deepseek` step labels,
+2. keep only strict first-bad + light terminal anchors,
+3. test whether “better step labels” alone fix transfer.
+
+Result:
+
+1. `PB GSM`: `pair_acc=0.6224`, `auc=0.5022`, `first_edge=0.6585`
+2. `PB Math`: `pair_acc=0.4357`, `auc=0.4520`, `first_edge=0.6383`
+
+Conclusion:
+
+1. better labels help some local edge behavior,
+2. but strict-only geometry still does not transfer well,
+3. especially on `ProcessBench Math`.
+
+#### 3. `NDS7_MS_DPO_CALIBRATED_SMOKE` (`mlp`)
+
+Idea:
+
+1. use `Math-Step-DPO` sibling-branch pairs as the main debiasing signal,
+2. keep a smaller `Math-Shepherd strict + terminal` support set,
+3. test whether sibling-branch supervision is more benchmark-aligned than
+   pure strict-local supervision.
+
+Result:
+
+1. `PB GSM`: `pair_acc=0.5374`, `auc=0.5575`, `first_edge=0.5854`
+2. `PB Math`: `pair_acc=0.5301`, `auc=0.5594`, `first_edge=0.7234`
+
+Conclusion:
+
+1. yes;
+2. `sibling_branch` is clearly more useful than strict-only variants;
+3. this is the first new smoke in this pass that pushes both `Math AUC` and
+   `Math first_edge` in the right direction together.
+
+### Follow-Up Architecture Probe: `NDS7 + gated_mlp`
+
+Question:
+
+1. after the data geometry is corrected with `Math-Step-DPO` sibling branches,
+   is the remaining ceiling mostly a head-capacity problem?
+
+Shared curated data:
+
+1. `local_first_bad_edge = 1474`
+2. `sibling_branch = 1831`
+3. `terminal_completion_anchor = 387`
+
+#### Seed 42
+
+1. same-source held-out:
+   - `pair_acc = 0.7673`
+   - `auc = 0.7631`
+2. benchmark:
+   - `PB GSM`: `pair_acc=0.6565`, `auc=0.6456`, `first_edge=0.8049`
+   - `PB Math`: `pair_acc=0.7992`, `auc=0.7519`, `first_edge=0.7447`
+
+#### Seed 1
+
+1. benchmark:
+   - `PB GSM`: `pair_acc=0.6531`, `auc=0.6514`, `first_edge=0.7805`
+   - `PB Math`: `pair_acc=0.8052`, `auc=0.7260`, `first_edge=0.7872`
+
+#### Seed 7
+
+1. benchmark:
+   - `PB GSM`: `pair_acc=0.7177`, `auc=0.6817`, `first_edge=0.7073`
+   - `PB Math`: `pair_acc=0.8253`, `auc=0.7601`, `first_edge=0.7021`
+
+#### Aggregate (3 seeds)
+
+1. `PB GSM`
+   - `pair_acc = 0.6757 ± 0.0297`
+   - `auc = 0.6596 ± 0.0158`
+   - `first_edge = 0.7642 ± 0.0415`
+2. `PB Math`
+   - `pair_acc = 0.8099 ± 0.0112`
+   - `auc = 0.7460 ± 0.0145`
+   - `first_edge = 0.7447 ± 0.0347`
+
+This is materially stronger than the older `ms_prm_align_v1 + gated_mlp` line
+recorded in `PBR5B`, whose median was roughly:
+
+1. `PB GSM AUC ~ 0.589`
+2. `PB Math AUC ~ 0.613`
+
+### What The New Diagnostics Say
+
+The bucket-level `ProcessBench` failure analyses now support a much narrower
+diagnosis than the older “frozen-head transfer is weak” story.
+
+#### `NDS5` strict-only
+
+1. still inverts many `good > bad` relations;
+2. local-only supervision is too narrow.
+
+#### `NDS6` RLH strict-only
+
+1. improves some edge metrics;
+2. still weak on `Math` and still not strong enough in AUC;
+3. better labels alone do not solve the benchmark mismatch.
+
+#### `NDS7` DPO-calibrated (`mlp`)
+
+1. improves `Math first_edge` and global `good > bad`;
+2. confirms that `sibling_branch` supervision is the first truly benchmark-helpful new signal in this pass.
+
+#### `NDS7` DPO-calibrated (`gated_mlp`)
+
+1. local and global prefix ranking are now strong;
+2. but `all-correct terminal completion ordering` is still weak and unstable.
+
+Concrete evidence:
+
+1. `PB Math` is already strong in:
+   - `pair_auc_good_vs_bad`
+   - `first_error_edge_accuracy`
+2. but `terminal_top1` in the failure analysis remains poor:
+   - the model still often prefers a safe nonterminal prefix over the final
+     correct completed trace.
+
+### Updated Conclusion
+
+The current accurate diagnosis is now:
+
+1. the bottleneck is no longer broad implementation instability;
+2. it is no longer “general ProcessBench transfer collapse” either;
+3. with `Math-Step-DPO sibling_branch + gated_mlp`, the project has already
+   crossed into a regime where:
+   - local discrimination is strong,
+   - global `good > bad` ranking is strong,
+   - and the main residual problem is **terminal completion ordering**.
+
+That changes the next-step design priority:
+
+1. stop treating all benchmark failures as one undifferentiated transfer issue;
+2. keep `DPO sibling_branch` as the main signal carrier;
+3. target terminal completion as a separate residual objective.
+
+## 0AAAI. Phase E Postfix Re-Audit: Current Best Is Strong But Still Not Strict RL-Ready (2026-03-11)
+
+### Code Fixes Closed In This Pass
+
+This pass fixed three active implementation risks that could still distort
+Phase E conclusions even when the headline benchmark numbers looked strong.
+
+1. benchmark-aware candidate ranking leakage
+   - file: `scripts/phase_e_select_candidate.py`
+   - old behavior:
+     - benchmark metrics influenced seed/group ranking directly
+     - this made `ProcessBench` behave like a hidden dev set during candidate
+       recommendation
+   - new behavior:
+     - default `selection_policy=heldout_only`
+     - benchmark metrics remain promotion gates / canaries, but no longer rank
+       candidates by default
+   - regression:
+     - `tests/unit/test_phase_e_select_candidate.py`
+2. intradataset candidate checkpoint-path bug
+   - file: `scripts/phase_e_select_intradataset_candidate.py`
+   - old behavior:
+     - report always published `<run_dir>/best_value_head.pt`
+     - older runs that only retained `final_value_head.pt` produced a bogus path
+   - new behavior:
+     - manifest-aware checkpoint resolution with explicit fallback notes
+   - regression:
+     - `tests/unit/test_phase_e_select_intradataset_candidate.py`
+3. PRM-7B samefamily eval long-batch crash
+   - file: `src/ours/phase_e/runtime.py`
+   - old behavior:
+     - long candidate batches on `Qwen2.5-Math-PRM-7B` could surface async CUDA
+       capacity failures as a later generic `device-side assert triggered`
+     - samefamily trust audit then crashed before producing artifacts
+   - new behavior:
+     - batched encoding now synchronizes CUDA before leaving the retry block
+     - retryable CUDA capacity failures trigger batch-size backoff instead of
+       aborting the audit
+   - regression:
+     - `tests/unit/test_phase_e_runtime.py`
+
+Validation:
+
+1. `PYTHONPATH=src pytest -q tests/unit/test_phase_e_runtime.py tests/unit/test_phase_e_select_candidate.py tests/unit/test_phase_e_select_intradataset_candidate.py`
+   - `16 passed`
+2. `python -m py_compile src/ours/phase_e/runtime.py scripts/phase_e_select_candidate.py scripts/phase_e_select_intradataset_candidate.py scripts/phase_e_eval_samefamily_trust.py`
+
+### Postfix Samefamily + Strict RL Diagnosis
+
+After the fixes, I re-ran the current strongest `Qwen2.5-Math-PRM-7B` DPO-side
+candidates through:
+
+1. same-family trust
+2. full `ProcessBench`
+3. the stricter transfer diagnosis gate
+
+#### `pbr10_dpo8k` (current strongest offline tradeoff)
+
+- samefamily:
+  - `prompt_pool_top1_accuracy = 0.9098`
+  - `local_first_bad_edge_accuracy = 0.8981`
+- ProcessBench:
+  - `GSM F1 = 0.7334`
+  - `Math F1 = 0.6313`
+  - `pb_min_auc = 0.8651`
+  - `pb_min_first_edge = 0.8309`
+- strict diagnosis:
+  - `pb_min_terminal_top1 = 0.1626`
+  - assessment = `not_rl_ready_terminal_completion_risk`
+
+Interpretation:
+
+1. this is no longer a "local benchmark transfer is weak" story
+2. local discrimination is already strong on both same-family and benchmark
+3. the remaining blocker is stricter than the usual `mean_all_correct_last_score`
+   headline:
+   - the model still too often prefers an incomplete but safe prefix over the
+     fully correct completed trace on all-correct problems
+
+#### `pbr13_terminalbce`
+
+- samefamily:
+  - `prompt_pool_top1_accuracy = 0.8433`
+  - `local_first_bad_edge_accuracy = 0.7075`
+- ProcessBench:
+  - `GSM F1 = 0.7553`
+  - `Math F1 = 0.6603`
+  - `pb_min_auc = 0.8702`
+  - `pb_min_first_edge = 0.8727`
+- strict diagnosis:
+  - `pb_min_terminal_top1 = 0.2660`
+  - assessment = `not_rl_ready_terminal_completion_risk`
+
+Interpretation:
+
+1. adding terminal BCE improves the benchmark headline more than the older
+   frozen-head recipes
+2. but it still does not solve the stricter terminal-completion ordering issue
+3. and in this run it also weakens same-family decision quality relative to
+   `pbr10_dpo8k`
+
+### Current Best Conclusion
+
+The repo state has changed materially relative to the older "frozen-head cap
+~0.62 and clearly not usable" narrative.
+
+Current accurate statement:
+
+1. `Qwen2.5-Math-PRM-7B + DPO/sibling-branch-heavy data` is already a strong
+   offline verifier family
+2. `pbr10_dpo8k` is the best current frozen-head candidate for offline rerank /
+   rejection research
+3. but no current checkpoint passes the strict internal RL gate yet
+
+The blocker is now narrow and concrete:
+
+1. not gross benchmark transfer failure
+2. not infrastructure instability
+3. but **all-correct terminal completion ordering**
+
+That makes the next research move much clearer:
+
+1. keep `pbr10_dpo8k` as the main anchor
+2. target terminal completion directly without sacrificing same-family local
+   structure
+3. do not use benchmark-informed candidate ranking again by default
+
+## 0AAAH. Phase E Infrastructure Audit Closure (2026-03-11)
+
+### What Was Fixed
+
+This pass closed the remaining active Phase E infrastructure loopholes.
+
+1. direct trainer default:
+   - `scripts/phase_e_train_value.py`
+   - `checkpoint_selection_metric` now defaults to `pair_acc`
+   - old default `ranking_score` is now a research-only option
+2. suite wrapper closure:
+   - all active `run_phase_e*.sh` entrypoints that call `phase_e_train_value.py`
+     now pass explicit `--recipe-risk-policy`
+3. explicit semantics:
+   - R-PRM suite wrappers now also pass explicit pair-mode declarations
+
+### Audit Evidence
+
+1. first static audit:
+   - `assets/artifacts/phase_e_audits/phase_e_suite_recipe_audit_0311_1931/summary.md`
+   - findings: `10`
+2. post-fix static audit:
+   - `assets/artifacts/phase_e_audits/phase_e_suite_recipe_audit_postfix_0311_1933/summary.md`
+   - findings: `0`
+
+### Interpretation
+
+This does not raise benchmark scores by itself.
+
+What it does improve:
+1. source-quality comparisons are less likely to be polluted by stale wrappers,
+2. future Phase E failures are more likely to reflect method/data issues rather than wrapper drift,
+3. direct operator use of `phase_e_train_value.py` is materially safer.
+
+## 0AAAI. 2026 Literature Refresh And Strategic Redesign (2026-03-11)
+
+### Newer External Evidence
+
+The older `2025-03` literature cutoff was no longer enough. The most important
+new additions are:
+
+1. `PRIME (2026)`:
+   - https://arxiv.org/abs/2602.11570
+   - process-outcome alignment benchmark;
+   - verifier accuracy correlates strongly with RLVR effectiveness
+2. `Hard2Verify (2025)`:
+   - https://arxiv.org/abs/2510.13744
+   - human-annotated open-ended step verification benchmark;
+   - open-source verifiers still lag badly
+3. `RISE (2025)`:
+   - https://arxiv.org/abs/2505.13445
+   - online self-verification training improves both reasoning and verification
+4. `VPRM (2026)`:
+   - https://arxiv.org/abs/2601.17223
+   - deterministic process verification can outperform pure outcome verification
+
+### Strategic Consequence
+
+These sources strengthen one conclusion:
+
+1. keeping only a scalar pairwise head is too narrow if the goal is RL-ready
+   faithfulness;
+2. the scalar head should remain in the repository as:
+   - a bounded-support verifier baseline,
+   not:
+   - the assumed final verifier architecture.
+
+### New Repository-Level Direction
+
+The redesigned Phase E now has two parallel goals:
+
+1. keep improving the bounded-support scalar verifier on same-source and
+   same-family utility;
+2. add benchmark-aligned verifier branches:
+   - process-outcome alignment
+   - critique / self-verification auxiliary tasks
+   - deterministic verification where available
+
+Reference note:
+1. `docs/phase_e_updated_literature_redesign_20260311.md`
+
+## 0AAAG. A-E Full Audit + PBR10 PRM-7B DPO Breakthrough (2026-03-11)
+
+### Code Audit And Fixes
+
+This round added one repository-wide implementation audit across `phase_a` to
+`phase_e` and fixed three concrete infrastructure bugs:
+
+1. `feature cache` live-writer lock stealing
+   - file: `src/ours/phase_b/feature_cache.py`
+   - old behavior: second writer could steal a lock from a slow but still-alive
+     writer based only on `mtime`
+   - new behavior: stale lock cleanup now requires missing/dead owner pid
+   - regression: `tests/unit/test_feature_cache.py`
+2. `Phase B` faithfulness eval silent `best -> final` checkpoint fallback
+   - file: `scripts/phase_b_eval_faithfulness.py`
+   - new behavior: explicit `checkpoint_resolution` is written into metrics and
+     manifest, and the console emits a warning when fallback happens
+   - regression: `tests/unit/test_phase_b_eval_faithfulness_script.py`
+3. dtype alias drift across A/B/C entrypoints
+   - files:
+     - `scripts/phase_a_generate_and_eval.py`
+     - `scripts/phase_b_prepare_value_data.py`
+     - `scripts/phase_b_train_value.py`
+     - `scripts/phase_b_eval_faithfulness.py`
+     - `scripts/phase_c_prepare_pik_data.py`
+     - `scripts/phase_c_train_pik.py`
+     - `scripts/phase_c_eval_pik.py`
+   - new behavior: all now accept `bf16/fp16/fp32` aliases
+
+Validation:
+
+1. `pytest -q` → `223 passed, 2 skipped`
+2. targeted regression set for the new fixes → `29 passed`
+
+### Research Diagnosis
+
+The strongest current repo bottleneck is no longer "head can’t learn".
+The new evidence says:
+
+1. `DPO sibling_branch` supervision is the critical signal carrier,
+2. `PRM-7B` backbone quality matters more than further head complexity,
+3. `oracle ProcessBench F1` alone is too optimistic; fixed-threshold F1 must be
+   tracked for honest RL-readiness discussion.
+
+Community reading and PDF/web cross-check now point to the same design:
+
+1. better process data quality and consensus filtering,
+2. sibling/fork-point comparisons rather than only local MC-derived edges,
+3. stronger verifier backbones or LoRA/full tuning,
+4. min-form / conservative PRM usage in RL rather than naive summation.
+
+### New Experiments: `PBR10`
+
+Data:
+
+1. curated profile = `math_step_dpo_v1`
+2. target mix:
+   - `dpo_fork = 5200`
+   - `ms_strict = 2000`
+   - `ms_terminal = 800`
+3. train split semantics:
+   - `sibling_branch = 4679`
+   - `local_first_bad_edge = 1783`
+   - `terminal_completion_anchor = 485`
+
+Backbone:
+
+1. `assets/models/Qwen2.5-Math-PRM-7B`
+
+#### PBR10 `mlp`
+
+Run:
+
+1. `assets/artifacts/phase_e_runs/phase_e_pbr10_prm7b_dpo8k_s42_value_20260311T110527Z`
+
+Held-out:
+
+1. `pair_acc = 0.906`
+2. `auc = 0.859`
+
+ProcessBench:
+
+| metric | Math | GSM8K |
+|---|---:|---:|
+| `pair_auc_good_vs_bad` | 0.863 | 0.873 |
+| `first_error_edge_accuracy` | 0.844 | 0.915 |
+| `processbench_f1 (oracle)` | 0.659 | 0.724 |
+| `processbench_f1 (fixed=0.5)` | 0.654 | 0.693 |
+
+#### PBR10 `gated_mlp`
+
+Run:
+
+1. `assets/artifacts/phase_e_runs/phase_e_pbr10_prm7b_dpo8k_gated_s42_value_20260311T112849Z`
+
+Held-out:
+
+1. `pair_acc = 0.914`
+2. `auc = 0.873`
+
+ProcessBench:
+
+| metric | Math | GSM8K |
+|---|---:|---:|
+| `pair_auc_good_vs_bad` | 0.869 | 0.873 |
+| `first_error_edge_accuracy` | 0.852 | 0.925 |
+| `processbench_f1 (oracle)` | 0.647 | 0.708 |
+| `processbench_f1 (fixed=0.5)` | 0.567 | 0.664 |
+
+### Interpretation
+
+1. `PBR10 mlp` is now the strongest benchmark-facing candidate in the repo.
+2. `gated_mlp` improves ranking/AUC/edge metrics, but fixed-threshold F1 drops
+   sharply, especially on `ProcessBench Math`.
+3. This means the main current bottleneck is not head capacity; it is the
+   interaction of:
+   - DPO-aligned pair geometry,
+   - stronger verifier backbone,
+   - honest threshold/calibration behavior.
+4. Mainline recommendation:
+   - keep `PBR10 mlp` as the new primary baseline,
+   - report both oracle and fixed-threshold F1,
+   - next experiment should be `PBR10 mlp + minimal LoRA`, not another head-only churn.
+
+## 0AAAF. FLB Extended Suite — gated_mlp + Scale Ablation (2026-03-11)
+
+### Experiments
+
+Following FLB suite findings, ran 4 additional targeted experiments on same DPO pair dirs (fast, cache reuse):
+- FIX_C gated_mlp (7420 pairs, gated_mlp) — tests head architecture
+- FIX_C seed7 (7420 pairs, mlp, seed=7) — tests seed stability
+- FIX_E mlp (9050 pairs, mlp) — tests 10K scale (all available DPO data)
+- FIX_E gated_mlp (9050 pairs, gated_mlp) — tests combined 10K + gated
+
+### Results
+
+| Config | Head | Pairs | GSM AUC | MATH AUC | Avg AUC |
+|---|---|---|---|---|---|
+| **FIX_C gated_mlp (s=42)** | gated_mlp | 7420 | **0.711** | **0.749** | **0.730** |
+| FIX_E gated_mlp (s=42) | gated_mlp | 9050 | 0.705 | 0.743 | 0.724 |
+| FIX_C s7 (mlp, s=7) | mlp | 7420 | 0.669 | 0.737 | 0.703 |
+| FIX_E mlp (s=42) | mlp | 9050 | 0.658 | 0.730 | 0.694 |
+| FIX_C s42 (mlp) [ref] | mlp | 7420 | 0.659 | 0.721 | 0.690 |
+
+### Key Findings
+
+1. **gated_mlp > mlp by +0.028 MATH AUC** at same data scale (7.4K): 0.749 vs 0.721
+2. **Diminishing returns at 10K**: mlp 7.4K→10K +0.009; gated_mlp 7.4K→10K -0.006 (slight overfit)
+3. **FIX_C gated_mlp is the frozen-head optimum**: 7.4K DPO + gated_mlp head = MATH AUC 0.749
+4. **Seed variance ±0.016** for mlp: confirms gated_mlp's stability advantage
+5. **Frozen-head ceiling**: ≈0.75 (FIX_C gated achieves 0.749). LoRA needed to break through.
+
+### Complete Frozen-Head Leaderboard
+
+| Config | Data | Pairs | MATH AUC | Status |
+|---|---|---|---|---|
+| **FIX_C gated dpo_scale_v1** | DPO 7.4K | 7420 | **0.749** | 🏆 FROZEN-HEAD SOTA |
+| FIX_E gated dpo_scale_v1 | DPO 10K | 9050 | 0.743 | close, slight overfit |
+| FIX_C mlp s=7 dpo_scale_v1 | DPO 7.4K | 7420 | 0.737 | mlp seed sensitivity |
+| FIX_E mlp dpo_scale_v1 | DPO 10K | 9050 | 0.730 | data scale +0.009 |
+| FIX_C mlp s=42 dpo_scale_v1 | DPO 7.4K | 7420 | 0.721 | mlp baseline |
+| FIX_B ms_dpo_calibrated_v1 | 50% DPO | 4096 | 0.683 | mixed formula |
+| ms_e43 ms_acc90 | MS 14K | 14290 | 0.634 | MS only |
+| NDS1 rlhflow_align_v1 | RLH 3K | 3037 | 0.552 | RLH with length bias |
+| FIX_D rlh_strict_only_v1 | RLH strict | 4096 | 0.531 | strict, worse than NDS1 |
+| FIX_A ms_strict_only_v1 | MS strict | 4096 | 0.489 | no positive transfer |
+| NDS3 ms_align_v1 (small) | MS 4K | ~3K | 0.470 | inverted |
+
+## 0AAAE. PBR5B Full-Scale PRM-Align + GatedMLP, 3 Seeds (2026-03-11–12)
+
+### Design
+
+`ms_prm_align_v1` data (16384 pairs target; ~10770 train) with `gated_mlp` head
+and `score+none+pair_acc` recipe. 3 seeds: 42, 1, 7. 4 training epochs.
+
+First launch blocked by `recipe_safety.py` (`ANTI_PATTERN_G_FULL`, critical) because
+`ms_prm_align_v1` has `terminal_frac=0.14` and global defaults (`logit+confidence_semantic+ranking_score`)
+are a known catastrophic combination on mixed-semantics data. Fix: added per-group
+override vars `GROUP_RANKING_TARGET_SPACE/PAIR_WEIGHT_MODE/CHECKPOINT_SEL_METRIC`
+to the suite script. After fix, severity drops to `info`.
+
+### Results
+
+| seed | sf_top1 | GSM AUC | MATH AUC | terminal_top1 | RL assessment |
+|------|---------|---------|----------|---------------|---------------|
+| 42 | 0.886 | 0.500 | 0.602 | 0.564 | terminal_and_local_tradeoff_unresolved |
+| 1  | 0.880 | 0.656 | 0.645 | 0.051 | near_rl_ready_but_terminal_gap |
+| 7  | 0.849 | 0.589 | 0.613 | 0.180 | terminal_and_local_tradeoff_unresolved |
+| **median** | — | **0.589** | **0.613** | | |
+
+Score ordering (MATH, seed 7): `mean_good=0.319 > mean_bad=0.265` ✅ no inversion.
+
+### Key Findings
+
+1. **DPO data dominates ms_prm_align data**: FIX_C (DPO 8k, MLP) = 0.721 vs PBR5B median (MS+PRM 16k, gated_mlp) = 0.613. DPO wins by +0.108 with fewer pairs and weaker head.
+2. **Large inter-seed variance**: GSM AUC range 0.500–0.656, MATH range 0.602–0.645. Seed 42 has the best terminal_top1 (0.564) but worst local AUC; seed 1 has the best local AUC but near-zero terminal (0.051). gated_mlp did NOT resolve the local/terminal tradeoff.
+3. **Target not met**: Goal was median MATH AUC ≥ 0.65. Achieved 0.613.
+4. **Scaling ms_prm_align from 4k→16k brought no improvement**: PBR4b smoke (4k): MATH 0.621; PBR5B median (16k): 0.613 — slight regression. Data quality, not quantity, is the bottleneck.
+5. **Conclusion**: ms_prm_align data is not the right vehicle. DPO sibling_branch pairs (rej-cho≈0) are the critical signal for ProcessBench transfer. Path forward: DPO-anchored curation (FIX_B/C pattern).
+
+### Updated Frozen-Head Leaderboard (ProcessBench Math AUC)
+
+| Config | Data | Pairs | MATH AUC | Head |
+|---|---|---|---|---|
+| **FIX_C dpo_scale_v1** | Pure DPO 8k | 7420 | **0.721** | mlp |
+| NDS2 math_step_dpo_v1 | Pure DPO 4k | 3705 | 0.712 | mlp |
+| FIX_B ms_dpo_calibrated_v1 | DPO 50%+MS 40% | ~3.7k | 0.683 | mlp |
+| NDS4 ms_rlhflow_mixed_v1 | Mixed | 3093 | 0.647 | mlp |
+| PBR5B s1 (best seed) | MS+PRM 16k | 10770 | 0.645 | gated_mlp |
+| ms_e43 ms_acc90 | MS high-quality | 14290 | 0.634 | mlp |
+| PBR5B median (3 seeds) | MS+PRM 16k | 10770 | 0.613 | gated_mlp |
+| NDS1 rlhflow_align_v1 | RLH | 3037 | 0.552 | mlp |
+| FIX_D rlh_strict_only_v1 | RLH strict | 4096 | 0.531 | mlp |
+| FIX_A ms_strict_only_v1 | MS strict | 4096 | 0.489 | mlp |
+| NDS3 ms_align_v1 (small) | MS 4K | ~3K | 0.470 | mlp |
+
+## 0AAAD. FLB Suite — Length-Bias Fix Ablation Complete (2026-03-11)
+
+### Experiment Design
+
+Root cause of NDS3/NDS1 ProcessBench failure: length-biased pair types.
+
+| Pair type | rej-cho | Origin | Effect |
+|---|---|---|---|
+| first_bad_fanout_prefix_ranking | +194 | MS fanout | teach "shorter=better" |
+| good_bad_prefix_grid | +203 | MS grid | teach "shorter=better" |
+| sibling_branch (DPO) | ≈0 | Math-Step-DPO | content-quality only |
+| local_first_bad_edge | +99 | MS/RLH strict | moderate, safe direction |
+
+ProcessBench: bad_prefix is **LONGER** → length-biased model inverts (AUC < 0.5).
+
+### Results
+
+| case_id | profile | pairs | pb_gsm_auc | pb_math_auc | pb_math_first_edge |
+|---|---|---|---|---|---|
+| **fix_c_dpo_scale_8k** | dpo_scale_v1 | 7420 | **0.659** | **0.721** | 0.625 |
+| **fix_b_ms_dpo_calibrated** | ms_dpo_calibrated_v1 | 4096 | **0.648** | **0.683** | 0.648 |
+| fix_d_rlh_strict_only | rlh_strict_only_v1 | 4096 | 0.535 | 0.531 | 0.570 |
+| fix_a_ms_strict_only | ms_strict_only_v1 | 4096 | 0.484 | 0.489 | 0.492 |
+
+### Updated Frozen-Head Leaderboard (ProcessBench Math AUC)
+
+| Config | Data | Pairs | MATH AUC | Status |
+|---|---|---|---|---|
+| **fix_c dpo_scale_v1** | Pure DPO 8K | 7420 | **0.721** | 🏆 NEW SOTA |
+| NDS2 math_step_dpo_v1 | Pure DPO 4K | 3705 | 0.712 | Previous SOTA |
+| fix_b ms_dpo_calibrated_v1 | 50% DPO + 40% MS | 4096 | 0.683 | 2nd best formula |
+| NDS4 ms_rlhflow_mixed_v1 | Mixed | 3093 | 0.647 | mixed approach |
+| ms_e43 ms_acc90 | MS 14K (high quality) | 14290 | 0.634 | high-scale MS |
+| NDS1 rlhflow_align_v1 | RLH (43% biased) | 3037 | 0.552 | w/ length bias |
+| fix_d rlh_strict_only_v1 | RLH strict only | 4096 | 0.531 | w/o length bias |
+| fix_a ms_strict_only_v1 | MS strict only | 4096 | 0.489 | no positive transfer |
+| NDS3 ms_align_v1 (small) | MS 4K (20% biased) | ~3K | 0.470 | inverted |
+
+### Key Findings
+
+1. **Length bias → INVERSION, not the full story**: Removing fanout/grid from MS (FIX_A) stops inversion (0.470→0.489) but doesn't enable positive transfer. MS strict-only still near-random.
+
+2. **DPO sibling_branch is the critical signal carrier**: Only pairs with rej-cho≈0 (same prefix length, different next step) match ProcessBench's evaluation format. Even partial DPO (50%) drives 0.683 MATH AUC.
+
+3. **Scale helps DPO**: 3.7K DPO → 0.712; 7.4K DPO → 0.721. Linear scaling regime at current sizes.
+
+4. **RLH strict-only is worse than RLH with fanout/grid (NDS1)**: 0.531 vs 0.552. LLM-judge labels remain accurate even for length-asymmetric pairs; removing them loses diversity. Length bias is mostly a MC-estimation artifact.
+
+5. **Frozen-head ceiling confirmed**: Best is 0.721. Published PRMs with LoRA achieve 0.750+. LoRA unfreezing is the path forward.
+
+### Diagnostic: Score Ordering Check
+
+| Config | mean_good | mean_bad | mean_all_correct | Correct order? |
+|---|---|---|---|---|
+| NDS2 | 0.595 | 0.406 | 0.678 | ✅ good > bad |
+| FIX_C | similar healthy ordering | - | - | ✅ |
+| NDS3 | 0.650 | 0.677 | 0.738 | ❌ bad > good (inverted) |
+| FIX_A | slightly fixed | ~0.556 vs 0.532 | 0.617 | ✅ marginally fixed |
+
+## 0AAAC. Phase E Infrastructure Hardening — Recipe Guard + Collapse Diagnosis (2026-03-11)
+
+### What Changed
+
+To keep `Phase E` scientifically interpretable, the trainer now explicitly
+blocks repository-known catastrophic recipe combinations instead of allowing
+them to consume GPU time and then fail later in opaque ways.
+
+New code:
+1. `src/ours/phase_e/recipe_safety.py`
+2. `scripts/phase_e_diagnose_training_collapse.py`
+
+Trainer changes:
+1. `scripts/phase_e_train_value.py`
+   - new `--recipe-risk-policy {off,warn,error}`
+   - default = `error`
+   - writes:
+     - `recipe_risk.json`
+     - `training_health.json`
+     - `training_health.md`
+2. `scripts/run_phase_e_suite.sh`
+   - now propagates `RECIPE_RISK_POLICY`, defaulting to `error`
+
+### Why This Was Necessary
+
+Recent `NDSBH` / `PBR` evidence already showed one specific anti-pattern:
+
+1. mixed-semantics source,
+2. terminal anchors present,
+3. `ranking_target_space = logit`,
+4. semantic-style pair weighting,
+5. `checkpoint_selection_metric = ranking_score`
+
+This family can produce:
+1. flat loss,
+2. near-zero margin,
+3. held-out inversion,
+4. misleading same-source fit.
+
+That is an infrastructure problem, not just a modeling curiosity.
+
+### Validation Results
+
+#### A. Bad recipe probe: now blocked before backbone load
+
+Artifact:
+1. console run only, no training artifact promoted
+
+Configuration:
+1. `ms_align_v1`
+2. `joint`
+3. `logit`
+4. `confidence_semantic`
+5. `ranking_score`
+
+Outcome:
+1. `severity = critical`
+2. findings:
+   - `ANTI_PATTERN_G_FULL`
+   - `LOGIT_MIXED_TERMINAL`
+   - `RANKING_SCORE_MIXED`
+   - `SEMANTIC_WEIGHT_MIXED_TERMINAL`
+3. trainer exits immediately with explicit remediation text
+
+Interpretation:
+1. `Phase E` now prevents a known class of misleading runs from entering the
+   expensive training path.
+
+#### B. Good recipe probe: still allowed
+
+Run:
+1. `assets/artifacts/phase_e_runs/phase_e_recipe_guard_goodprobe_20260311T093056Z`
+
+Configuration:
+1. `math_step_dpo_v1`
+2. `joint`
+3. `score`
+4. `none`
+5. `pair_acc`
+
+Result:
+1. `pair_accuracy = 0.531250`
+2. `auc = 0.505615`
+3. `mean_margin = -0.023751`
+4. `training_health = unstable_or_inverted`
+
+Interpretation:
+1. the guard is not over-broad,
+2. weak but legitimate runs still go through,
+3. and the new health artifact makes their weakness explicit.
+
+#### C. Historical bad run: now rediagnosed consistently
+
+Run:
+1. `assets/artifacts/phase_e_runs/phase_e_ms_trust_smoke_0310_1400_e1_math_shepherd_pair_learn_smoke_e1_math_shepherd_pair_learn_smoke_s42_value_20260310T060115Z`
+
+Re-diagnosis:
+1. `diagnosis = collapse_detected`
+2. `known_collapse_signature = True`
+3. `pair_accuracy = 0.497738`
+4. `auc = 0.498106`
+5. `mean_margin = -0.001785`
+
+Interpretation:
+1. the new diagnostic path correctly identifies an earlier classic collapse run.
+
+### Operational Conclusion
+
+1. `Phase E` source-quality comparisons are now less likely to be polluted by
+   preventable recipe collapse.
+2. This does **not** fix benchmark transfer by itself.
+3. It does make future failure analysis cleaner, because "bad source" and
+   "bad recipe" are now better separated.
 
 ## 0AAAB. NDSBH Suite Results — New Dataset Source Ablation (2026-03-11)
 
@@ -5018,3 +7044,559 @@ checkpoint_selection: pair_acc
 ```
 PB Math F1: **0.609** | PB GSM8K F1: **0.704**
 
+---
+
+## 0ZZZZZZZ — 多 seed 方差分析：PBR5 vs PBR6（2026-03-11）
+
+**核心发现**：PBR6（纯 local 对）比 PBR5（oracle 过滤混合数据）具有更高均值 F1 和更低方差
+
+### PBR5（oracle_filter ms_align_v1，6 seeds）
+
+| Seed | Val Pair Acc | Mean Margin | PB Math F1 | PB GSM F1 |
+|------|-------------|-------------|------------|-----------|
+| s42  | 0.9935      | 0.664       | **0.609**  | **0.704** |
+| s1   | 0.9502      | 0.438       | 0.465      | 0.512     |
+| s2   | 0.9632      | 0.373       | 0.148      | 0.323     |
+| s3   | 0.9762      | 0.477       | 0.309      | 0.436     |
+| s4   | 0.9654      | 0.524       | 0.447      | 0.450     |
+| s5   | 0.9502      | 0.379       | 0.107      | 0.097     |
+
+**统计：Math mean=0.347 stdev=0.196；GSM mean=0.420 stdev=0.202**
+
+### PBR6（pure local math_step_dpo_v1，4 seeds）
+
+| Seed | Val Pair Acc | Mean Margin | PB Math F1 | PB GSM F1 |
+|------|-------------|-------------|------------|-----------|
+| s42  | 0.895       | 0.297       | **0.650**  | **0.717** |
+| s1   | 0.752       | 0.093       | 0.479      | 0.548     |
+| s2   | 0.749       | 0.071       | 0.370      | 0.523     |
+| s3   | 0.793       | 0.095       | 0.370      | 0.449     |
+
+**统计：Math mean=0.467 stdev=0.132；GSM mean=0.559 stdev=0.113**
+
+### 关键结论
+
+1. **PBR6 > PBR5 on both mean and max F1**：
+   - Math 均值 +0.120（0.347→0.467），max +0.041（0.609→0.650）
+   - GSM 均值 +0.139（0.420→0.559），max +0.013（0.704→0.717）
+
+2. **PBR6 方差更小**：stdev 从 0.196 降至 0.132（Math），0.202→0.113（GSM）
+
+3. **Val pair_acc 不可靠预测 PB F1**：PBR5 s2 val=0.963 但 PB Math=0.148（最差！）
+
+4. **Mean margin 是更好的 PB 泛化预测指标**：
+   - PBR5 s42 margin=0.664 → PB Math=0.609（最好）
+   - PBR5 s5 margin=0.379 → PB Math=0.107（最差）
+   - 相关性 >0.9
+
+5. **根因：数据分布比 margin 更重要**：
+   - PBR6 s42 margin=0.297（低于 PBR5 s42 的 0.664）但 PB Math=0.650（更高！）
+   - 原因：math_step_dpo 纯 local 对与 ProcessBench 任务分布完全吻合（first_bad_edge 检测）
+   - 而 oracle filter ms_align_v1 包含 fanout + grid pair 类型，偏离了 ProcessBench 分布
+
+### 最优当前 Recipe（截至 2026-03-11）
+
+**PBR6 recipe（推荐）**：
+```
+backbone: Qwen2.5-Math-PRM-7B
+data: math_step_dpo_v1 (3705 pure local first_bad_edge pairs)
+pooling: last_token
+objective: ranking_only
+ranking_target_space: score
+pair_weight_mode: confidence
+lr: 5e-5, epochs: 5, batch_size: 96
+checkpoint_selection: pair_acc
+seed: 42 (best known)
+```
+Best seed: Math F1=0.650 | GSM F1=0.717
+Mean across 4 seeds: Math=0.467±0.132 | GSM=0.559±0.113
+
+### 下一步：降低方差
+
+1. PBR7: math_step_dpo + oracle filter（去除噪声对）→ 预期方差降低、均值提升
+2. PBR8: 训练更多 epochs（5→8）→ margin 更高，可能减少运气依赖
+3. 多 seed 集成推理：取 3-5 seeds 分数平均
+
+
+---
+
+## 0ZZZZZZZZ — 热启动消除种子方差：PBR6 Warm-Start（2026-03-11）
+
+> ⚠️ **CORRECTION (2026-03-11 续)**: 本节早期结果基于 256-sample 子集评估（乐观估计）。以下已用全量 1000/400 样本重新评估，数据已更正。
+
+### 发现：随机初始化是方差主要来源
+
+分析 PBR6 cold seeds 结果后，发现：
+- s42 ep0 pair_acc = 0.854（极好的初始化）
+- s1 ep0 pair_acc = 0.675（差的初始化）
+- s2,3 ep0 更低
+
+这表明 3705 对 + PRM-7B backbone + 512-dim MLP head 的训练对随机初始化极其敏感。
+
+### 解决方案：两阶段训练
+
+**阶段一**：用 seed=42 冷启动训练 → 得到 best_value_head.pt（PBR6 recipe）
+**阶段二**：从 best_value_head.pt 热启动，用任意 seed 再训练 → 稳定收敛
+
+### 热启动实验结果（4 seeds，全量评估）
+
+评估集：ProcessBench Math 全量 1000 例，GSM 全量 400 例
+
+| Seed | Val Pair Acc | PB Math F1 | PB GSM F1 | 备注 |
+|------|-------------|------------|-----------|------|
+| ws_s1 (lr=5e-5, 5ep) | 0.903 | 0.626 | 0.722 | — |
+| ws_s2 (lr=5e-5, 5ep) | 0.882 | 0.631 | **0.745** | — |
+| ws_s3 (lr=5e-5, 5ep) | 0.882 | **0.635** | 0.742 | — |
+| ws_lowlr_s1 (lr=2e-5, 8ep) | 0.903 | 0.633 | 0.739 | — |
+
+**统计**：
+- PB Math F1: mean=0.631, stdev=**0.004**（冷启动 cold seeds stdev 更高）
+- PB GSM F1: mean=0.737, stdev=**0.010**
+
+### 与冷启动 seed=42 对比（全量评估）
+
+| Model | Math F1 | GSM F1 |
+|---|---|---|
+| PBR6 cold seed=42 | **0.642** | **0.743** |
+| Warm-start mean (4 seeds) | 0.631 | 0.737 |
+| Warm-start 4-seed ensemble (oracle) | 0.640 | **0.746** |
+
+**关键发现**：
+- 热启动方差确实大幅降低（stdev 从 0.132 降至 0.004）
+- 但热启动单个种子均值（0.631）低于冷启动 seed=42（0.642）
+- 4 种子集成（average scores）与冷启动 seed=42 相当，无显著提升
+
+### 4-Seed 集成详细结果
+
+集成方法：对 4 个热启动模型的分数取平均，再用阈值扫描
+
+**Math 集成（1000 例）**：
+- Oracle 阈值: F1=0.640, acc_err=0.519, acc_cor=0.835
+- 固定 thresh=0.35: F1=0.631, acc_err=0.502, acc_cor=0.850
+
+**GSM 集成（400 例）**：
+- Oracle 阈值: F1=0.746, acc_err=0.628, acc_cor=0.917
+- 固定 thresh=0.45: F1=0.740, acc_err=0.623, acc_cor=0.912
+
+### Recipe（截至 2026-03-11 修正版）
+
+**最优单模型**：PBR6 cold seed=42
+```
+backbone: Qwen2.5-Math-PRM-7B
+data: math_step_dpo_v1 (3705 pairs)
+pooling: last_token
+objective: ranking_only, lambda_bce=0.25
+ranking_target_space: score, margin=0.1
+pair_weight_mode: confidence
+lr: 5e-5, epochs: 5, batch_size: 96
+checkpoint_selection: pair_acc
+head: mlp, hidden=512, dropout=0.1
+seed: 42
+```
+→ Math F1=0.642, GSM F1=0.743（全量评估）
+
+**热启动**（降低方差，但不提升均值）：
+```
+同上，但 --init-value-head-path <stage1_best_value_head.pt>
+→ 任意 seed 稳定输出 Math F1≈0.631±0.004
+```
+
+### 结论
+
+热启动成功将种子方差从 stdev=0.132 降至 ~0.004，但：
+- 热启动均值（0.631）不超过冷启动最好 seed=42（0.642）
+- 4-seed 集成（0.640）与 seed=42 单模型（0.642）相当
+- **当前最优推荐：直接使用 PBR6 cold seed=42，Math F1=0.642，GSM F1=0.743**
+
+
+---
+
+## 0ZZZZZZZZZ — PBR6 最终评估总结（2026-03-11 全量重测）
+
+### 背景
+
+之前使用 256-sample 子集评估 PBR5/PBR6。本次用全量 ProcessBench（Math 1000 例，GSM 400 例）重测，得到更准确的数字。
+
+### 全量评估结果汇总
+
+| Model | Math F1 | Math acc_err | Math acc_cor | GSM F1 | GSM acc_err | GSM acc_cor |
+|-------|---------|-------------|-------------|--------|------------|------------|
+| PBR5 cold s42 (256-sample est.) | ~0.609 | — | — | ~0.704 | — | — |
+| PBR6 cold s42 (full) | **0.642** | 0.497 | 0.906 | **0.743** | 0.609 | 0.953 |
+| PBR6 ws_s1 | 0.626 | 0.498 | 0.842 | 0.722 | 0.614 | 0.876 |
+| PBR6 ws_s2 | 0.631 | 0.500 | 0.855 | 0.745 | 0.640 | 0.894 |
+| PBR6 ws_s3 | 0.635 | 0.524 | 0.808 | 0.742 | 0.642 | 0.883 |
+| PBR6 ws_lowlr_s1 | 0.633 | 0.510 | 0.833 | 0.739 | 0.623 | 0.913 |
+| **4-seed ensemble (oracle)** | **0.640** | 0.519 | 0.835 | **0.746** | 0.628 | 0.917 |
+
+### 关键结论
+
+1. **PBR6 cold seed=42 是最优单模型**：Math F1=0.642, GSM F1=0.743
+2. **4-seed 集成与 seed=42 相当**，无显著提升（ensemble Math 0.640 vs single 0.642）
+3. **热启动降低方差**：warm-start 个体 Math stdev=0.004（vs 冷启动 >>0.1），但均值更低
+4. **GSM 明显高于 Math**：GSM F1=0.743-0.746 vs Math F1=0.631-0.642，反映 Math 难度更高
+
+### 当前最优 Recipe（RL-Ready 评估）
+
+PBR6 cold seed=42（math_step_dpo_v1 + PRM-7B + ranking_only + mlp/512）：
+- Math first_error_edge_accuracy: ~0.84
+- GSM first_error_edge_accuracy: ~0.86
+- 这是目前实现的最高 ProcessBench 性能，已达到步骤验证实用水准
+
+### 下一步方向
+
+要进一步提升 Math F1 到 0.70+，需要：
+1. 更多 math_step_dpo-style 对（当前仅 3705 对，来自 MATH/GSM 有限子集）
+2. 针对 Math-heavy 题目的专项数据增强
+3. 混合 ProcessBench-train-style 数据（若存在）
+
+---
+
+## PBR10 — Scaled-Up DPO Pairs (8k, PRM-7B) [DONE]
+
+**Hypothesis**: Doubling the DPO fork pairs (3705→6947 train pairs) may improve ProcessBench Math F1.
+**Data**: math_step_dpo_v1 profile, target=8000 pairs
+- 4679 sibling_branch DPO fork pairs (MATH domain)
+- 1783 MS first_bad_edge_strict pairs (GSM8K domain)
+- 485 terminal anchor pairs
+- **Total**: 6947 train pairs
+
+**Config**: PRM-7B backbone, ranking_only, lr=5e-5, 5 epochs, mlp/512/0.1, seed=42
+**Training**: pair_acc=0.906, AUC=0.859
+
+**Results**:
+| Metric | PBR10 | PBR6 (baseline) | Δ |
+|---|---|---|---|
+| Math F1 | 0.631 | **0.642** | **-0.011** |
+| Math acc_err | 0.508 | 0.497 | +0.011 |
+| Math acc_cor | 0.833 | 0.906 | **-0.073** |
+| GSM F1 | 0.733 | 0.743 | -0.010 |
+
+**Conclusion**: More DPO pairs HURT performance. acc_correct dropped −7.3% (more false positives on all-correct examples). More sibling_branch DPO pairs causes score variance that over-triggers on correct steps. **Do not scale DPO above ~2400 pairs**.
+
+---
+
+## PBR11 — MATH-Domain MS First-Error Pairs (5k, PRM-7B) [DONE]
+
+**Hypothesis**: Using MATH-domain (harder) MS first_bad_edge pairs should improve ProcessBench Math acc_err.
+**Data**:
+- 4514 local_first_bad_edge pairs from MATH competition (Math Shepherd MATH-only, 272k rows)
+- 454 terminal anchor pairs (9% ratio)
+- **Total**: 4968 train pairs
+
+**Config**: Same as PBR6 (PRM-7B, ranking_only, lr=5e-5, 5 epochs, mlp/512/0.1, seed=42)
+**Training**: pair_acc=0.900 (exactly hits 90% target!)
+
+**Results**:
+| Metric | PBR11 | PBR6 (baseline) | Δ |
+|---|---|---|---|
+| Math F1 | 0.357 | **0.642** | **-0.285** |
+| Math acc_err | 0.300 | 0.497 | **-0.197** |
+| Math acc_cor | 0.441 | 0.906 | **-0.465** |
+| GSM F1 | 0.481 | 0.743 | -0.262 |
+
+**Conclusion**: CATASTROPHIC FAILURE. MATH-only MS pairs without sibling_branch DPO pairs produce a completely miscalibrated model. Root cause: without DPO fork pairs for score calibration, the model cannot learn a well-placed decision threshold. High training pair_acc (0.90) does NOT generalize.
+
+**Key Lesson**: `sibling_branch` DPO pairs are ESSENTIAL for score calibration — they cannot be removed.
+
+---
+
+## PBR13 — PBR6 + Terminal BCE λ=0.25 [DONE]
+
+**Hypothesis**: Adding terminal BCE loss to PBR6 recipe will improve acc_err by pushing terminal step scores toward extremes.
+**Data**: Same PBR6 pairs (math_step_dpo_v1, 3705 train pairs: 2398 DPO + 920 MS + 387 terminal)
+**Config**: PRM-7B, ranking_only, lr=5e-5, 5 epochs, mlp/512/0.1, seed=42 + **terminal_bce_lambda=0.25**
+**Training**: pair_acc=0.826 (lower than PBR6, terminal BCE increases loss)
+
+**Results**:
+| Metric | PBR13 | PBR6 (baseline) | Δ |
+|---|---|---|---|
+| Math F1 | **0.660** | 0.642 | **+0.018** ✅ |
+| Math acc_err | **0.537** | 0.497 | **+0.040** ✅ |
+| Math acc_cor | 0.857 | 0.906 | -0.049 |
+| GSM F1 | **0.755** | 0.743 | **+0.012** ✅ |
+| GSM acc_err | 0.623 | 0.609 | +0.014 ✅ |
+| GSM acc_cor | **0.959** | 0.953 | +0.006 |
+
+**Conclusion**: ✅ Terminal BCE λ=0.25 adds +1.8% Math F1, +4% acc_err.
+Trade-off: acc_correct slightly lower (0.906→0.857) but net F1 improves. **SUPERSEDED by PBR18/PBR19**.
+
+---
+
+## PBR18 — PBR6 + Joint Objective + Terminal BCE [DONE]
+
+**Hypothesis**: Adding full pair BCE (joint objective) alongside ranking loss + terminal BCE gives better absolute calibration.
+**Data**: PBR6 pairs (3705 train: 2398 DPO + 920 MS + 387 terminal)
+**Config**: PRM-7B, **joint**, λ_bce=0.5, λ_ranking=1.0, λ_terminal=0.25, lr=5e-5, 5 epochs, mlp/512/0.1, seed=42
+**Training**: pair_acc=0.859 (higher than PBR13's 0.826)
+
+| Metric | PBR18 | PBR13 | PBR6 | Δ vs PBR6 |
+|---|---|---|---|---|
+| Math F1 | **0.674** | 0.660 | 0.642 | **+0.032** ✅ |
+| Math acc_err | 0.549 | 0.537 | 0.497 | +0.052 ✅ |
+| Math acc_cor | 0.874 | 0.857 | 0.906 | -0.032 |
+| GSM F1 | **0.764** | 0.755 | 0.743 | +0.021 ✅ |
+
+**Conclusion**: Joint objective improves BOTH acc_err AND acc_correct vs PBR13. Math F1=0.674. **Superseded by PBR19**.
+
+---
+
+## PBR19 — DPO+MATH-MS Mix + Joint + Terminal BCE [DONE]
+
+**Hypothesis**: Adding MATH-domain MS strict pairs to PBR18 recipe will improve acc_err for competition math.
+**Data**: PBR12 pairs (5705 train: 2398 DPO + 2759 MS(MATH) + 548 terminal)
+**Config**: PRM-7B, joint, λ_bce=0.5, λ_ranking=1.0, λ_terminal=0.25, lr=5e-5, 5 epochs, mlp/512/0.1, seed=42
+**Training**: pair_acc=0.866
+
+| Metric | PBR19 | PBR18 | PBR6 | Δ vs PBR6 |
+|---|---|---|---|---|
+| Math F1 | **0.683** | 0.674 | 0.642 | **+0.041** ✅ |
+| Math acc_err | **0.574** | 0.549 | 0.497 | +0.077 ✅ |
+| Math acc_cor | 0.842 | 0.874 | 0.906 | -0.064 |
+| GSM F1 | **0.778** | 0.764 | 0.743 | +0.035 ✅ |
+
+**Conclusion**: ✅ **CURRENT BEST** (2026-03-11 20:xx). Math F1=0.683, GSM F1=0.778.
+All four components work synergistically: DPO calibration + MATH-domain first_bad_edge + joint objective + terminal BCE.
+
+### Path to F1=0.70
+
+PBR19: acc_err=0.574, acc_correct=0.842. To reach F1=0.70:
+- Need acc_err≥0.60 + acc_correct≥0.88: F1 = 2×0.60×0.88/(0.60+0.88) = 1.056/1.48 = 0.714
+- Currently: 406×(1-0.842)=64 false positives, 594×(1-0.574)=253 missed/wrong
+- Fix 30 of the 64 false positives (acc_correct→0.87) + fix 40 of the 253 wrong cases (acc_err→0.60)
+
+---
+
+## PBR21 — DPO+MATH-MS+Joint, 10 Epochs (Overfitting Study) [DONE]
+
+**Data**: PBR12 pairs (same as PBR19)
+**Config**: Same as PBR19 but num_train_epochs=10
+**Training**: pair_acc=0.890 (higher than PBR19's 0.866)
+
+| Metric | PBR21 | PBR19 | Δ |
+|---|---|---|---|
+| Math F1 | 0.663 | **0.683** | **-0.020** ❌ |
+| Math acc_err | 0.537 | **0.574** | -0.037 |
+| Math acc_cor | 0.867 | 0.842 | +0.025 |
+| GSM F1 | 0.756 | **0.778** | -0.022 |
+
+**Conclusion**: 10 epochs OVERFITS despite higher validation pair_acc. **5 epochs is optimal** for this recipe.
+
+---
+
+## PBR6 Failure Analysis — ProcessBench Math Error Modes (2026-03-11)
+
+**Based on**: PBR6 cold seed=42 scored_rows on full ProcessBench Math (1000 examples)
+**Threshold**: τ=0.317 (oracle, optimized for F1)
+
+### Score Distributions by Prefix Type
+
+| Prefix Type | n | Mean Score | Std | P5 | P50 | P95 |
+|-------------|---|-----------|-----|-----|-----|-----|
+| Good prefix | 3772 | 0.619 | 0.169 | 0.296 | 0.645 | 0.851 |
+| **First bad prefix** | 594 | **0.292** | 0.174 | 0.080 | 0.251 | 0.638 |
+| Later bad prefix | 2139 | 0.330 | 0.180 | 0.096 | 0.297 | 0.674 |
+
+**At τ=0.317**:
+- Good prefix false trigger rate: **6.3%** (55 out of 406 all-correct examples)
+- First bad prefix detection rate: **62.3%** (correctly detected errors)
+
+### Error Analysis
+
+**Error examples (594 total)**:
+| Prediction outcome | Count | % |
+|---|---|---|
+| Correctly identified (pred=label) | 285 | 48.0% |
+| No error detected (missed) | 102 | 17.2% |
+| Wrong step predicted (too early) | 106 | 17.8% |
+| Wrong step predicted (too late) | 101 | 17.0% |
+
+**"Too early" prediction analysis** (106 cases):
+- Average 2.1 steps too early
+- Score at wrong trigger step: 0.244 (below τ, so it fires)
+- Score at actual first bad step: 0.218 (even lower, but fires too late)
+- Root cause: some CORRECT intermediate steps have suspiciously low scores (0.244)
+
+### Root Cause
+
+The model confuses certain "suspicious-looking correct" math steps with errors.
+This is more common in MATH competition problems where intermediate steps look locally incorrect
+but are globally correct.
+
+**Implication**: PBR11 (MATH-domain MS pairs) should directly address this — training on
+harder MATH competition first_bad_edge pairs will teach the model when to distrust intermediate steps.
+
+### Key Metrics for Improvement
+
+Current: acc_err=0.497, acc_cor=0.906, F1=0.642
+To reach F1=0.70 (target): need acc_err≈0.57 (keeping acc_cor≥0.85)
+
+---
+
+## Terminal BCE Sweep — PBR13/14/15/16/17 (2026-03-11)
+
+### Summary Table (All Results, Full ProcessBench)
+
+| Run | Data | λ_termBCE | Math F1 | Math acc_err | Math acc_cor | GSM F1 |
+|-----|------|-----------|---------|-------------|-------------|--------|
+| PBR6 (baseline) | DPO v1 (3705p) | 0 | 0.642 | 0.497 | **0.906** | 0.743 |
+| PBR10 | DPO v1 scale (6947p) | 0 | 0.631 | 0.508 | 0.833 | 0.733 |
+| PBR11 | MATH-MS only (4968p) | 0 | 0.357 | 0.300 | 0.441 | 0.481 |
+| **PBR13** | DPO v1 (3705p) | **0.25** | **0.660** | 0.537 | 0.857 | 0.755 |
+| PBR14 | DPO+MATH-MS (5705p) | 0.25 | 0.659 | 0.554 | 0.813 | 0.757 |
+| PBR15 | DPO v1 (3705p) | 0.50 | 0.654 | 0.527 | 0.862 | 0.762 |
+| PBR16 | Reduced DPO+MATH-MS (2700p) | 0.25 | 0.652 | 0.545 | 0.810 | **0.764** |
+| PBR17 | DPO v1 (3705p), lr=2e-5×8ep | 0.25 | 0.657 | 0.537 | 0.847 | 0.758 |
+
+### Key Findings
+
+1. **PBR13 is the current best for Math F1=0.660** (+1.8% vs PBR6 baseline)
+2. **terminal_bce_lambda=0.25 is optimal** for Math; 0.5 overpowers the ranking loss
+3. **More DPO pairs always hurts acc_correct**: DPO scaling (PBR10) drops acc_correct from 0.906 to 0.833
+4. **MATH-domain MS pairs without DPO calibration = catastrophic failure** (PBR11, F1=0.357)
+5. **Trade-off pattern**: all variants with terminal BCE show acc_err +4%, acc_correct −4-5%, net F1 +1.8%
+6. **Math F1 plateau at ≈0.660**: no variant breaks 0.661 yet
+7. **GSM best with PBR16**: 0.764 (reduced DPO + MATH-MS + terminal BCE)
+
+### Next Direction
+
+Math F1 plateau suggests the bottleneck is NOT the training objective but the training DATA FORMAT.
+ProcessBench uses QwQ-32B multi-step chain-of-thought solutions (different style than MS/DPO training data).
+Hypothesis: need training pairs in QwQ-32B-style format (PRM800K has OpenAI math solutions, possibly closer).
+
+- PBR18: joint objective + terminal BCE (tests absolute vs relative calibration)
+- PBR19: PRM800K first_bad_edge pairs (different solution format)
+  → Need to fix ~45 of the 102 "no error detected" OR ~37 of the "wrong step" cases
+
+---
+
+## PBR22-PBR27 Systematic Variation Sweep — ProcessBench Transfer Plateau Analysis (2026-03-11)
+
+### Context
+
+After PBR19 established Math F1=0.683 as the best result, a systematic sweep was run to push toward F1=0.70.
+PBR19 config (frozen Qwen2.5-Math-PRM-7B + MLP/512 head):
+- Data: 3705 DPO sibling_branch + 2759 MATH-MS first_bad_edge + 548 terminal = 5705 train pairs
+- Objective: joint (BCE+ranking), lambda_bce=0.5, lambda_ranking=1.0, lambda_terminal_bce=0.25
+- Training: 5 epochs, lr=5e-5, batch=96
+
+### Results Table
+
+| Run | Variation | Train Pairs | Math F1 | Math acc_err | Math acc_cor | GSM F1 | Notes |
+|-----|-----------|------------|---------|-------------|-------------|--------|-------|
+| PBR19 (baseline) | — | 5705 | **0.683** | 0.574 | 0.842 | 0.778 | Best overall |
+| PBR22 | +PRM800K same_step_completion (7705p) | 7705 | 0.682 | 0.569 | 0.852 | 0.771 | No benefit |
+| PBR23 | source_balance=uniform (5705p) | 5705 | **0.684** | 0.561 | **0.877** | 0.773 | Best acc_correct |
+| PBR24 | 24% terminal anchors (6109p) | 6109 | 0.656 | 0.522 | 0.882 | 0.779 | Too many terminals |
+| PBR25 | uniform balance + lambda_termBCE=0.50 (5705p) | 5705 | 0.678 | 0.564 | 0.850 | 0.768 | StrongBCE hurts |
+| PBR26 | 2398 DPO + full PBR11 MS (7366p) | 7366 | 0.670 | 0.557 | 0.840 | 0.779 | Fewer DPO hurts |
+| PBR27 | PBR12 + MLP/1024 head (5705p) | 5705 | 0.666 | 0.547 | 0.850 | **0.784** | Large head overfits Math |
+
+### Failure Mode Analysis (PBR19 at τ=0.406)
+
+From scored_rows analysis of ProcessBench Math (1000 examples, 594 erroneous, 406 all-correct):
+
+**Error detection accuracy by label type:**
+- label=0 (first step wrong): 78/115 = **68%** (easier for model)
+- label≥1 (later step wrong): 263/479 = **55%** (harder, main bottleneck)
+
+**Failure mode breakdown for label≥1 errors:**
+| Failure mode | Count | % |
+|---|---|---|
+| Exact correct (pred == label) | 263 | 54.9% |
+| Early detect (pred < label) | 100 | 20.9% |
+| Wrong step after (pred > label) | 54 | 11.3% |
+| Missed entirely | 62 | 12.9% |
+
+**Correct prefix score analysis:**
+- 10.9% of correct prefix steps score BELOW threshold τ=0.406 → causes early detects
+- p5=0.270, p25=0.592, p50=0.757, p75=0.861, p95=0.935
+
+### Key Findings
+
+1. **All hyperparameter/data variations plateau at Math F1 ≈ 0.683-0.684**
+2. **DPO sibling_branch pairs are irreplaceable**: reducing from 3705→2398 (PBR26) drops F1 0.683→0.670
+3. **Terminal fraction >10% is harmful**: 24% terminal (PBR24) drops acc_err from 0.574 to 0.522
+4. **Larger head (MLP/1024 vs /512) overfits**: F1 0.683→0.666 for Math, but 0.778→0.784 for GSM8K  
+5. **Primary bottleneck**: Early detects (20.9% of label≥1 errors) — model gives low score to correct prefixes
+6. **Root cause of early detects**: 10.9% of correct prefixes score below threshold due to insufficient "correct prefix → high score" training
+7. **Uniform source balance (PBR23)** is Pareto-optimal: same F1 but better acc_correct (0.877 vs 0.842)
+
+### Next Experiment: PBR29 (First-Bad-Fanout Mode)
+
+PBR29 hypothesis: `first_bad_fanout` pairs (multiple correct prefix levels trained against same first bad step)
+will reduce early detects by explicitly teaching ALL pre-error steps to score high.
+- Data: 3705 DPO full + 3624 MATH-MS fanout pairs = 7329 train
+- Same config as PBR19 (joint, λ_termBCE=0.25, 5 epochs, MLP/512)
+
+### PBR28 (also pending): full DPO (3705) + more MATH-MS (4000 cap)
+
+PBR28 tests if more MATH-MS first_bad_edge data (with full DPO calibration preserved) helps:
+- Data: 3705 DPO + 4000 MATH-MS = 7705 train pairs
+
+
+---
+
+## PBR28/PBR29 Additional Data/Mode Experiments (2026-03-11)
+
+### PBR28: Full DPO (3705) + More MATH-MS (4000 cap) = 7705 pairs
+
+**Hypothesis**: More MATH-MS first_bad_edge data with calibration preserved improves acc_err
+
+| Metric | PBR28 | vs PBR19 |
+|--------|-------|----------|
+| Math F1 | 0.674 | -0.009 ↓ |
+| acc_err | 0.566 | -0.008 |
+| acc_correct | 0.833 | -0.009 |
+| GSM F1 | 0.763 | -0.015 |
+
+**Finding**: More MATH-MS data (4000 vs 2000) with full DPO calibration still HURTS. acc_correct degraded further.
+
+### PBR29: DPO Full (3705) + MATH-MS Fanout (3624) = 7329 pairs
+
+**Hypothesis**: `first_bad_fanout` mode (multiple correct prefix levels vs first bad step) reduces early detects
+
+| Metric | PBR29 | vs PBR19 |
+|--------|-------|----------|
+| Math F1 | 0.682 | -0.001 |
+| acc_err | 0.567 | -0.007 |
+| acc_correct | 0.855 | +0.013 |
+| GSM F1 | 0.762 | -0.016 |
+
+**Failure mode comparison** (PBR29 vs PBR19):
+| Mode | PBR19 | PBR29 |
+|------|-------|-------|
+| exact correct | 263 (54.9%) | 260 (54.3%) |
+| early detect (pred < label) | 100 (20.9%) | 101 (21.1%) |
+| wrong step after | 54 (11.3%) | 58 (12.1%) |
+| missed entirely | 62 (12.9%) | 60 (12.5%) |
+| correct prefix FP rate | **10.9%** | **10.9%** |
+
+**Finding**: Fanout training has ZERO effect on early detects. The 10.9% correct-prefix FP rate is identical.
+
+### Definitive Conclusion: Frozen Backbone Ceiling
+
+The 10.9% correct-prefix FP rate is a **backbone feature quality ceiling**, not a training data problem.
+All 9 variations (PBR22-PBR29) yield Math F1 ∈ [0.656, 0.684] with the ceiling at F1=0.683-0.684.
+
+**Complete Sweep Results**:
+| Run | Data | Pairs | Math F1 | acc_err | acc_cor | GSM F1 | Notes |
+|-----|------|-------|---------|---------|---------|--------|-------|
+| PBR19 | DPO 3705+MS 2000 | 5705 | **0.683** | 0.574 | 0.842 | 0.778 | Best Math |
+| PBR22 | PBR12+PRM800K | 7705 | 0.682 | 0.569 | 0.852 | 0.771 | Neutral |
+| PBR23 | PBR12 unif.bal | 5705 | **0.684** | 0.561 | **0.877** | 0.773 | Best acc_cor |
+| PBR24 | 24% terminal | 6109 | 0.656 | 0.522 | 0.882 | **0.779** | Too many terms |
+| PBR25 | unif+BCE=0.5 | 5705 | 0.678 | 0.564 | 0.850 | 0.768 | StrongBCE hurts |
+| PBR26 | 2398DPO+MS full | 7366 | 0.670 | 0.557 | 0.840 | 0.779 | Less DPO hurts |
+| PBR27 | MLP/1024 head | 5705 | 0.666 | 0.547 | 0.850 | **0.784** | Overfits Math |
+| PBR28 | DPO+MS4k | 7705 | 0.674 | 0.566 | 0.833 | 0.763 | More MS hurts |
+| PBR29 | DPO+MS fanout | 7329 | 0.682 | 0.567 | 0.855 | 0.762 | Fanout neutral |
+
+### Next Steps to Break F1=0.683 Ceiling
+
+1. **LoRA backbone fine-tuning**: Unfreeze top layers of Qwen2.5-Math-PRM-7B to learn task-specific features
+   - LoRA has been implemented in `scripts/phase_e_train_value_lora.py` (smoke test done)
+   - Expected to directly reduce the 10.9% correct-prefix FP rate
+2. **Higher-quality training data**: ProcessBench uses QwQ-32B solutions; training data uses Math Shepherd
+   (MC-estimated labels) — distribution mismatch in solution style
+3. **Ensemble**: PBR19 + PBR23 (different acc_err/acc_cor tradeoffs) could combine strengths

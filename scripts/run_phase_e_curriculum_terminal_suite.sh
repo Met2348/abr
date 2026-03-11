@@ -96,6 +96,7 @@ RANKING_TARGET_SPACE="${RANKING_TARGET_SPACE:-score}"
 PAIR_WEIGHT_MODE="${PAIR_WEIGHT_MODE:-none}"
 SOURCE_BALANCE="${SOURCE_BALANCE:-none}"
 CHECKPOINT_SELECTION_METRIC="${CHECKPOINT_SELECTION_METRIC:-pair_acc}"
+RECIPE_RISK_POLICY="${RECIPE_RISK_POLICY:-error}"
 MAX_GPU_MEMORY_GIB="${MAX_GPU_MEMORY_GIB:-}"
 MAX_CPU_MEMORY_GIB="${MAX_CPU_MEMORY_GIB:-}"
 SEED="${SEED:-42}"
@@ -155,6 +156,7 @@ _common_train_flags() {
     --source-balance "$SOURCE_BALANCE"
     --permutation-mode stable_hash
     --checkpoint-selection-metric "$CHECKPOINT_SELECTION_METRIC"
+    --recipe-risk-policy "$RECIPE_RISK_POLICY"
     --seed "$SEED"
     --dtype bfloat16
     --device-map auto

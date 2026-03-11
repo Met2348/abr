@@ -795,16 +795,17 @@ def _resolve_dtype(dtype_name: str, torch_module: Any):
     dtype = _resolve_dtype("auto", torch)
     ```
     """
+    dtype_name = str(dtype_name).strip().lower()
     if dtype_name == "auto":
         if torch_module.cuda.is_available():
             # bfloat16 is stable for most modern GPUs and efficient.
             return torch_module.bfloat16
         return torch_module.float32
-    if dtype_name == "float32":
+    if dtype_name in {"float32", "fp32"}:
         return torch_module.float32
-    if dtype_name == "float16":
+    if dtype_name in {"float16", "fp16"}:
         return torch_module.float16
-    if dtype_name == "bfloat16":
+    if dtype_name in {"bfloat16", "bf16"}:
         return torch_module.bfloat16
     raise ValueError(f"Unsupported dtype: {dtype_name}")
 

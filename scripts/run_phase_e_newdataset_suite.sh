@@ -15,6 +15,9 @@
 #   NDS2: math_step_dpo_v1 — Math-Step-DPO fork-point pairs + Math-Shepherd anchor
 #   NDS3: ms_align_v1 (baseline) — same scale as NDS1/2 for fair comparison
 #   NDS4: ms_rlhflow_mixed_v1 — Mixed Math-Shepherd + RLHFlow + Math-Step-DPO
+#   NDS5: ms_strict_only_v1 — remove MS fanout/grid length-bias pairs
+#   NDS6: rlh_strict_only_v1 — remove RLHFlow fanout/grid length-bias pairs
+#   NDS7: ms_dpo_calibrated_v1 — use DPO sibling pairs as length-bias debiaser
 #
 # 中文
 # ----
@@ -48,6 +51,7 @@ LEARNING_RATE="${LEARNING_RATE:-3e-5}"
 MAX_LENGTH="${MAX_LENGTH:-1024}"
 HEAD_MLP_HIDDEN_SIZE="${HEAD_MLP_HIDDEN_SIZE:-1024}"
 BENCH_MAX_SAMPLES="${BENCH_MAX_SAMPLES:-128}"
+RECIPE_RISK_POLICY="${RECIPE_RISK_POLICY:-error}"
 
 # GPU 设备：默认用 GPU 3（当前 GPU 1/2 已被其他实验占用）
 # GPU device: default GPU 3 (GPUs 1/2 are currently occupied)
@@ -81,36 +85,66 @@ resolve_group() {
     NDS1_RLHFLOW_SMOKE)
       GROUP_TITLE="NDS1 RLHFlow-Deepseek LLM-Judge Smoke"
       GROUP_INTENTION="Test whether LLM-judge annotated step labels (RLHFlow-Deepseek, 252K rows) improve ProcessBench transfer vs MC-estimated Math-Shepherd baseline at 4096 pairs scale."
-      GROUP_CASES=("nds1_rlhflow_align_mlp|rlhflow_align_v1")
+      GROUP_CASES=("nds1_rlhflow_align_mlp|rlhflow_align_v1|score|none|pair_acc")
       ;;
     NDS2_MATH_STEP_DPO_SMOKE)
       GROUP_TITLE="NDS2 Math-Step-DPO Fork-Point Pairs Smoke"
       GROUP_INTENTION="Test whether explicit fork-point sibling_branch pairs from Math-Step-DPO-10K improve first_error_edge_accuracy and ProcessBench AUC vs strict first_bad_edge baseline."
-      GROUP_CASES=("nds2_math_step_dpo_mlp|math_step_dpo_v1")
+      # 中文: Math-Step-DPO profile 会混合 sibling-branch + terminal anchor。
+      # 对这类 mixed semantics，recipe_safety 已明确拒绝
+      # `logit + confidence_semantic + ranking_score` 组合，所以这里显式切到更保守的
+      # `score + none + pair_acc`。
+      # The recipe safety guard already rejects
+      # `logit + confidence_semantic + ranking_score` on this mixed-semantics profile,
+      # so this group uses the conservative safe recipe instead.
+      GROUP_CASES=("nds2_math_step_dpo_mlp|math_step_dpo_v1|score|none|pair_acc")
       ;;
     NDS3_MS_BASELINE_SMOKE)
       GROUP_TITLE="NDS3 Math-Shepherd Baseline Smoke (same scale as NDS1/2)"
       GROUP_INTENTION="Reproduce ms_align_v1 baseline at 4096 pairs with same hyperparams as NDS1/2 for fair comparison."
-      GROUP_CASES=("nds3_ms_baseline_mlp|ms_align_v1")
+      GROUP_CASES=("nds3_ms_baseline_mlp|ms_align_v1|score|none|pair_acc")
       ;;
     NDS4_MIXED_SMOKE)
       GROUP_TITLE="NDS4 Mixed Multi-Source Smoke"
       GROUP_INTENTION="Test mixed Math-Shepherd + RLHFlow-Deepseek + Math-Step-DPO combination at 4096 pairs."
-      GROUP_CASES=("nds4_ms_rlhflow_mixed_mlp|ms_rlhflow_mixed_v1")
+      GROUP_CASES=("nds4_ms_rlhflow_mixed_mlp|ms_rlhflow_mixed_v1|score|none|pair_acc")
+      ;;
+    NDS5_MS_STRICT_ONLY_SMOKE)
+      GROUP_TITLE="NDS5 Math-Shepherd Strict-Only Smoke"
+      GROUP_INTENTION="Test whether removing all Math-Shepherd fanout/grid pairs fixes the known shorter-is-better length shortcut and improves ProcessBench transfer."
+      # 中文: `ms_strict_only_v1` 保留 strict + terminal 两种 mixed semantics。
+      # 为避免再踩已知 mixed-terminal 反模式，这里直接使用安全配方：
+      # `score + none + pair_acc`。
+      # English: strict-only still mixes local + terminal semantics, so we use
+      # the repository-safe recipe directly.
+      GROUP_CASES=("nds5_ms_strict_only_mlp|ms_strict_only_v1|score|none|pair_acc")
+      ;;
+    NDS6_RLHFLOW_STRICT_ONLY_SMOKE)
+      GROUP_TITLE="NDS6 RLHFlow Strict-Only Smoke"
+      GROUP_INTENTION="Test whether RLHFlow-Deepseek becomes competitive once its fanout/grid length-bias pairs are removed, isolating the value of LLM-judge step labels."
+      GROUP_CASES=("nds6_rlhflow_strict_only_mlp|rlh_strict_only_v1|score|none|pair_acc")
+      ;;
+    NDS7_MS_DPO_CALIBRATED_SMOKE)
+      GROUP_TITLE="NDS7 MS + DPO Calibrated Smoke"
+      GROUP_INTENTION="Test whether Math-Step-DPO sibling_branch pairs can debias Math-Shepherd length shortcuts while preserving first-error supervision."
+      GROUP_CASES=("nds7_ms_dpo_calibrated_mlp|ms_dpo_calibrated_v1|score|none|pair_acc")
       ;;
     NDS_ALL_SMOKE)
-      GROUP_TITLE="NDS All Groups Smoke (NDS1+NDS2+NDS3+NDS4)"
-      GROUP_INTENTION="Run all 4 NDS variants in one suite pass for direct comparison."
+      GROUP_TITLE="NDS All Groups Smoke (NDS1..NDS7)"
+      GROUP_INTENTION="Run all new-dataset and length-bias-fix smoke variants in one suite pass for direct comparison."
       GROUP_CASES=(
-        "nds1_rlhflow_align_mlp|rlhflow_align_v1"
-        "nds2_math_step_dpo_mlp|math_step_dpo_v1"
-        "nds3_ms_baseline_mlp|ms_align_v1"
-        "nds4_ms_rlhflow_mixed_mlp|ms_rlhflow_mixed_v1"
+        "nds1_rlhflow_align_mlp|rlhflow_align_v1|score|none|pair_acc"
+        "nds2_math_step_dpo_mlp|math_step_dpo_v1|score|none|pair_acc"
+        "nds3_ms_baseline_mlp|ms_align_v1|score|none|pair_acc"
+        "nds4_ms_rlhflow_mixed_mlp|ms_rlhflow_mixed_v1|score|none|pair_acc"
+        "nds5_ms_strict_only_mlp|ms_strict_only_v1|score|none|pair_acc"
+        "nds6_rlhflow_strict_only_mlp|rlh_strict_only_v1|score|none|pair_acc"
+        "nds7_ms_dpo_calibrated_mlp|ms_dpo_calibrated_v1|score|none|pair_acc"
       )
       ;;
     *)
       echo "ERROR: Unknown ACTIVE_PHASE_E_NDS_GROUP=$ACTIVE_PHASE_E_NDS_GROUP" >&2
-      echo "  Valid: NDS1_RLHFLOW_SMOKE, NDS2_MATH_STEP_DPO_SMOKE, NDS3_MS_BASELINE_SMOKE, NDS4_MIXED_SMOKE, NDS_ALL_SMOKE" >&2
+      echo "  Valid: NDS1_RLHFLOW_SMOKE, NDS2_MATH_STEP_DPO_SMOKE, NDS3_MS_BASELINE_SMOKE, NDS4_MIXED_SMOKE, NDS5_MS_STRICT_ONLY_SMOKE, NDS6_RLHFLOW_STRICT_ONLY_SMOKE, NDS7_MS_DPO_CALIBRATED_SMOKE, NDS_ALL_SMOKE" >&2
       exit 1
       ;;
   esac
@@ -151,6 +185,9 @@ run_train() {
   local case_id="$1"
   local train_jsonl="$2"
   local eval_jsonl="$3"
+  local ranking_target_space="${4:-logit}"
+  local pair_weight_mode="${5:-confidence_semantic}"
+  local checkpoint_selection_metric="${6:-ranking_score}"
   local run_name="${RUN_PREFIX}_${case_id}_value"
   local cmd=(
     "$PYTHON_BIN" -u scripts/phase_e_train_value.py
@@ -168,11 +205,12 @@ run_train() {
     --lambda-ranking 1.0
     --lambda-bce 1.0
     --ranking-margin 0.02
-    --ranking-target-space logit
-    --pair-weight-mode confidence_semantic
+    --ranking-target-space "$ranking_target_space"
+    --pair-weight-mode "$pair_weight_mode"
     --source-balance none
     --permutation-mode stable_hash
-    --checkpoint-selection-metric ranking_score
+    --checkpoint-selection-metric "$checkpoint_selection_metric"
+    --recipe-risk-policy "$RECIPE_RISK_POLICY"
     --seed 42
     --feature-cache-root "$FEATURE_CACHE_ROOT"
     --feature-cache-mode read_write
@@ -190,6 +228,10 @@ run_train() {
   CURRENT_STAGE="train_${case_id}"
   log_line "RUN (GPU ${CUDA_DEVICE}): ${cmd[*]}" | tee -a "$SUITE_LOG_FILE" >&2
   CUDA_VISIBLE_DEVICES="$CUDA_DEVICE" "${cmd[@]}" | tee -a "$SUITE_LOG_FILE" >&2
+  local train_status=${PIPESTATUS[0]}
+  if [[ $train_status -ne 0 ]]; then
+    return "$train_status"
+  fi
   # Return latest run dir
   "$PYTHON_BIN" - "$VALUE_OUTPUT_ROOT" "$run_name" <<'PY'
 from pathlib import Path
@@ -199,7 +241,11 @@ prefix = sys.argv[2]
 matches = sorted(root.glob(f"{prefix}_*"))
 if not matches:
     raise SystemExit(f"No value run dir matches prefix: {prefix}")
-print(matches[-1])
+latest = matches[-1]
+manifest = latest / "manifest.json"
+if not manifest.exists():
+    raise SystemExit(f"Value run completed without manifest: {manifest}")
+print(latest)
 PY
 }
 
@@ -221,6 +267,10 @@ run_bench() {
   CURRENT_STAGE="bench_${case_id}_${benchmark_id}"
   log_line "RUN (GPU ${CUDA_DEVICE}): ${cmd[*]}" | tee -a "$SUITE_LOG_FILE" >&2
   CUDA_VISIBLE_DEVICES="$CUDA_DEVICE" "${cmd[@]}" | tee -a "$SUITE_LOG_FILE" >&2
+  local bench_status=${PIPESTATUS[0]}
+  if [[ $bench_status -ne 0 ]]; then
+    return "$bench_status"
+  fi
   "$PYTHON_BIN" - "$BENCH_OUTPUT_ROOT" "$run_name" <<'PY'
 from pathlib import Path
 import sys
@@ -262,7 +312,7 @@ declare -A CASE_BENCH_GSM=()
 declare -A CASE_BENCH_MATH=()
 
 for case_spec in "${GROUP_CASES[@]}"; do
-  IFS='|' read -r case_id profile <<< "$case_spec"
+  IFS='|' read -r case_id profile ranking_target_space pair_weight_mode checkpoint_selection_metric <<< "$case_spec"
   log_line "=== Case: ${case_id} (profile: ${profile}) ===" | tee -a "$SUITE_LOG_FILE" >&2
 
   # 1. Curate pairs / 构造 pair artifact
@@ -273,7 +323,7 @@ for case_spec in "${GROUP_CASES[@]}"; do
 
   # 2. Train value head / 训练 value head
   CURRENT_STAGE="train_${case_id}"
-  value_dir=$(run_train "$case_id" "$train_jsonl" "$eval_jsonl")
+  value_dir=$(run_train "$case_id" "$train_jsonl" "$eval_jsonl" "$ranking_target_space" "$pair_weight_mode" "$checkpoint_selection_metric")
 
   # 3. Eval on ProcessBench / 在 ProcessBench 上评测
   CURRENT_STAGE="bench_${case_id}_gsm8k"
@@ -306,7 +356,7 @@ done
 } > "$SUMMARY_FILE"
 
 for case_spec in "${GROUP_CASES[@]}"; do
-  IFS='|' read -r case_id profile <<< "$case_spec"
+  IFS='|' read -r case_id profile _ranking_target_space _pair_weight_mode _checkpoint_selection_metric <<< "$case_spec"
   gsm_dir="${CASE_BENCH_GSM[$case_id]:-}"
   math_dir="${CASE_BENCH_MATH[$case_id]:-}"
   "$PYTHON_BIN" - "$case_id" "$gsm_dir" "$math_dir" "$SUMMARY_FILE" <<'PY'

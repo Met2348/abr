@@ -355,6 +355,186 @@ PROFILE_REGISTRY: dict[str, dict[str, Any]] = {
             ),
         ),
     },
+    # 2026-03-11 FIX: ms_strict_only_v1 — eliminates length-biased fanout/grid pairs from MS.
+    # Diagnosis showed NDS3 failure: 20.1% of ms_align_v1 pairs (fanout rej-cho=+194, grid rej-cho=+203)
+    # teach "shorter=better" LENGTH BIAS. On ProcessBench bad_prefix is LONGER → inverted scores.
+    # This profile keeps ONLY local_first_bad_edge (rej-cho=+99) + terminal (rej-cho=-141),
+    # both of which have moderate/reverse length deltas that do NOT cause systematic inversion.
+    #
+    # NDS3 长度偏差诊断修复：ms_align_v1 中有 20.1% 的 fanout/grid pair 教会模型"更短=更好"，
+    # 而 ProcessBench 的 bad_prefix 比 good_prefix 更长，导致评分倒置。
+    # 这个 profile 只保留不含系统性长度偏差的 strict 和 terminal pair 类型。
+    "ms_strict_only_v1": {
+        "title": "Math-Shepherd Strict-Only (No Length-Bias Pairs)",
+        "intent": (
+            "Ablation that removes ALL fanout/grid pair types from MS, keeping only "
+            "local_first_bad_edge (strict) and terminal_completion_anchor. "
+            "Tests whether the NDS3 failure was entirely due to length-biased pair types."
+        ),
+        "components": (
+            CurateComponent(
+                component_id="ms_strict",
+                source_kind="math_shepherd",
+                step_label_pair_mode="first_bad_edge_strict",
+                fraction=0.80,
+                semantic_weight=1.00,
+                description="Strict local first-error anchor (rej-cho≈+99, no systematic inversion).",
+            ),
+            CurateComponent(
+                component_id="ms_terminal",
+                source_kind="math_shepherd",
+                step_label_pair_mode="first_bad_edge_strict",
+                terminal_anchor_mode="all_positive_fanout",
+                terminal_anchor_fraction=0.95,
+                fraction=0.20,
+                semantic_weight=0.45,
+                description="All-correct terminal anchor (rej-cho≈-141, reverse direction, not problematic).",
+            ),
+        ),
+    },
+    # 2026-03-11 FIX: ms_dpo_calibrated_v1 — DPO sibling_branch pairs as length-bias debiaser.
+    # Math-Step-DPO sibling_branch pairs have rej-cho≈0 (same prefix length, different next step),
+    # which force the model to learn CONTENT quality rather than length shortcuts.
+    # Using DPO as 50% anchor + MS strict as 40% step-detection teacher = best of both worlds.
+    #
+    # 用 DPO 分叉点 pair 作为长度偏差矫正锚点：DPO pair 的 rej-cho≈0，
+    # 迫使模型学习内容质量而非长度捷径；MS strict 提供 first-error 检测信号。
+    "ms_dpo_calibrated_v1": {
+        "title": "MS + DPO Calibrated (Length-Bias Corrected)",
+        "intent": (
+            "Use Math-Step-DPO sibling_branch pairs (rej-cho≈0) as length-bias debiasers, "
+            "combined with MS strict first-error supervision. DPO 50% anchor prevents the model "
+            "from learning the shorter=better shortcut that collapses NDS3."
+        ),
+        "components": (
+            CurateComponent(
+                component_id="dpo_fork",
+                source_kind="math_step_dpo",
+                fraction=0.50,
+                semantic_weight=0.80,
+                description="DPO fork-point pairs (rej-cho≈0): content-quality anchor, no length bias.",
+            ),
+            CurateComponent(
+                component_id="ms_strict",
+                source_kind="math_shepherd",
+                step_label_pair_mode="first_bad_edge_strict",
+                fraction=0.40,
+                semantic_weight=1.00,
+                description="MS strict local first-error anchor for step-detection supervision.",
+            ),
+            CurateComponent(
+                component_id="ms_terminal",
+                source_kind="math_shepherd",
+                step_label_pair_mode="first_bad_edge_strict",
+                terminal_anchor_mode="all_positive_fanout",
+                terminal_anchor_fraction=0.95,
+                fraction=0.10,
+                semantic_weight=0.45,
+                description="Low-mass terminal anchor for all-correct trajectory calibration.",
+            ),
+        ),
+    },
+    # 2026-03-11: terminal-boosted variant of the NDS7 recipe.
+    # 核心假设：
+    # 当前 NDS7 + gated 已经把 local / global ranking 拉起来，剩余主残差集中在
+    # all-correct final completion ordering。这个 profile 不改变主干几何，只把 terminal
+    # anchor 从 10% 提到 20%，测试“是否只是 terminal 覆盖不够”。
+    "ms_dpo_terminalboost_v1": {
+        "title": "MS + DPO Terminal-Boosted Alignment",
+        "intent": (
+            "Keep the successful NDS7 geometry (DPO sibling_branch + MS strict), "
+            "but increase terminal anchor mass from 10% to 20%. "
+            "Tests whether the remaining ProcessBench gap is primarily caused by "
+            "under-coverage of all-correct terminal completion ordering."
+        ),
+        "components": (
+            CurateComponent(
+                component_id="dpo_fork",
+                source_kind="math_step_dpo",
+                fraction=0.45,
+                semantic_weight=0.80,
+                description="Primary sibling-branch supervision remains dominant.",
+            ),
+            CurateComponent(
+                component_id="ms_strict",
+                source_kind="math_shepherd",
+                step_label_pair_mode="first_bad_edge_strict",
+                fraction=0.35,
+                semantic_weight=1.00,
+                description="Strict first-error anchor is preserved but slightly reduced.",
+            ),
+            CurateComponent(
+                component_id="ms_terminal",
+                source_kind="math_shepherd",
+                step_label_pair_mode="first_bad_edge_strict",
+                terminal_anchor_mode="all_positive_fanout",
+                terminal_anchor_fraction=0.95,
+                fraction=0.20,
+                semantic_weight=0.55,
+                description="Terminal anchor is explicitly boosted to test completion-ordering coverage.",
+            ),
+        ),
+    },
+    # 2026-03-11 FIX: dpo_scale_v1 — Pure DPO at scale (8192 pairs, ~75% of full dataset).
+    # NDS2 (3705 pairs) achieves MATH AUC=0.712 (new frozen-head SOTA). This tests whether
+    # scaling up to 8192 DPO pairs breaks the frozen backbone ceiling.
+    # Math-Step-DPO has 10.8K rows total; 8192 pairs uses ~75% of available data.
+    #
+    # 纯 DPO 扩展实验：NDS2 用 3705 pair 已达 MATH AUC=0.712 (冻结头最优)。
+    # 这里扩展到 8192 pair，测试 DPO 数据规模能否进一步突破冻结骨干上限。
+    "dpo_scale_v1": {
+        "title": "Math-Step-DPO Pure Scale (8K pairs)",
+        "intent": (
+            "Scale NDS2's winning pure-DPO configuration from 3705 to 8192 pairs. "
+            "Tests whether DPO sibling_branch data at larger scale can push frozen-head "
+            "MATH AUC beyond the current 0.712 ceiling."
+        ),
+        "components": (
+            CurateComponent(
+                component_id="dpo_fork",
+                source_kind="math_step_dpo",
+                fraction=1.00,
+                semantic_weight=0.80,
+                description="All DPO fork-point pairs at 8K scale — pure sibling_branch.",
+            ),
+        ),
+    },
+    # 2026-03-11 FIX: rlh_strict_only_v1 — RLHFlow without length-biased fanout/grid.
+    # NDS1 (rlhflow_align_v1) had 43% fanout+grid pairs → even worse length bias than NDS3.
+    # RLHFlow labels are LLM-judge quality (Deepseek-8B), much better than MC estimation.
+    # Removing fanout/grid should reveal the true signal quality of LLM-judge annotations.
+    #
+    # RLHFlow 去除长度偏差版本：NDS1 包含 43% fanout/grid pair（比 NDS3 的 20.1% 更高），
+    # 导致 MATH AUC=0.552 严重倒置。仅保留 strict 标注，测试 LLM-judge 标签质量是否足够好。
+    "rlh_strict_only_v1": {
+        "title": "RLHFlow-Deepseek Strict-Only (No Length-Bias Pairs)",
+        "intent": (
+            "Remove ALL fanout/grid pair types from RLHFlow-Deepseek, keeping only "
+            "first_bad_edge_strict. NDS1 had 43% length-biased pairs (fanout+grid), "
+            "causing MATH AUC=0.552. Tests if LLM-judge annotation quality, freed from "
+            "length bias, can rival NDS2's fork-point performance."
+        ),
+        "components": (
+            CurateComponent(
+                component_id="rlh_strict",
+                source_kind="rlhflow_deepseek",
+                step_label_pair_mode="first_bad_edge_strict",
+                fraction=0.90,
+                semantic_weight=1.00,
+                description="RLHFlow LLM-judge strict first-error (no fanout/grid contamination).",
+            ),
+            CurateComponent(
+                component_id="rlh_terminal",
+                source_kind="rlhflow_deepseek",
+                step_label_pair_mode="first_bad_edge_strict",
+                terminal_anchor_mode="all_positive_fanout",
+                terminal_anchor_fraction=0.95,
+                fraction=0.10,
+                semantic_weight=0.45,
+                description="Low-mass all-correct terminal anchor from RLHFlow-Deepseek.",
+            ),
+        ),
+    },
     # 2026-03-11: targeted later-bad profile; uses pair_type_allowlist to restrict to
     #             only lastsafe_vs_laterbad + earlygood_vs_laterbad pairs (not all grid).
     "ms_laterbad_v1": {

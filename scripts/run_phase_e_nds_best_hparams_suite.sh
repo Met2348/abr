@@ -57,6 +57,7 @@ LEARNING_RATE="${LEARNING_RATE:-3e-5}"
 MAX_LENGTH="${MAX_LENGTH:-1024}"
 HEAD_MLP_HIDDEN_SIZE="${HEAD_MLP_HIDDEN_SIZE:-1024}"
 BENCH_MAX_SAMPLES="${BENCH_MAX_SAMPLES:-128}"
+RECIPE_RISK_POLICY="${RECIPE_RISK_POLICY:-error}"
 
 # GPU device
 CUDA_DEVICE="${CUDA_DEVICE:-2}"
@@ -206,6 +207,7 @@ run_train() {
     --source-balance none
     --permutation-mode stable_hash
     --checkpoint-selection-metric pair_acc
+    --recipe-risk-policy "$RECIPE_RISK_POLICY"
     --seed 42
     --feature-cache-root "$FEATURE_CACHE_ROOT"
     --feature-cache-mode read_write

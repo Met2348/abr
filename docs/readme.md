@@ -6,6 +6,253 @@
 - 但不再把 StrategyQA 当作主监督训练基准，
 - 后续先在具备高质量步骤监督的数据集上验证方法，再把结果迁移回 StrategyQA。
 
+## 2026-03-13 最新突破复核
+
+最新核实文档：
+
+1. `docs/phase_e_latest_breakthrough_verification_20260312.md`
+
+当前最准确的状态：
+
+1. `PBR26`
+   - 是当前已验证最强的 frozen benchmark candidate
+   - 不是 RL-ready
+2. `PBR31`
+   - 是当前已验证 LoRA 路线里最好的 balance 提升
+   - 不是 `Math AUC` 新 SOTA
+   - 也不是 RL-ready
+3. 当前最顽固的残差仍然是：
+   - `terminal completion ordering`
+   - 以及 `first_bad` slice 的 reward-hacking surface
+4. 所以现在不能把 repo 结论表述成：
+   - "`PBR26` 可以直接做 RL verifier"
+   - 或 "`PBR31` 已经干净超越 frozen"
+
+## 2026-03-13 Phase F controller 新结论
+
+补做多策略 offline controller sweep 后，结论进一步更新：
+
+1. 主要问题不在 verifier 太弱，而在旧 `ABR-lite` 控制规则设计错误。
+2. 更简单、约束更明确的 controller family 明显更好：
+   - `Math` 侧：`threshold_only`
+   - `GSM` 侧：`delayed_drop / guarded_drop`
+3. 多个强候选上，`balanced_f1` 可提升到约 `0.86-0.91`。
+4. 这说明下一步不该直接上 RL，而应先做：
+   - heuristic controller 重构
+   - live generation 验证
+
+## 2026-03-13 Eval Provenance Audit Update
+
+当前 A-F 主线又收紧了一层默认安全语义：
+
+1. `Phase B/C/D/E` 的 standalone eval 路径现在默认都按 `fail-safe` 处理
+   - 请求 `best` 但缺失时，会直接报错
+   - 不再默认静默回退到 `final`
+2. `posthoc_calibration=from_run` 也同样如此
+   - 缺失 `best` calibrator 时，默认直接失败
+   - 只有显式传 `fallback_final` 才允许 legacy 兼容
+3. 一旦真的发生 fallback，现在必须显式写进：
+   - `metrics.json`
+   - `manifest.json`
+   - `summary.md`
+   - 控制台输出
+
+这次额外 grep 复核还确认了一点：
+
+1. 当前主 `Phase E source bundle` 训练入口没有直接把 `ProcessBench`/`PRMBench` benchmark 测试集吞进训练；
+2. benchmark 相关脚本仍然主要属于：
+   - eval
+   - alignment audit
+   - research-only curated utilities
+
+## 2026-03-12 Phase F 审计更正
+
+`Phase F` 目前还不能算“已完全审计通过”。
+
+已确认有 artifact 支撑的部分：
+
+1. `threshold / generator-shift` 检查
+2. `reward-hacking` probe
+
+需要降级的部分：
+
+1. 之前文档里对 `F2 ABR-lite` 的描述过于乐观
+2. 原始仿真结果显示：
+   - `balanced_f1=0.3388`
+   - `acc_erroneous=0.9882`
+   - `acc_correct=0.2044`
+3. 解释：
+   - 控制器会非常激进地拦截错误，
+   - 但也会错误拦下大量本来正确的推理，
+   - 所以还不能作为 `Phase F` 的 live RL / controller promotion 依据
+
+## 2026-03-11 Frontier 三方向（最新设计）
+
+在当前最强共享 artifact `PBR10` 上，我们新开了三条更贴近 2026 verifier 范式的方向：
+
+1. `judge-filter`
+   - 用更强数学 judge 做保守离线去噪
+2. `dual-head`
+   - 把 local 与 terminal 目标显式拆开
+3. `minimal LoRA`
+   - 用最小骨干适配测试 frozen-head ceiling
+
+目前已经确认的一条结论是：
+
+1. 当前 `judge-filter` 契约在 `PBR10` 上是负方向：
+   - 所有 `1783` 条可审计 `local_first_bad_edge` pair 全部被 `parse_failed`
+   - 过滤后训练集只剩：
+     - `sibling_branch`
+     - `terminal_completion_anchor`
+   - 说明它不是在“清洗 local supervision”，而是在破坏监督几何
+
+更详细解释见：
+
+1. `docs/phase_e_frontier_paradigms_and_experiments_20260311.md`
+2. `docs/phase_e_paradigm_refresh_experiments_20260311.md`
+   - 用通俗术语解释更新后的 verifier / PRM 范式
+   - 记录 `PBR10 -> PRX1 / PRX2` 的定向修复实验
+   - 当前最重要结论：
+     - `PRX1` 明显改善 terminal completeness
+     - `PRX2 dual_head` 虽然修了 terminal，但 same-family verifier 本体明显变差
+
+## 2026-03-11 最新主线更新
+
+当前最重要的新结论：
+
+1. A-E 全链路代码已做过一轮实现审计，最高危的 cache lock / checkpoint fallback / dtype drift 问题已经修掉。
+2. 新的 benchmark-facing 主线不再是 `Math-Shepherd` 纯 local 配方，而是：
+   - `math_step_dpo_v1` 数据几何，
+   - `Qwen2.5-Math-PRM-7B` backbone，
+   - `mlp` head，
+   - 并且同时报告 oracle 与 fixed-threshold `ProcessBench F1`。
+3. 当前最强新候选：
+   - `PBR10 mlp`
+   - `ProcessBench Math`: `AUC=0.863`, `F1_oracle=0.659`, `F1_fixed@0.5=0.654`
+   - `ProcessBench GSM8K`: `AUC=0.873`, `F1_oracle=0.724`, `F1_fixed@0.5=0.693`
+4. `gated_mlp` 虽然能继续抬高 held-out / edge metrics，但 fixed-threshold F1 更差，因此暂不升主线。
+5. `Phase E` 当前所有活跃 wrapper 已显式绑定 `recipe-risk-policy`，旧的危险 recipe 不再能通过 suite 默默回流。
+6. 2026 新文献更新后，当前主线不再把“单一 scalar head”视为最终形态，而是把它降级为：
+   - bounded-support verifier baseline，
+   - 后续需要加上 process-outcome alignment 与 critique / self-verification 分支。
+7. 最新一轮更广的 `2025H2 -> 2026-03` verifier refresh 进一步收紧了这个判断：
+   - `ABR` 核心应保留，
+   - 但未来主线应变成：
+     - 独立 answer verifier
+     - `invalid / abstain / escalate`
+     - weak-ensemble / teacher-assisted hard-slice 标注
+     - factorized ABR student
+     - `process-outcome alignment + format robustness` gate
+8. 这轮新的 transfer follow-up 进一步说明：
+   - `Math-Shepherd strict-only` 不行；
+   - `RLHFlow strict-only` 只带来有限增益；
+   - `Math-Step-DPO sibling_branch` 是当前最有效的新信号。
+9. 在 `Qwen2.5-7B-Instruct` frozen-head 路线上，新的最强 transfer 线已变成：
+   - `NDS7 ms_dpo_calibrated + gated_mlp`
+   - 3-seed aggregate:
+     - `ProcessBench GSM8K AUC = 0.6596 ± 0.0158`
+     - `ProcessBench Math AUC = 0.7460 ± 0.0145`
+10. 更新后的真实瓶颈不再是“benchmark 全面迁移失败”，而是：
+   - local / global prefix ranking 已明显起来，
+   - `all-correct terminal completion ordering` 仍然偏弱。
+11. 围绕这个残差又做了一轮受控三分支修复：
+   - `数据修复`：`ms_dpo_terminalboost_v1`
+   - `损失修复`：`NDS7 + terminal BCE`
+   - `架构修复`：`NDS7 + dual_head + terminal BCE`
+12. 结果显示：
+   - `terminalboost` 能修 `GSM8K` 的 terminal，但会伤 `Math` 的 local/global；
+   - `terminal BCE` 单独不够；
+   - `dual_head` 会把模型推成更强的局部错误探测器，但 terminal completion 明显更差。
+13. 所以下一步不该再做“更重的 terminal 混合监督”，而应把 terminal completion 当成单独 residual 子任务处理。
+14. 队友新提交的“Math-PRM-7B 冻结 backbone 突破”经过本地补评测后，结论应表述为：
+   - backbone 突破是真的；
+   - 但 `PRX1` 还不能直接宣称是全局最强。
+15. 当前更准确的候选格局是：
+   - `PBR12`：`Math AUC` 最强；
+   - `PBR21`：`Math/GSM oracle F1` 最强；
+   - `PRX1`：当前已验证 `GSM fixed@0.5 F1` 最强。
+
+详见：
+
+1. `docs/phase_abcde_impl_audit_and_redesign_20260311.md`
+2. `docs/result_records.md`
+3. `docs/progress_detailed.md`
+4. `docs/phase_e_pipeline_redesign_20260311.md`
+5. `docs/phase_e_updated_literature_redesign_20260311.md`
+6. `docs/phase_e_literature_refresh_20260311.md`
+7. `docs/phase_e_rl_ready_research_redesign_20260311.md`
+
+## 2026-03-11 Postfix 复核：当前最强候选已很强，但仍未过 strict RL gate
+
+这轮在最新 `PBR10/PBR13` 路线上又补了一次实现与评测后验复核，结论有两层：
+
+1. `Phase E` 选择器默认已切到 `heldout_only`，benchmark 只保留为 promotion gate / canary，不再默认直接参与选模打分。
+2. `Qwen2.5-Math-PRM-7B` 的 same-family trust 评测现在会对长 batch 的异步 CUDA 容量错误做显式同步与 backoff，不再把长 batch crash 误报成泛化错误。
+3. 最新 `pbr10_dpo8k` 是当前最强 frozen-head offline 候选：
+   - samefamily `top1=0.9098`
+   - samefamily `local_first_bad=0.8981`
+   - `ProcessBench GSM F1=0.7334`
+   - `ProcessBench Math F1=0.6313`
+4. 但 strict 诊断仍然判它 `not_rl_ready_terminal_completion_risk`：
+   - `pb_min_auc=0.8651`
+   - `pb_min_terminal_top1=0.1626`
+5. `pbr13_terminalbce` 把 benchmark headline 再抬高了一些，但仍未解开 terminal completion ordering，而且 samefamily 还更弱。
+
+这意味着当前真实瓶颈已经收缩成一个更具体的问题：
+
+1. 不是 generic benchmark transfer 全面失败；
+2. 不是 frozen-head 完全不可用；
+3. 而是 `all-correct final completion` 仍然被系统性低估。
+
+详见：
+
+1. `docs/result_records.md`
+2. `docs/progress_detailed.md`
+3. `docs/phase_e_impl_audit_20260311.md`
+
+## 2026-03-11 Judge 正式实验结论
+
+这轮把 judge 从 pilot 推进到了两条正式实验线：
+
+1. `PRMBench_Preview selected relabel`
+2. `ProcessBench hard-slice benchmark-side adjudication`
+
+结果要点：
+
+1. `selected relabel` 的 formal run 确实把 held-out `PRMBench_Preview` 拉高了：
+   - baseline `E78`: `pair_acc=0.9521`, `auc=0.9071`
+   - selected relabel: `pair_acc=0.9555`, `auc=0.9207`
+2. 但这个结果不能被解释成“judge 已经会重标 hardest slice”
+   - judge 在最不确定的 `64` 条边界样本上只保住了 `1` 条
+   - 更合理的解释是：
+     - 我们删掉了最不确定、且更容易截断塌缩的边界样本，
+     - 因而得到了一个更干净的 same-source 训练集
+3. `ProcessBench hard-slice adjudication` 则给了更强的负结论：
+   - `math`: `pair_acc_majority=0.1034`
+   - `gsm8k`: `pair_acc_majority=0.0000`
+   - 说明当前本地 judge 连 benchmark-side hard-slice 裁决都还不能依赖
+
+因此当前最合理的 judge 定位应进一步收紧为：
+
+1. `PRMBench_Preview` 风格 pair 数据上的极保守 selected pruning / disagreement audit
+2. 不做 bulk relabel
+3. 不做 `ProcessBench` benchmark-side adjudicator
+
+## 2026-03-11 Phase E 基础设施加固
+
+`Phase E` 现在默认加入两层防护：
+
+1. **recipe guard**
+   - 训练前拦截仓库里已知会灾难性失败的超参组合；
+2. **collapse diagnosis**
+   - 训练后自动产出结构化健康诊断，而不是只靠人工读日志。
+
+关键脚本：
+1. `scripts/phase_e_train_value.py`
+2. `scripts/phase_e_diagnose_training_collapse.py`
+
+这一步的作用不是提高 benchmark 分数，而是防止 `Phase E` 后续的 source 质量比较继续被“坏配方塌陷”污染。
+
 ## 2026-03-11 Judge LLM 本地落地结论
 
 这轮把 `LLM-as-a-judge` 方案真正落到了本机，结论很明确：

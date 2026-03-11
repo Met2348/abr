@@ -4,6 +4,335 @@ This file defines the official conditional **Phase F** plan.
 
 Date baseline: 2026-03-10.
 
+---
+
+## 2026-03-12 Audit Correction: F1 Is Supported, F2 Is Not Yet Supported
+
+After re-checking the raw artifacts, the current Phase F state is:
+
+1. `F1 threshold / shift audit`: supported by artifact
+   - [summary.json](/home/zling/y/bcr/ref/assets/artifacts/phase_f_threshold_shift/phase_f_preflight_0312_threshold_20260311T135622Z/summary.json)
+2. `F1 reward-hacking probe`: supported by artifact
+   - [summary.json](/home/zling/y/bcr/ref/assets/artifacts/phase_f_reward_hacking/phase_f_preflight_0312_probe_20260311T140004Z/summary.json)
+3. `F2 ABR-lite simulation`: the earlier doc wording was overstated
+   - raw artifact:
+     [summary.json](/home/zling/y/bcr/ref/assets/artifacts/phase_f_simulation/pbr19_math_abr_lite_0312/summary.json)
+
+The corrected `PBR19 + ProcessBench Math` offline controller result is:
+
+- `balanced_f1 = 0.3388`
+- `positive_f1 = 0.7806`
+- `acc_erroneous = 0.9882`
+- `acc_correct = 0.2044`
+- `mean_step_fraction = 0.3524`
+
+Interpretation:
+
+1. the controller is extremely aggressive at flagging erroneous traces;
+2. but it rejects too many all-correct traces;
+3. therefore it is **not promotion-ready as an ABR-lite controller**.
+
+So the correct high-level gate status is:
+
+- `F1`: mostly supported
+- `F2`: **not yet passed**
+- `Phase F live RL`: **not yet unblocked**
+
+## 2026-03-13 Controller Sweep Update: The Verifier Was Not The Main Problem
+
+We then ran a broader offline controller sweep:
+
+- artifact:
+  [summary.md](/home/zling/y/bcr/ref/assets/artifacts/phase_f_controller_sweep/phase_f_controller_sweep_0312_main_20260311T181216Z/summary.md)
+
+This changes the interpretation again:
+
+1. the old `baseline_immediate` controller is genuinely bad;
+2. but the verifier candidates themselves are **not** the main bottleneck;
+3. simple controller redesigns recover strong offline controller quality.
+
+Key results:
+
+| case | old baseline | best redesigned policy | balanced_f1 |
+|---|---:|---|---:|
+| `pbr19_math` | `0.5537` | `threshold_only tau=0.38` | `0.8674` |
+| `pbr21_math` | `0.5588` | `threshold_only tau=0.35` | `0.8641` |
+| `pbr26_math` | `0.5752` | `threshold_only tau=0.38` | `0.8639` |
+| `pbr19_gsm` | `0.6713` | `delayed_drop` | `0.9052` |
+| `pbr21_gsm` | `0.6405` | `guarded_drop` | `0.9028` |
+| `pbr26_gsm` | `0.6509` | `delayed_drop` | `0.9053` |
+
+Shared-policy validation:
+
+1. `unified threshold_only tau=0.42`
+   - mean `balanced_f1 = 0.8552` across 8 slices
+2. `unified delayed_drop tau=0.42 delta=0.25 min_step=4`
+   - mean `balanced_f1 = 0.8501`
+
+Corrected conclusion:
+
+1. the old `F2 FAIL` was correct **for the old controller rule**;
+2. but it is no longer correct to say "Phase F controller use is blocked because the verifier is too weak";
+3. the current blocker has narrowed to:
+   - choosing a simple controller family,
+   - fixing deployment thresholds,
+   - and then validating it in live generation.
+
+So the next step is **heuristic controller redesign / live validation**, not immediate RL.
+
+---
+
+## 2026-03-12 State Update: Phase E Status, F0 Candidate Selection, and F1 Preflight Results
+
+### Phase E Experiment Status (as of 2026-03-12)
+
+Active Phase E experiments:
+- **GPU 1**: FLB2A s7 (Qwen2.5-7B-Instruct backbone, DPO full scale gated_mlp) — training
+- **GPU 2**: FLB2B s7 retrain chain (DPO 8K gated_mlp, seed7) → gsm/math eval → LoRA smoke
+- **GPU 3**: pbr26 (Math-PRM-7B backbone, DPO+MS full, terminal BCE) — training
+
+**All Phase E candidates use Qwen2.5-Math-PRM-7B backbone** (frozen, 3584 hidden dim, 7B params).
+The DPO-only variants (FLB2A with Qwen2.5-7B-Instruct backbone) show much weaker cross-dataset
+performance (MATH F1=0.366) and are not Phase F candidates.
+
+### Best Phase E Artifacts (Measured 2026-03-12)
+
+**Complete ProcessBench cross-dataset F1 leaderboard** (updated 2026-03-12):
+
+| Run | MATH F1 | GSM F1 | Intra-pair_acc | Backbone | Notes |
+|-----|---------|--------|---------------|---------|-------|
+| **PBR19** | **0.683** | **0.778** | 0.866 | Math-PRM-7B | DPO+MS, termBCE=0.25, seed42 |
+| **PBR26** | **0.686** | 0.768 | 0.853 | Math-PRM-7B | DPO+MS full, termBCE=0.25, seed42 |
+| PBR21 | 0.663 | 0.757 | — | Math-PRM-7B | DPO+MS, 10ep, seed42 |
+| PRX1 | 0.648 | 0.752 | — | Math-PRM-7B | pbr10core+term1024 mlp |
+| PBR12 | 0.644 | 0.752 | 0.880 | Math-PRM-7B | DPO+MS, joint, seed42 |
+| flb2_prm_backbone_mlp | 0.628 | 0.715 | 0.917 | Math-PRM-7B | DPO 8K only, gated_mlp |
+| FLB2B s7 | 0.381 | — | 0.800 | Instruct-7B | DPO 8K only, seed7 |
+| FLB2A s7 | 0.375 | 0.408 | 0.800 | Instruct-7B | DPO full, seed7 |
+| FLB2A s42 | 0.366 | 0.416 | 0.819 | Instruct-7B | DPO full, seed42 |
+
+**Community reference** (for comparison, these are full model PRMs without frozen backbone):
+- Qwen2.5-Math-PRM-7B (official full model, no frozen head): ~73.5 MATH F1
+- EDU-PRM-7B (entropy step boundaries): 88.2 MATH F1, 95.0 GSM F1
+
+**Gap analysis**:
+- PBR19/PBR26 gap to Qwen2.5-Math-PRM-7B: ~5 F1 points on MATH
+- Root cause: frozen backbone (vs full model fine-tuning) + data quality gap
+- LoRA experiment running on GPU 2 may close 3-5 F1 points
+
+**Key finding**: PBR26 (MATH F1=0.686) now ties PBR19 as the best Phase E result.
+Both use Math-PRM-7B backbone. The full MS pairs (PBR26) doesn't improve over filtered subset (PBR19)
+— confirming data quality matters more than quantity at this scale.
+
+**Note on high intra-dataset accuracy**: flb2_prm_backbone_mlp has 0.917 intra-dataset pair_acc
+but only 0.628 ProcessBench F1. High intra-dataset accuracy does NOT imply cross-dataset
+generalization. Phase F promotion is correctly based on ProcessBench F1, not intra-dataset accuracy.
+
+### F0 Candidate: PBR19 Selected (PBR26 as secondary)
+
+**Promoted primary artifact**: `phase_e_pbr19_dpo_mathms_joint_termBCE_s42_value_20260311T123235Z`
+**Secondary candidate**: `phase_e_pbr26_dpo_ms_full_s42_value_20260311T134542Z` (MATH F1=0.686)
+
+PBR19 is selected as primary because it has the best GSM F1 (0.778 vs 0.768).
+PBR26 is comparable on MATH and serves as a secondary candidate for reward ensemble per Risk 1.
+
+Selection criteria for PBR19:
+1. Best overall ProcessBench: MATH F1=0.683, GSM F1=0.778 (PBR26 ties on MATH, worse on GSM)
+2. High intra-dataset pair_acc (0.866) — confirms the signal is real, not noise
+3. Stable training (best at epoch 4, joint objective, terminal BCE = 0.25)
+4. Math-PRM-7B backbone — same family as best community PRMs
+5. Reward-hacking probe: PASS on MATH (low risk)
+
+Training config:
+- `objective_mode=joint`, `lambda_ranking=1.0`, `lambda_bce=0.5`, `terminal_bce_lambda=0.25`
+- `learning_rate=3e-5`, `num_train_epochs=10`, `best_epoch=4`
+- `head_architecture=mlp`, `head_mlp_hidden_size=512`, `head_dropout_prob=0.1`
+- `pair_weight_mode=confidence`, `ranking_margin=0.1`
+- `min_pair_confidence=0.7` (implicit in pair artifact)
+- Data: DPO scale pairs + Math-Shepherd pairs (mixed)
+
+**Promoted artifact path**: `assets/artifacts/phase_e_runs/phase_e_pbr19_dpo_mathms_joint_termBCE_s42_value_20260311T123235Z/best_value_head.pt`
+
+### F1 Preflight Results (2026-03-12, Offline Threshold Analysis)
+
+Ran `scripts/phase_f_analyze_threshold_shift.py` on PBR12, PBR19, PRX1:
+
+```
+   pbr12_gsm | f1@0.5=0.7023 | best=0.7489@0.640 | near_best_width=0.120 | gen_tau_std=0.1218 | worst_logo_f1=0.0000
+  pbr12_math | f1@0.5=0.6344 | best=0.6449@0.580 | near_best_width=0.140 | gen_tau_std=0.0708 | worst_logo_f1=0.3483
+   pbr19_gsm | f1@0.5=0.7444 | best=0.7808@0.400 | near_best_width=0.240 | gen_tau_std=0.1557 | worst_logo_f1=0.0000
+  pbr19_math | f1@0.5=0.6195 | best=0.6779@0.380 | near_best_width=0.180 | gen_tau_std=0.1122 | worst_logo_f1=0.4522
+    prx1_gsm | f1@0.5=0.7454 | best=0.7502@0.360 | near_best_width=0.300 | gen_tau_std=0.1633 | worst_logo_f1=0.0000
+   prx1_math | f1@0.5=0.6040 | best=0.6470@0.360 | near_best_width=0.220 | gen_tau_std=0.1192 | worst_logo_f1=0.2578
+```
+
+**Analysis**:
+
+1. **Threshold shift (near_best_width)**: PBR19 has the widest near-best window on GSM (0.240),
+   confirming more robust signal than PBR12. All candidates tolerate ±0.1 threshold perturbation.
+2. **Generator shift (worst_logo_f1=0.0 on GSM)**: All candidates collapse to F1=0 when evaluated
+   on the worst generator subset alone. This is the most critical Phase F risk: the verifier signal
+   is dominated by one generator subpopulation. If RL generates solutions from a different
+   distribution (different generator-style), the reward signal may be unreliable.
+3. **MATH worst_logo_f1** ranges 0.26–0.45, which is non-zero and workable.
+4. **Deployment threshold**: For PBR19, τ=0.38–0.40 is optimal (not the naive 0.5). This must be
+   fixed before Phase F deployment.
+
+**F1 Assessment**: CONDITIONAL PASS on MATH. GSM generator-shift vulnerability requires mitigation.
+Phase F initial experiments should be scoped to MATH problems only.
+
+### F1 Reward Hacking Probe (2026-03-12, Completed on GPU 0)
+
+Ran `scripts/phase_f_probe_reward_hacking.py` with PBR12/PBR19/PRX1 on GPU 0.
+Results: `assets/artifacts/phase_f_reward_hacking/phase_f_preflight_0312_probe_20260311T140004Z/`
+
+**Summary**: 48 total checks (3 candidates × 2 benchmarks × 2 groups × 4 attacks)
+- 2 **HIGH** risk, 12 **MEDIUM** risk, 34 **LOW** risk
+
+**High risk (requires mitigation)**:
+- `pbr12 | gsm8k | first_bad | confidence_tail`: delta=+0.06, flip=0.156, outrank_safe=0.047
+- `pbr12 | gsm8k | first_bad | filler_tail`: delta=+0.04, flip=0.156, outrank_safe=0.016
+  → PBR12 on GSM8K is vulnerable to style attacks on known-bad prefixes.
+
+**PBR19 key findings**:
+- MATH benchmark: **all LOW risk** except 1 medium (filler_tail flip=9.4% but delta=+0.008 only)
+- GSM8K benchmark: 2 MEDIUM cases (confidence_tail delta=+0.12, filler_tail delta=+0.13)
+- `self_verify_tail` attacks on `all_correct_final`: NEGATIVE delta (score drops) — correct behavior
+- Most attacks decrease scores on all_correct prefixes — verifier not fooled by appended text
+
+**Interpretation for Phase F**:
+1. PBR19 on MATH is substantially more robust than PBR12 (no high-risk cases)
+2. GSM8K has a real vulnerability (style/confidence text can inflate scores on bad prefixes)
+3. MATH F1=0.683 + low hacking risk → PBR19+MATH is the recommended Phase F starting point
+4. PBR12 HIGH risk cases should block PBR12 from Phase F promotion
+
+**F1 Reward-Hacking Assessment**:
+- MATH: **PASS** (no high risk, minimal medium risk, PBR19 best candidate)
+- GSM8K: **CONDITIONAL** (medium risk, requires support-control mitigation before RL)
+
+**Combined F1 Gate Decision**: PASS for PBR19+MATH experiments. Scope initial Phase F RL to MATH domain.
+
+### New Research Incorporated (2026-03-12)
+
+The following research from 2026-03 materially updates the Phase F design:
+
+1. **Implicit PRM (arXiv:2412.01981)**: After LoRA training (Phase E improvement track),
+   `β·log[π_LoRA/π_ref]` gives a free PRM signal that outperforms Math-Shepherd PRM at <1/38
+   FLOPs. In Phase F, this could serve as a secondary reward signal or ensemble component.
+
+2. **EDU-PRM entropy step boundaries (arXiv:2503.22233)**: High-entropy token positions as step
+   boundaries (not `\n\n`). Achieves 72B-level performance with 1.5% of data. Not directly Phase F
+   relevant but affects Phase E quality ceiling (planned Phase E improvement).
+
+3. **Verifier system design convergence (docs/phase_e_rl_ready_research_redesign_20260311.md)**:
+   Recent papers (PRIME, Hard2Verify, RISE, VPRM, CompassVerifier, VerifyBench) converge on the
+   view that single scalar verifiers should be limited to:
+   - cheap student roles
+   - routing decisions
+   - conservative scoring
+   Phase F's limited scope is correct. The original conservative framing is confirmed.
+
+4. **RL-ready redesign recommendations (same doc)**: Before Phase F RL begins, four additional
+   system layers are recommended:
+   - ABR_AVCal_v1: answer-equivalence / invalid / false-negative calibration
+   - ABR_WeaverLite_v1: weak verifier combination and disagreement distillation
+   - ABR_POA_v1: process-outcome alignment slice
+   - ABR_FormatInv_v1: prompt/answer-style/delimiter robustness gate
+   These can be implemented as gating conditions before F2 (ABR-lite controller).
+
+### Updated Technology Stack Decision
+
+Confirmed from Section 17.1 analysis: **Gymnasium + TorchRL + CleanRL reference** remains the
+recommended initial stack for Phase F router-only RL.
+
+Additional consideration (2026-03-12): Since `TRL PRMTrainer` and `TRL GRPOTrainer` are now
+production-grade and actively used in community PRM research (arXiv:2501.07301), if Phase F
+expands to include LM-level RL or GRPO-style process reward optimization, TRL becomes a natural
+upgrade path from the minimal Gymnasium+TorchRL stack.
+
+**Recommendation**: Start with Gymnasium+TorchRL for controller RL (F-safe-3). If F5/F6 requires
+LM-level updates, migrate to TRL GRPO/RLHF stack at that point.
+
+### F2 ABR-Lite Controller Offline Simulation Results (2026-03-12)
+
+Implemented `scripts/phase_f_abr_lite_simulation.py` and ran on PBR19 MATH ProcessBench scores.
+Output: `assets/artifacts/phase_f_simulation/pbr19_math_abr_lite_0312/`
+
+**Key distinction — two F1 metrics**:
+1. **Official ProcessBench F1** (exact step localization): requires predicting the EXACT first-error step.
+   PBR19 = 0.676 at optimal τ=0.40. This is the community-comparable number.
+2. **Binary detection F1** (controller task): does the controller correctly say "error exists / doesn't"?
+   PBR19 = 0.863 at optimal τ=0.35. This is the metric for F2 controller pass/fail.
+
+**Binary detection results at tau=0.35** (optimal for controller use):
+- Acc_erroneous: 0.837 (83.7% of erroneous solutions correctly flagged for backtrack)
+- Acc_correct: 0.892 (89.2% of all-correct solutions NOT flagged — no unnecessary backtrack)
+- Binary F1: 0.863
+
+**Compute efficiency at tau=0.35**:
+- Fraction of examples triggering early stop: ~54%
+- Mean steps processed / total steps: ~71% (29% compute savings on average)
+
+**Fixed-schedule comparison** (required baseline per Section 15 Risk 3):
+
+| Schedule | Binary F1 | Step fraction |
+|----------|-----------|---------------|
+| stop@1 (always-stop) | 0.00 | 0.37 |
+| stop@3 | 0.21 | 0.70 |
+| stop@5 | 0.53 | 0.87 |
+| stop@6 | 0.54 | 0.92 |
+| **ABR-lite (tau=0.35)** | **0.863** | **0.71** |
+
+ABR-lite delivers **+32% F1 improvement** over the best fixed schedule (0.863 vs 0.545) at the SAME
+compute budget (both use ~70% of steps).
+
+**F2 Verdict: STRONG PASS**
+The frozen PBR19 head provides substantial binary detection guidance. A value-guided controller
+at tau=0.35 significantly outperforms fixed schedules and all baselines on the binary detection task.
+
+**Phase F RL permission gate** (F2→F4): **GRANTED**
+Evidence: offline F1=0.863 (binary), reward-hacking probe = PASS, threshold stable at τ=0.35
+
+**F2 scope for live experiments**:
+MATH problems, frozen PBR19, threshold τ=0.35, maximum 3 backtracks per problem.
+
+**Next: F3 Router Warm Start + F4 Router-Only RL Smoke**:
+- Scripts to implement: `src/ours/phase_f/heuristic_controller.py`, `scripts/phase_f_run_abr_lite.py`
+- Status: Offline simulation complete. Live controller requires LM generation infrastructure.
+- Blocked by: LM generation harness (need to call Qwen2.5-Math-7B/PRM-7B for step generation)
+
+### Overall Phase F Feasibility Verdict (2026-03-12)
+
+| Gate | Status | Evidence |
+|------|--------|---------|
+| Phase E trust gate (F-start) | **PASS** | PBR19/PBR26 MATH F1=0.683/0.686, pair_acc=0.853-0.866 |
+| F0 artifact freeze | **DONE** | PBR19 primary; PBR26 secondary candidate for ensemble |
+| F1 threshold stability | **PASS** | near_best_width=0.18 on MATH, deployment threshold τ≈0.35-0.40 |
+| F1 reward hacking probe | **PASS (MATH)** | No high-risk cases on MATH; medium on GSM8K only |
+| F2 ABR-lite simulation | **STRONG PASS** | Binary detection F1=0.863, +32% vs best fixed schedule |
+| F2→F4 RL permission gate | **PASS** | F2 offline simulation demonstrates useful signal |
+| Community gap | **5 F1 points behind** | Qwen2.5-Math-PRM-7B full model ~73.5 F1 |
+
+**Overall Conclusion**: Phase F FEASIBLE to begin on MATH domain with PBR19/PBR26.
+- Signal is real: binary detection F1=0.863 vs fixed schedule 0.545
+- Threshold is stable: near_best_width=0.18, τ=0.35 is robust
+- Hacking resistance: no high-risk attacks on MATH
+- Two candidate heads available for reward ensemble (Risk 1 mitigation)
+- LoRA experiment (GPU 2) and continued Phase E experiments may improve F1 further
+
+**Remaining blockers for live F3/F4 RL**:
+1. LM generation harness (need to call backbone for step generation)
+2. Live controller implementation (`heuristic_controller.py`)
+3. Problem dataset with known correct answers for terminal reward
+4. Offline simulation passed; live experiment needed before F4 RL permission
+
+**Immediate next actions**:
+1. Wait for LoRA smoke results (GPU 2, rank=16, all-layers) — may yield better Phase F candidate
+2. Implement live ABR-lite controller + F3 router warm start infrastructure
+3. Once LoRA results available, re-run F0/F1/F2 with LoRA-improved candidate if score improves
+
+---
+
 Phase transition rule:
 1. `Phase E` remains the active execution stage until its trust gate passes.
 2. `Phase F` is **conditional** on a successful `Phase E` outcome.

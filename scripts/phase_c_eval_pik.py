@@ -93,6 +93,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--value-run-dir", type=Path, required=True)
     parser.add_argument("--eval-dir", type=Path, required=True)
     parser.add_argument("--checkpoint-name", choices=["best", "final"], default="best")
+    parser.add_argument(
+        "--checkpoint-missing-policy",
+        choices=["fail", "fallback_final"],
+        default="fail",
+        help=(
+            "How to handle `--checkpoint-name best` when best_value_head.pt is missing. "
+            "`fail` is the safe default; `fallback_final` is only for legacy diagnostics."
+        ),
+    )
     parser.add_argument("--run-name", default="phase_c_pik_eval")
     parser.add_argument(
         "--output-root",
@@ -127,6 +136,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Optional post-hoc calibration mode. "
             "`temperature`/`isotonic` fit on this eval set; `from_run` loads saved calibrator."
+        ),
+    )
+    parser.add_argument(
+        "--posthoc-missing-policy",
+        choices=["fail", "fallback_final"],
+        default="fail",
+        help=(
+            "How to handle missing best post-hoc calibrator under `--posthoc-calibration from_run`. "
+            "`fail` is the safe default; `fallback_final` is only for legacy diagnostics."
         ),
     )
     parser.add_argument("--posthoc-temperature-lr", type=float, default=0.05)
@@ -169,13 +187,12 @@ def main(argv: list[str] | None = None) -> int:
     train_metrics = json.loads(train_metrics_path.read_text(encoding="utf-8"))
     train_target_mean = float(train_metrics["train_target_mean"])
 
-    # `best` 不存在时回退到 final，保证中断训练也可复评。
-    checkpoint_name = "best_value_head.pt" if args.checkpoint_name == "best" else "final_value_head.pt"
-    checkpoint_path = args.value_run_dir / checkpoint_name
-    checkpoint_fallback = False
-    if args.checkpoint_name == "best" and not checkpoint_path.exists():
-        checkpoint_path = args.value_run_dir / "final_value_head.pt"
-        checkpoint_fallback = True
+    checkpoint_resolution = _resolve_checkpoint_resolution(
+        value_run_dir=args.value_run_dir,
+        checkpoint_name=str(args.checkpoint_name),
+        checkpoint_missing_policy=str(args.checkpoint_missing_policy),
+    )
+    checkpoint_path = Path(str(checkpoint_resolution["resolved_checkpoint_path"]))
     value_head, _, _ = load_value_head_checkpoint(checkpoint_path)
 
     eval_examples, _ = load_pik_supervision_examples(
@@ -315,10 +332,10 @@ def main(argv: list[str] | None = None) -> int:
     known_labels = [1 if float(t) >= float(known_threshold) else 0 for t in targets]
     known_auc = compute_binary_auc(scores=scores, labels=known_labels)
 
-    posthoc_payload = _resolve_posthoc_payload(
+    posthoc_payload, posthoc_resolution = _resolve_posthoc_payload(
         args=args,
         value_run_dir=args.value_run_dir,
-        checkpoint_name=args.checkpoint_name,
+        checkpoint_name=str(checkpoint_resolution["resolved_checkpoint_name"]),
         logits=logits_tensor,
         scores=scores_tensor,
         targets=features.new_tensor(targets),
@@ -374,11 +391,12 @@ def main(argv: list[str] | None = None) -> int:
         "value_run_dir": str(args.value_run_dir),
         "eval_dir": str(args.eval_dir),
         "checkpoint_path": str(checkpoint_path),
-        "checkpoint_fallback": bool(checkpoint_fallback),
+        "checkpoint_resolution": checkpoint_resolution,
         "feature_cache": feature_cache_stats,
         "calibration": calibration_raw,
         "calibration_posthoc": calibration_posthoc,
         "posthoc_calibration": posthoc_payload,
+        "posthoc_resolution": posthoc_resolution,
         "known_threshold": float(known_threshold),
         "known_auc": float(known_auc),
         "known_auc_posthoc": (float(known_auc_posthoc) if known_auc_posthoc is not None else None),
@@ -395,10 +413,14 @@ def main(argv: list[str] | None = None) -> int:
                 "value_run_dir": str(args.value_run_dir),
                 "eval_dir": str(args.eval_dir),
                 "checkpoint_path": str(checkpoint_path),
+                "checkpoint_requested": checkpoint_resolution["requested_checkpoint_name"],
+                "checkpoint_resolved": checkpoint_resolution["resolved_checkpoint_name"],
+                "checkpoint_fallback_to_final": bool(checkpoint_resolution["fallback_to_final"]),
                 "known_threshold": float(known_threshold),
                 "known_auc": f"{known_auc:.6f}",
                 "posthoc_known_auc": (f"{known_auc_posthoc:.6f}" if known_auc_posthoc is not None else "n/a"),
                 "posthoc_calibration": args.posthoc_calibration,
+                "posthoc_fallback_to_final": bool(posthoc_resolution["fallback_to_final"]),
                 "feature_cache_mode": args.feature_cache_mode,
                 "feature_cache_root": str(args.feature_cache_root),
             },
@@ -418,7 +440,8 @@ def main(argv: list[str] | None = None) -> int:
                     "eval_dir": str(args.eval_dir),
                     "checkpoint_name": args.checkpoint_name,
                     "checkpoint_path": str(checkpoint_path),
-                    "checkpoint_fallback": bool(checkpoint_fallback),
+                    "checkpoint_resolution": checkpoint_resolution,
+                    "posthoc_resolution": posthoc_resolution,
                 },
                 "feature_cache_mode": str(args.feature_cache_mode),
                 "feature_cache_root": str(args.feature_cache_root),
@@ -441,6 +464,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"value_run_dir     : {args.value_run_dir}")
     print(f"eval_dir          : {args.eval_dir}")
     print(f"checkpoint_path   : {checkpoint_path}")
+    print(f"checkpoint_policy : {args.checkpoint_missing_policy}")
+    print(f"checkpoint_fallback: {checkpoint_resolution['fallback_to_final']}")
+    print(f"posthoc_mode      : {args.posthoc_calibration}")
+    print(f"posthoc_fallback  : {posthoc_resolution['fallback_to_final']}")
     print(f"feature_cache_mode: {args.feature_cache_mode}")
     print(f"feature_cache_root: {args.feature_cache_root}")
     print(
@@ -471,10 +498,17 @@ def _resolve_posthoc_payload(
     scores: Any,
     targets: Any,
     torch_module: Any,
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Resolve optional standalone post-hoc payload according to CLI mode."""
     if args.posthoc_calibration == "none":
-        return None
+        return None, {
+            "requested_mode": "none",
+            "resolved_mode": "none",
+            "requested_path": None,
+            "resolved_path": None,
+            "fallback_to_final": False,
+            "missing_policy": None,
+        }
     if args.posthoc_calibration == "temperature":
         # 在当前 eval 集上拟合温度，仅用于诊断与部署校准。
         cfg = TemperatureCalibrationConfig(
@@ -490,7 +524,14 @@ def _resolve_posthoc_payload(
             targets=targets,
             torch_module=torch_module,
             config=cfg,
-        )
+        ), {
+            "requested_mode": "temperature",
+            "resolved_mode": "temperature_fit_on_eval",
+            "requested_path": None,
+            "resolved_path": None,
+            "fallback_to_final": False,
+            "missing_policy": None,
+        }
     if args.posthoc_calibration == "isotonic":
         # 分段单调映射，适合非线性校准偏差。
         cfg = IsotonicCalibrationConfig(min_points=int(args.posthoc_isotonic_min_points))
@@ -500,13 +541,34 @@ def _resolve_posthoc_payload(
             targets=targets,
             torch_module=torch_module,
             config=cfg,
-        )
+        ), {
+            "requested_mode": "isotonic",
+            "resolved_mode": "isotonic_fit_on_eval",
+            "requested_path": None,
+            "resolved_path": None,
+            "fallback_to_final": False,
+            "missing_policy": None,
+        }
     if args.posthoc_calibration == "from_run":
         # 复用训练 run 中保存的 calibrator，验证可复现部署路径。
-        name = "best_posthoc_calibration.json" if checkpoint_name == "best" else "final_posthoc_calibration.json"
-        path = value_run_dir / name
+        requested_name = "best_posthoc_calibration.json" if checkpoint_name == "best" else "final_posthoc_calibration.json"
+        requested_path = value_run_dir / requested_name
+        path = requested_path
+        fallback = False
+        missing_policy = str(args.posthoc_missing_policy).strip().lower()
+        if missing_policy not in {"fail", "fallback_final"}:
+            raise ValueError(f"Unsupported --posthoc-missing-policy: {args.posthoc_missing_policy!r}")
         if not path.exists() and checkpoint_name == "best":
-            path = value_run_dir / "final_posthoc_calibration.json"
+            final_path = value_run_dir / "final_posthoc_calibration.json"
+            if missing_policy == "fallback_final" and final_path.exists():
+                path = final_path
+                fallback = True
+            else:
+                raise FileNotFoundError(
+                    "Requested --posthoc-calibration=from_run for best checkpoint, "
+                    f"but best calibrator is missing under {value_run_dir}. "
+                    "Rerun with --posthoc-missing-policy fallback_final only for legacy diagnostics."
+                )
         if not path.exists():
             raise FileNotFoundError(
                 f"Requested --posthoc-calibration=from_run but no saved calibrator was found at {path}"
@@ -514,8 +576,65 @@ def _resolve_posthoc_payload(
         payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise TypeError(f"Saved post-hoc payload must be a JSON object: {path}")
-        return payload
+        return payload, {
+            "requested_mode": "from_run",
+            "resolved_mode": "from_run",
+            "requested_path": str(requested_path),
+            "resolved_path": str(path),
+            "fallback_to_final": bool(fallback),
+            "missing_policy": missing_policy,
+        }
     raise ValueError(f"Unsupported --posthoc-calibration: {args.posthoc_calibration!r}")
+
+
+def _resolve_checkpoint_resolution(
+    *,
+    value_run_dir: Path,
+    checkpoint_name: str,
+    checkpoint_missing_policy: str,
+) -> dict[str, Any]:
+    """Resolve P(IK) checkpoint path with explicit fallback policy."""
+    requested = str(checkpoint_name).strip().lower()
+    policy = str(checkpoint_missing_policy).strip().lower()
+    if requested not in {"best", "final"}:
+        raise ValueError(f"Unsupported checkpoint_name: {checkpoint_name!r}")
+    if policy not in {"fail", "fallback_final"}:
+        raise ValueError(f"Unsupported checkpoint_missing_policy: {checkpoint_missing_policy!r}")
+    requested_path = value_run_dir / ("best_value_head.pt" if requested == "best" else "final_value_head.pt")
+    final_path = value_run_dir / "final_value_head.pt"
+    if requested == "best":
+        if requested_path.exists():
+            resolved_path = requested_path
+            resolved_name = "best"
+            fallback = False
+        elif policy == "fallback_final" and final_path.exists():
+            print(
+                "checkpoint_resolve: requested=best but best_value_head.pt missing; "
+                f"falling back to final checkpoint at {final_path}",
+                flush=True,
+            )
+            resolved_path = final_path
+            resolved_name = "final"
+            fallback = True
+        else:
+            raise FileNotFoundError(
+                f"Requested checkpoint=best but best_value_head.pt missing under {value_run_dir}; "
+                "rerun with --checkpoint-missing-policy fallback_final only for legacy diagnostics."
+            )
+    else:
+        if not final_path.exists():
+            raise FileNotFoundError(f"Requested checkpoint=final but file missing: {final_path}")
+        resolved_path = final_path
+        resolved_name = "final"
+        fallback = False
+    return {
+        "requested_checkpoint_name": requested,
+        "requested_checkpoint_path": str(requested_path),
+        "resolved_checkpoint_name": resolved_name,
+        "resolved_checkpoint_path": str(resolved_path),
+        "fallback_to_final": bool(fallback),
+        "checkpoint_missing_policy": policy,
+    }
 
 
 def _build_eval_feature_cache_signature_payload(
@@ -615,15 +734,16 @@ def _import_runtime_deps():
 
 def _resolve_dtype(name: str, torch_module: Any):
     """Map user-facing dtype string onto one torch dtype object."""
+    name = str(name).strip().lower()
     if name == "auto":
         if torch_module.cuda.is_available():
             return torch_module.bfloat16
         return torch_module.float32
-    if name == "float32":
+    if name in {"float32", "fp32"}:
         return torch_module.float32
-    if name == "float16":
+    if name in {"float16", "fp16"}:
         return torch_module.float16
-    if name == "bfloat16":
+    if name in {"bfloat16", "bf16"}:
         return torch_module.bfloat16
     raise ValueError(f"Unsupported dtype: {name}")
 

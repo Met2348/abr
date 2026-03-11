@@ -57,6 +57,7 @@ from ours.phase_b.value_head import (  # noqa: E402
 )
 from ours.phase_d.external_pairs import load_external_pair_jsonl  # noqa: E402
 from ours.phase_e.runtime import (  # noqa: E402
+    apply_lora_to_backbone,
     build_phase_e_backbone_signature,
     import_runtime_deps,
     load_backbone_and_tokenizer,
@@ -64,11 +65,20 @@ from ours.phase_e.runtime import (  # noqa: E402
     resolve_value_device,
     set_seed,
 )
+from ours.phase_e.recipe_safety import (  # noqa: E402
+    assess_phase_e_recipe_risk,
+    diagnose_phase_e_training_health,
+    enforce_phase_e_recipe_risk,
+    render_phase_e_recipe_risk_console_report,
+    render_phase_e_training_health_markdown,
+)
 from ours.phase_e.training import (  # noqa: E402
     build_pair_feature_cache,
     build_pair_permutation,
+    build_pair_tokenized_cache,
     compute_pair_truncation_diagnostics,
     compute_pair_objective,
+    encode_tokenized_cache_with_backbone,
     evaluate_pair_cache,
     select_metric_value,
     validate_pair_truncation_diagnostics,
@@ -122,6 +132,10 @@ class PhaseETrainConfig:
     head_mlp_hidden_size: int
     head_activation: str
     head_inference_alpha: float
+    lora_rank: int
+    lora_alpha: float
+    lora_target_modules: str
+    lora_num_top_layers: int | None
 
     def to_dict(self) -> dict[str, Any]:
         """Return JSON-serializable config snapshot."""
@@ -203,7 +217,25 @@ def _build_parser() -> argparse.ArgumentParser:
             "This mirrors reward-centering regularization commonly used in reward-model training."
         ),
     )
-    parser.add_argument("--checkpoint-selection-metric", choices=["pair_acc", "auc", "ranking_score", "pair_loss"], default="ranking_score")
+    parser.add_argument(
+        "--checkpoint-selection-metric",
+        choices=["pair_acc", "auc", "ranking_score", "pair_loss"],
+        default="pair_acc",
+        help=(
+            "Metric used to keep the best checkpoint. "
+            "`pair_acc` is the repository-safe default; `ranking_score` is reserved for controlled diagnostics."
+        ),
+    )
+    parser.add_argument(
+        "--recipe-risk-policy",
+        choices=["off", "warn", "error"],
+        default="error",
+        help=(
+            "How strictly to enforce repository-known dangerous recipe combinations. "
+            "`error` is recommended for production-like Phase E runs; "
+            "`warn` is only for controlled diagnostic reproductions."
+        ),
+    )
     parser.add_argument("--logging-steps", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dtype", default="bfloat16")
@@ -228,6 +260,24 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--require-cuda", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--strict-determinism", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--train-oom-backoff",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Whether the training loop should recursively split one logical mini-batch "
+            "when CUDA OOM happens during forward/backward. Keep enabled on shared GPUs."
+        ),
+    )
+    parser.add_argument(
+        "--train-oom-minibatch-size",
+        type=int,
+        default=4,
+        help=(
+            "Smallest chunk size that the train-loop OOM backoff may shrink to before "
+            "giving up."
+        ),
+    )
     parser.add_argument("--init-value-head-path", type=Path, default=None)
     parser.add_argument("--head-architecture", choices=["linear", "mlp", "gated_mlp", "dual_head"], default="linear")
     parser.add_argument("--head-dropout-prob", type=float, default=0.0)
@@ -274,6 +324,52 @@ def _build_parser() -> argparse.ArgumentParser:
             "even when the first chosen/rejected difference still appears before the cutoff."
         ),
     )
+    # LoRA backbone fine-tuning arguments.
+    # When --lora-rank > 0 the frozen backbone is replaced by a PEFT LoRA model.
+    # Feature caching is bypassed for training (backbone changes per step) but
+    # still used for evaluation (rebuilt from current backbone state each epoch).
+    parser.add_argument(
+        "--lora-rank",
+        type=int,
+        default=0,
+        help=(
+            "LoRA rank r for backbone fine-tuning.  0 = disabled (default, frozen backbone). "
+            "Typical values: 8 (memory-efficient), 16 (balanced), 32 (high capacity). "
+            "Requires peft>=0.10 to be installed."
+        ),
+    )
+    parser.add_argument(
+        "--lora-alpha",
+        type=float,
+        default=16.0,
+        help=(
+            "LoRA alpha scaling factor.  Effective update scale = lora_alpha / lora_rank. "
+            "Common settings: same as rank (scale=1.0) or 2× rank (scale=2.0). "
+            "Only used when --lora-rank > 0."
+        ),
+    )
+    parser.add_argument(
+        "--lora-target-modules",
+        type=str,
+        default="q_proj,v_proj",
+        help=(
+            "Comma-separated list of Linear module name patterns to apply LoRA to. "
+            "Default 'q_proj,v_proj' covers the attention query/value projections "
+            "of Qwen2.5/LLaMA-style architectures. "
+            "Use 'q_proj,k_proj,v_proj,o_proj' for full attention coverage."
+        ),
+    )
+    parser.add_argument(
+        "--lora-num-top-layers",
+        type=int,
+        default=None,
+        help=(
+            "If set, only apply LoRA to the top-N transformer layers (closest to output). "
+            "E.g. --lora-num-top-layers 8 for Qwen2.5-7B attaches LoRA to layers 20-27 only. "
+            "Memory saving: 8 layers ≈ 430 MB extra vs all 28 layers ≈ 1.5 GB extra. "
+            "If unset, LoRA is applied to all layers."
+        ),
+    )
     return parser
 
 
@@ -310,6 +406,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--num-train-epochs must be > 0")
     if int(args.per_device_train_batch_size) <= 0 or int(args.per_device_eval_batch_size) <= 0:
         raise ValueError("Per-device batch sizes must be > 0")
+    if int(args.train_oom_minibatch_size) <= 0:
+        raise ValueError("--train-oom-minibatch-size must be > 0")
+    if int(args.train_oom_minibatch_size) > int(args.per_device_train_batch_size):
+        raise ValueError(
+            "--train-oom-minibatch-size cannot exceed --per-device-train-batch-size"
+        )
     if int(args.gradient_accumulation_steps) <= 0:
         raise ValueError("--gradient-accumulation-steps must be > 0")
     if args.max_gpu_memory_gib is not None and int(args.max_gpu_memory_gib) <= 0:
@@ -350,6 +452,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("ranking_only requires --lambda-ranking > 0")
     if args.objective_mode == "pair_bce_only" and float(args.lambda_bce) == 0.0:
         raise ValueError("pair_bce_only requires --lambda-bce > 0")
+    if int(args.lora_rank) < 0:
+        raise ValueError("--lora-rank must be >= 0")
+    if int(args.lora_rank) > 0 and float(args.lora_alpha) <= 0.0:
+        raise ValueError("--lora-alpha must be > 0 when --lora-rank > 0")
+    if args.lora_num_top_layers is not None and int(args.lora_num_top_layers) <= 0:
+        raise ValueError("--lora-num-top-layers must be > 0")
     return args
 
 
@@ -441,6 +549,12 @@ def main(argv: list[str] | None = None) -> int:
         head_mlp_hidden_size=int(args.head_mlp_hidden_size),
         head_activation=str(args.head_activation),
         head_inference_alpha=float(args.head_inference_alpha),
+        lora_rank=int(args.lora_rank),
+        lora_alpha=float(args.lora_alpha),
+        lora_target_modules=str(args.lora_target_modules),
+        lora_num_top_layers=(
+            int(args.lora_num_top_layers) if args.lora_num_top_layers is not None else None
+        ),
     )
 
     # Every run gets a timestamped directory so repeated executions with the
@@ -458,6 +572,9 @@ def main(argv: list[str] | None = None) -> int:
     config_json_path = run_dir / "value_head_config.json"
     eval_pair_scores_path = run_dir / "eval_pair_scores.jsonl"
     train_curve_path = run_dir / "train_curve.jsonl"
+    recipe_risk_path = run_dir / "recipe_risk.json"
+    training_health_path = run_dir / "training_health.json"
+    training_health_md_path = run_dir / "training_health.md"
 
     print("=" * 88)
     print("Phase E: Train Value Head")
@@ -481,12 +598,28 @@ def main(argv: list[str] | None = None) -> int:
     print(f"trunc_diag_batch   : {args.truncation_diagnostics_batch_size}")
     print(f"trunc_overlimit_max: {float(args.max_truncation_over_limit_fraction):.4f}")
     print(f"selection_metric   : {args.checkpoint_selection_metric}")
+    print(f"recipe_risk_policy : {args.recipe_risk_policy}")
     print(f"nonfinite_policy   : {args.nonfinite_feature_policy}")
     print(f"reward_centering   : {float(args.reward_centering_weight):.6f}")
     print(f"strict_determinism : {bool(args.strict_determinism)}")
     print(f"max_gpu_memory_gib : {args.max_gpu_memory_gib if args.max_gpu_memory_gib is not None else '<none>'}")
     print(f"max_cpu_memory_gib : {args.max_cpu_memory_gib if args.max_cpu_memory_gib is not None else '<none>'}")
     print("=" * 88)
+
+    recipe_risk_report = assess_phase_e_recipe_risk(
+        train_pair_summary=train_pair_stats,
+        train_config=train_config.to_dict(),
+    )
+    for line in render_phase_e_recipe_risk_console_report(recipe_risk_report):
+        print(line, flush=True)
+    enforce_phase_e_recipe_risk(
+        recipe_risk_report=recipe_risk_report,
+        policy=str(args.recipe_risk_policy),
+    )
+    recipe_risk_path.write_text(
+        json.dumps(recipe_risk_report, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
 
     adapter_path = Path(args.adapter_path) if args.adapter_path is not None else None
     tokenizer_path = resolve_tokenizer_load_path(
@@ -551,6 +684,25 @@ def main(argv: list[str] | None = None) -> int:
         AutoModelForCausalLM=AutoModelForCausalLM,
         AutoTokenizer=AutoTokenizer,
     )
+    # Determine if LoRA mode is active.
+    # LoRA mode: backbone is fine-tuned jointly with the value head.  Feature
+    # caching for training is bypassed; backbone stays alive through all epochs.
+    # LoRA 模式：backbone 和 value head 一起微调。训练侧不做特征缓存；backbone 在全程保持活跃。
+    lora_active = int(args.lora_rank) > 0
+    if lora_active:
+        lora_target_modules = [m.strip() for m in str(args.lora_target_modules).split(",") if m.strip()]
+        backbone = apply_lora_to_backbone(
+            backbone=backbone,
+            lora_rank=int(args.lora_rank),
+            lora_alpha=float(args.lora_alpha),
+            target_modules=lora_target_modules,
+            num_top_layers=(
+                int(args.lora_num_top_layers) if args.lora_num_top_layers is not None else None
+            ),
+        )
+        # Put LoRA backbone in train mode; value head will also be in train mode.
+        backbone.train()
+
     hidden_size = infer_backbone_hidden_size(backbone)
     value_head_config = ValueHeadConfig(
         hidden_size=int(hidden_size),
@@ -580,78 +732,136 @@ def main(argv: list[str] | None = None) -> int:
         "writes": 0,
         "entries": {},
     }
-    # Core Phase E idea:
-    # 1. expensive backbone forward pass happens once here,
-    # 2. later training only updates the small value head on cached tensors.
-    #
-    # Phase E 的核心工程思想就是：
-    # 1. 昂贵的 backbone 前向只在这里跑一次，
-    # 2. 后续训练只更新小型 value head。
-    feature_start = time.perf_counter()
-    backbone_signature = build_phase_e_backbone_signature(
-        model_path=str(args.model_path),
-        adapter_path=(str(args.adapter_path) if args.adapter_path is not None else None),
-        tokenizer_path=str(tokenizer_path),
-        dtype=str(args.dtype),
-        max_length=int(args.max_length),
-    )
     pair_weight_mode = str(args.pair_weight_mode)
-    train_cache = build_pair_feature_cache(
-        pairs=train_pairs,
-        split_label="train",
-        backbone=backbone,
-        tokenizer=tokenizer,
-        max_length=int(args.max_length),
-        batch_size=int(args.per_device_eval_batch_size),
-        feature_cache_root=Path(args.feature_cache_root),
-        feature_cache_mode=str(args.feature_cache_mode),
-        lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
-        backbone_signature=backbone_signature,
-        pair_weight_mode=pair_weight_mode,
-        nonfinite_feature_policy=str(args.nonfinite_feature_policy),
-        torch_module=torch,
-        feature_cache_stats=feature_cache_stats,
-    )
-    eval_cache = build_pair_feature_cache(
-        pairs=eval_pairs,
-        split_label="eval",
-        backbone=backbone,
-        tokenizer=tokenizer,
-        max_length=int(args.max_length),
-        batch_size=int(args.per_device_eval_batch_size),
-        feature_cache_root=Path(args.feature_cache_root),
-        feature_cache_mode=str(args.feature_cache_mode),
-        lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
-        backbone_signature=backbone_signature,
-        pair_weight_mode=pair_weight_mode,
-        nonfinite_feature_policy=str(args.nonfinite_feature_policy),
-        torch_module=torch,
-        feature_cache_stats=feature_cache_stats,
-    )
-    feature_cache_elapsed = time.perf_counter() - feature_start
+    feature_cache_elapsed = 0.0
 
-    # Keep the full cached tensors on CPU and move only mini-batches to GPU.
-    # Otherwise the backbone plus full feature cache would occupy GPU memory at
-    # the same time and easily cause OOM.
-    #
-    # 这里故意让完整缓存留在 CPU，只把 mini-batch 搬到 GPU。
-    # 否则 backbone 和整套特征缓存会同时占显存，非常容易 OOM。
-    #
-    # Once features are cached, the backbone is no longer needed for training.
-    # 特征缓存完成后，训练阶段就不再需要 backbone，本体应尽快释放。
-    del backbone
-    del tokenizer
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    if lora_active:
+        # LoRA mode: tokenize pairs for per-batch live encoding.
+        # Eval cache will be rebuilt from the current backbone at each epoch.
+        # LoRA 模式：对 pairs 做 tokenization，存储 input_ids，供每个 batch 实时编码。
+        # Eval cache 在每个 epoch 开始时用当前 backbone 重新编码。
+        feature_start = time.perf_counter()
+        print("[LoRA] Building tokenized train cache (no backbone forward yet) ...", flush=True)
+        train_tokenized_cache = build_pair_tokenized_cache(
+            pairs=train_pairs,
+            tokenizer=tokenizer,
+            max_length=int(args.max_length),
+            pair_weight_mode=pair_weight_mode,
+            torch_module=torch,
+        )
+        print("[LoRA] Building tokenized eval cache ...", flush=True)
+        eval_tokenized_cache = build_pair_tokenized_cache(
+            pairs=eval_pairs,
+            tokenizer=tokenizer,
+            max_length=int(args.max_length),
+            pair_weight_mode=pair_weight_mode,
+            torch_module=torch,
+        )
+        feature_cache_elapsed = time.perf_counter() - feature_start
+        print(
+            f"[LoRA] Tokenized caches ready: "
+            f"train={train_tokenized_cache['num_pairs']} pairs, "
+            f"eval={eval_tokenized_cache['num_pairs']} pairs "
+            f"({feature_cache_elapsed:.1f}s)",
+            flush=True,
+        )
+        # Build initial eval feature cache (will be rebuilt each epoch).
+        eval_cache = encode_tokenized_cache_with_backbone(
+            tokenized_cache=eval_tokenized_cache,
+            backbone=backbone,
+            torch_module=torch,
+            batch_size=int(args.per_device_eval_batch_size),
+            head_dtype=next(value_head.parameters()).dtype,
+            grad_enabled=False,
+        )
+        train_cache = None  # not used in LoRA mode
+    else:
+        # Frozen backbone mode (original Phase E behaviour).
+        # 冻结 backbone 模式：一次性预先缓存所有特征，之后只训练 value head。
+        feature_start = time.perf_counter()
+        backbone_signature = build_phase_e_backbone_signature(
+            model_path=str(args.model_path),
+            adapter_path=(str(args.adapter_path) if args.adapter_path is not None else None),
+            tokenizer_path=str(tokenizer_path),
+            dtype=str(args.dtype),
+            max_length=int(args.max_length),
+        )
+        train_cache = build_pair_feature_cache(
+            pairs=train_pairs,
+            split_label="train",
+            backbone=backbone,
+            tokenizer=tokenizer,
+            max_length=int(args.max_length),
+            batch_size=int(args.per_device_eval_batch_size),
+            feature_cache_root=Path(args.feature_cache_root),
+            feature_cache_mode=str(args.feature_cache_mode),
+            lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
+            backbone_signature=backbone_signature,
+            pair_weight_mode=pair_weight_mode,
+            nonfinite_feature_policy=str(args.nonfinite_feature_policy),
+            torch_module=torch,
+            feature_cache_stats=feature_cache_stats,
+        )
+        eval_cache = build_pair_feature_cache(
+            pairs=eval_pairs,
+            split_label="eval",
+            backbone=backbone,
+            tokenizer=tokenizer,
+            max_length=int(args.max_length),
+            batch_size=int(args.per_device_eval_batch_size),
+            feature_cache_root=Path(args.feature_cache_root),
+            feature_cache_mode=str(args.feature_cache_mode),
+            lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
+            backbone_signature=backbone_signature,
+            pair_weight_mode=pair_weight_mode,
+            nonfinite_feature_policy=str(args.nonfinite_feature_policy),
+            torch_module=torch,
+            feature_cache_stats=feature_cache_stats,
+        )
+        feature_cache_elapsed = time.perf_counter() - feature_start
+
+        # Keep the full cached tensors on CPU and move only mini-batches to GPU.
+        # Otherwise the backbone plus full feature cache would occupy GPU memory at
+        # the same time and easily cause OOM.
+        #
+        # 这里故意让完整缓存留在 CPU，只把 mini-batch 搬到 GPU。
+        # 否则 backbone 和整套特征缓存会同时占显存，非常容易 OOM。
+        #
+        # Once features are cached, the backbone is no longer needed for training.
+        # 特征缓存完成后，训练阶段就不再需要 backbone，本体应尽快释放。
+        del backbone
+        del tokenizer
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     write_value_head_config_json(config_json_path, value_head_config)
-    optimizer = torch.optim.AdamW(
-        value_head.parameters(),
-        lr=float(args.learning_rate),
-        weight_decay=float(args.weight_decay),
+
+    # Build optimizer.  In LoRA mode include backbone LoRA parameters alongside
+    # value head parameters.  In frozen mode only value head parameters are trained.
+    # 在 LoRA 模式下，优化器需要同时包含 value head 参数和 backbone LoRA 参数。
+    # 冻结模式下只优化 value head。
+    if lora_active:
+        lora_params = [p for p in backbone.parameters() if p.requires_grad]
+        optimizer_params = [
+            {"params": list(value_head.parameters()), "lr": float(args.learning_rate)},
+            {"params": lora_params, "lr": float(args.learning_rate)},
+        ]
+        optimizer = torch.optim.AdamW(
+            optimizer_params,
+            weight_decay=float(args.weight_decay),
+        )
+    else:
+        optimizer = torch.optim.AdamW(
+            value_head.parameters(),
+            lr=float(args.learning_rate),
+            weight_decay=float(args.weight_decay),
+        )
+
+    num_train_pairs = (
+        int(train_tokenized_cache["num_pairs"]) if lora_active else int(train_cache["num_pairs"])
     )
     total_optimizer_steps = _resolve_total_optimizer_steps(
-        num_pairs=int(train_cache["num_pairs"]),
+        num_pairs=num_train_pairs,
         batch_size=int(args.per_device_train_batch_size),
         grad_accum_steps=int(args.gradient_accumulation_steps),
         num_epochs=int(args.num_train_epochs),
@@ -681,29 +891,83 @@ def main(argv: list[str] | None = None) -> int:
     # held-out evaluation, then optional checkpoint promotion.
     # 外层循环刻意保持简单：先训一个 epoch，再跑一次 held-out eval，再决定是否晋升 checkpoint。
     for epoch_idx in range(int(args.num_train_epochs)):
-        epoch_stats = _run_one_epoch(
-            value_head=value_head,
-            pair_cache=train_cache,
-            torch_module=torch,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            batch_size=int(args.per_device_train_batch_size),
-            grad_accum_steps=int(args.gradient_accumulation_steps),
-            max_grad_norm=float(args.max_grad_norm),
-            objective_mode=str(args.objective_mode),
-            ranking_target_space=str(args.ranking_target_space),
-            ranking_margin=float(args.ranking_margin),
-            lambda_ranking=float(args.lambda_ranking),
-            lambda_bce=float(args.lambda_bce),
-            lambda_terminal_bce=float(args.terminal_bce_lambda),
-            anti_saturation_weight=float(args.anti_saturation_weight),
-            anti_saturation_logit_threshold=float(args.anti_saturation_logit_threshold),
-            reward_centering_weight=float(args.reward_centering_weight),
-            source_balance=str(args.source_balance),
-            permutation_mode=str(args.permutation_mode),
-            logging_steps=int(args.logging_steps),
-            global_step_start=int(global_step),
-        )
+        if lora_active:
+            # Rebuild eval feature cache at the start of each epoch using the
+            # current backbone state (LoRA weights change each epoch).
+            # 每个 epoch 开始时用当前 backbone 重新编码 eval pairs。
+            if epoch_idx > 0:
+                backbone.eval()
+                eval_cache = encode_tokenized_cache_with_backbone(
+                    tokenized_cache=eval_tokenized_cache,
+                    backbone=backbone,
+                    torch_module=torch,
+                    batch_size=int(args.per_device_eval_batch_size),
+                    head_dtype=next(value_head.parameters()).dtype,
+                    grad_enabled=False,
+                )
+                backbone.train()
+            epoch_stats = _run_one_epoch_lora(
+                value_head=value_head,
+                backbone=backbone,
+                tokenized_cache=train_tokenized_cache,
+                torch_module=torch,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                batch_size=int(args.per_device_train_batch_size),
+                grad_accum_steps=int(args.gradient_accumulation_steps),
+                max_grad_norm=float(args.max_grad_norm),
+                objective_mode=str(args.objective_mode),
+                ranking_target_space=str(args.ranking_target_space),
+                ranking_margin=float(args.ranking_margin),
+                lambda_ranking=float(args.lambda_ranking),
+                lambda_bce=float(args.lambda_bce),
+                lambda_terminal_bce=float(args.terminal_bce_lambda),
+                anti_saturation_weight=float(args.anti_saturation_weight),
+                anti_saturation_logit_threshold=float(args.anti_saturation_logit_threshold),
+                reward_centering_weight=float(args.reward_centering_weight),
+                source_balance=str(args.source_balance),
+                permutation_mode=str(args.permutation_mode),
+                logging_steps=int(args.logging_steps),
+                global_step_start=int(global_step),
+                train_oom_backoff=bool(args.train_oom_backoff),
+                train_oom_minibatch_size=int(args.train_oom_minibatch_size),
+            )
+            # After epoch training, rebuild eval cache with updated backbone.
+            backbone.eval()
+            eval_cache = encode_tokenized_cache_with_backbone(
+                tokenized_cache=eval_tokenized_cache,
+                backbone=backbone,
+                torch_module=torch,
+                batch_size=int(args.per_device_eval_batch_size),
+                head_dtype=next(value_head.parameters()).dtype,
+                grad_enabled=False,
+            )
+        else:
+            epoch_stats = _run_one_epoch(
+                value_head=value_head,
+                pair_cache=train_cache,
+                torch_module=torch,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                batch_size=int(args.per_device_train_batch_size),
+                grad_accum_steps=int(args.gradient_accumulation_steps),
+                max_grad_norm=float(args.max_grad_norm),
+                objective_mode=str(args.objective_mode),
+                ranking_target_space=str(args.ranking_target_space),
+                ranking_margin=float(args.ranking_margin),
+                lambda_ranking=float(args.lambda_ranking),
+                lambda_bce=float(args.lambda_bce),
+                lambda_terminal_bce=float(args.terminal_bce_lambda),
+                anti_saturation_weight=float(args.anti_saturation_weight),
+                anti_saturation_logit_threshold=float(args.anti_saturation_logit_threshold),
+                reward_centering_weight=float(args.reward_centering_weight),
+                source_balance=str(args.source_balance),
+                permutation_mode=str(args.permutation_mode),
+                logging_steps=int(args.logging_steps),
+                global_step_start=int(global_step),
+                train_oom_backoff=bool(args.train_oom_backoff),
+                train_oom_minibatch_size=int(args.train_oom_minibatch_size),
+            )
         global_step = int(epoch_stats["global_step_end"])
         eval_metrics, chosen_scores, rejected_scores = evaluate_pair_cache(
             value_head=value_head,
@@ -779,11 +1043,31 @@ def main(argv: list[str] | None = None) -> int:
 
     if best_eval_metrics is None or best_eval_scores is None:
         raise RuntimeError("No best checkpoint was selected")
+    # In LoRA mode eval_cache is rebuilt from tokenized_cache and lacks "pairs";
+    # fall back to eval_tokenized_cache which always has "pairs".
+    eval_pairs_for_scores = (
+        eval_tokenized_cache["pairs"] if lora_active else eval_cache["pairs"]
+    )
     _write_eval_pair_scores(
         path=eval_pair_scores_path,
-        eval_pairs=eval_cache["pairs"],
+        eval_pairs=eval_pairs_for_scores,
         chosen_scores=best_eval_scores[0],
         rejected_scores=best_eval_scores[1],
+    )
+    training_health = diagnose_phase_e_training_health(
+        train_curve=train_curve,
+        best_eval_metrics=best_eval_metrics,
+        chosen_scores=best_eval_scores[0],
+        rejected_scores=best_eval_scores[1],
+        recipe_risk_report=recipe_risk_report,
+    )
+    training_health_path.write_text(
+        json.dumps(training_health, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    training_health_md_path.write_text(
+        render_phase_e_training_health_markdown(training_health),
+        encoding="utf-8",
     )
 
     train_metrics = {
@@ -795,6 +1079,14 @@ def main(argv: list[str] | None = None) -> int:
         "model_load_elapsed_sec": float(model_load_elapsed),
         "train_elapsed_sec": float(train_elapsed),
         "global_step": int(global_step),
+        "train_oom_backoff": {
+            "enabled": bool(args.train_oom_backoff),
+            "minibatch_size_floor": int(args.train_oom_minibatch_size),
+            "total_events": int(sum(int(row["train"].get("oom_backoff_events", 0)) for row in train_curve)),
+            "min_chunk_size_seen": int(
+                min(int(row["train"].get("min_chunk_size_seen", int(args.per_device_train_batch_size))) for row in train_curve)
+            ),
+        },
     }
     eval_metrics_payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -829,6 +1121,7 @@ def main(argv: list[str] | None = None) -> int:
         "train_config": train_config.to_dict(),
         "train_pair_summary": train_pair_stats,
         "eval_pair_summary": eval_pair_stats,
+        "recipe_risk_report": recipe_risk_report,
         "train_truncation_diagnostics": train_truncation_diagnostics,
         "eval_truncation_diagnostics": eval_truncation_diagnostics,
         "init_value_head": init_info,
@@ -843,6 +1136,9 @@ def main(argv: list[str] | None = None) -> int:
             "value_head_config": str(config_json_path),
             "eval_pair_scores": str(eval_pair_scores_path),
             "train_curve": str(train_curve_path),
+            "recipe_risk": str(recipe_risk_path),
+            "training_health": str(training_health_path),
+            "training_health_md": str(training_health_md_path),
         },
     }
     summary = {
@@ -854,6 +1150,8 @@ def main(argv: list[str] | None = None) -> int:
         "ranking_target_space": str(args.ranking_target_space),
         "head_architecture": str(args.head_architecture),
         "eval_pairs": best_eval_metrics,
+        "recipe_risk_report": recipe_risk_report,
+        "training_health": training_health,
         "train_pairs": int(len(train_pairs)),
         "eval_pairs_n": int(len(eval_pairs)),
         "train_truncation_diagnostics": train_truncation_diagnostics,
@@ -863,6 +1161,7 @@ def main(argv: list[str] | None = None) -> int:
         "train_elapsed_sec": float(train_elapsed),
         "feature_cache_elapsed_sec": float(feature_cache_elapsed),
         "model_load_elapsed_sec": float(model_load_elapsed),
+        "train_oom_backoff": dict(train_metrics["train_oom_backoff"]),
     }
 
     train_metrics_path.write_text(json.dumps(train_metrics, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -881,6 +1180,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"auc                : {float(best_eval_metrics['auc']):.6f}")
     print(f"mean_margin        : {float(best_eval_metrics['mean_margin']):.6f}")
     print(
+        "train_oom_backoff  : "
+        f"events={int(train_metrics['train_oom_backoff']['total_events'])} "
+        f"min_chunk={int(train_metrics['train_oom_backoff']['min_chunk_size_seen'])}"
+    )
+    print(f"training_health    : {training_health.get('diagnosis', 'unknown')}")
+    print(
         "trunc_over_limit   : "
         f"train={float(train_truncation_diagnostics['overall']['frac_pairs_over_limit']):.4f} "
         f"eval={float(eval_truncation_diagnostics['overall']['frac_pairs_over_limit']):.4f}"
@@ -896,6 +1201,63 @@ def main(argv: list[str] | None = None) -> int:
     print(f"summary            : {summary_path}")
     print("=" * 88)
     return 0
+
+
+def _is_cuda_oom_exception(exc: BaseException) -> bool:
+    """Return whether one exception looks like a CUDA OOM.
+
+    中文
+    ----
+    共享服务器上的 OOM 不总是以同一个异常类抛出：
+    1. 有时是 `torch.cuda.OutOfMemoryError`
+    2. 有时只是普通 `RuntimeError`
+    3. 有时 message 里才出现 `CUBLAS_STATUS_ALLOC_FAILED`
+
+    所以这里用“异常类 + message 关键词”的保守并集判断。
+    """
+    text = str(exc).lower()
+    return (
+        "cuda out of memory" in text
+        or "cublas_status_alloc_failed" in text
+        or exc.__class__.__name__ == "OutOfMemoryError"
+    )
+
+
+def _cleanup_after_train_oom(*, torch_module: Any) -> None:
+    """Best-effort cleanup after one training-step CUDA OOM.
+
+    English
+    -------
+    Train-time OOMs are especially messy because autograd buffers may already
+    exist. We at least clear the CUDA allocator cache so the next smaller retry
+    has a fair chance to succeed.
+    """
+    cuda = getattr(torch_module, "cuda", None)
+    if cuda is not None and bool(cuda.is_available()):
+        cuda.empty_cache()
+
+
+def _weighted_chunk_scale(
+    *,
+    weight_batch: Any,
+    local_indices: Any,
+) -> float:
+    """Approximate one OOM-split chunk's contribution to the logical batch.
+
+    中文
+    ----
+    当一个 logical batch 因 OOM 被拆成多个小 chunk 时，主损失项不再能一次性
+    精确按整批权重求均值。这里用“chunk 权重和 / 原 batch 权重和”近似它在整批
+    目标中的占比。
+
+    这个近似对 ranking/BCE 主项是合理的；对 anti-saturation / reward-centering
+    这类批级正则不再完全等价，但作为 OOM 兜底是可接受的。
+    """
+    total_weight = float(weight_batch.detach().sum().cpu().item())
+    if total_weight <= 1e-8:
+        return float(local_indices.numel()) / max(int(weight_batch.shape[0]), 1)
+    chunk_weight = float(weight_batch[local_indices].detach().sum().cpu().item())
+    return max(chunk_weight / total_weight, 0.0)
 
 
 def _run_one_epoch(
@@ -921,6 +1283,8 @@ def _run_one_epoch(
     permutation_mode: str,
     logging_steps: int,
     global_step_start: int,
+    train_oom_backoff: bool,
+    train_oom_minibatch_size: int,
 ) -> dict[str, Any]:
     """Train one epoch on cached pair features.
 
@@ -954,84 +1318,138 @@ def _run_one_epoch(
     optimizer.zero_grad(set_to_none=True)
     running_loss = 0.0
     batches = 0
+    microbatches = 0
     optimizer_steps = 0
     global_step = int(global_step_start)
+    oom_backoff_events = 0
+    min_chunk_size_seen = int(batch_size)
 
     for batch_idx, start in enumerate(range(0, int(pair_cache["num_pairs"]), int(batch_size)), start=1):
         indices = permutation[start : start + int(batch_size)]
-        chosen_batch = chosen_features[indices]
-        rejected_batch = rejected_features[indices]
-        weight_batch = pair_weights[indices]
-        local_route_batch = local_route_weights[indices] if local_route_weights is not None else None
-        terminal_route_batch = (
-            terminal_route_weights[indices] if terminal_route_weights is not None else None
-        )
-        if chosen_batch.device != head_device or chosen_batch.dtype != head_dtype:
-            chosen_batch = chosen_batch.to(device=head_device, dtype=head_dtype)
-        if rejected_batch.device != head_device or rejected_batch.dtype != head_dtype:
-            rejected_batch = rejected_batch.to(device=head_device, dtype=head_dtype)
-        if weight_batch.device != head_device or weight_batch.dtype != head_dtype:
-            weight_batch = weight_batch.to(device=head_device, dtype=head_dtype)
-        if local_route_batch is not None and (
-            local_route_batch.device != head_device or local_route_batch.dtype != head_dtype
-        ):
-            local_route_batch = local_route_batch.to(device=head_device, dtype=head_dtype)
-        if terminal_route_batch is not None and (
-            terminal_route_batch.device != head_device or terminal_route_batch.dtype != head_dtype
-        ):
-            terminal_route_batch = terminal_route_batch.to(device=head_device, dtype=head_dtype)
+        weight_batch_cpu = pair_weights[indices]
+        current_chunk_size = int(indices.numel())
+        logical_batch_loss = 0.0
+        logical_batch_microbatches = 0
+        chunk_start = 0
+        while chunk_start < int(indices.numel()):
+            chunk_stop = min(chunk_start + int(current_chunk_size), int(indices.numel()))
+            local_indices = indices[chunk_start:chunk_stop]
+            try:
+                chosen_batch = chosen_features[local_indices]
+                rejected_batch = rejected_features[local_indices]
+                weight_batch = pair_weights[local_indices]
+                local_route_batch = (
+                    local_route_weights[local_indices] if local_route_weights is not None else None
+                )
+                terminal_route_batch = (
+                    terminal_route_weights[local_indices] if terminal_route_weights is not None else None
+                )
+                if chosen_batch.device != head_device or chosen_batch.dtype != head_dtype:
+                    chosen_batch = chosen_batch.to(device=head_device, dtype=head_dtype)
+                if rejected_batch.device != head_device or rejected_batch.dtype != head_dtype:
+                    rejected_batch = rejected_batch.to(device=head_device, dtype=head_dtype)
+                if weight_batch.device != head_device or weight_batch.dtype != head_dtype:
+                    weight_batch = weight_batch.to(device=head_device, dtype=head_dtype)
+                if local_route_batch is not None and (
+                    local_route_batch.device != head_device or local_route_batch.dtype != head_dtype
+                ):
+                    local_route_batch = local_route_batch.to(device=head_device, dtype=head_dtype)
+                if terminal_route_batch is not None and (
+                    terminal_route_batch.device != head_device or terminal_route_batch.dtype != head_dtype
+                ):
+                    terminal_route_batch = terminal_route_batch.to(device=head_device, dtype=head_dtype)
 
-        chosen_out = value_head(chosen_batch)
-        rejected_out = value_head(rejected_batch)
-        loss = compute_pair_objective(
-            chosen_logits=chosen_out["logits"],
-            rejected_logits=rejected_out["logits"],
-            chosen_scores=chosen_out["scores"],
-            rejected_scores=rejected_out["scores"],
-            pair_weights=weight_batch,
-            objective_mode=str(objective_mode),
-            ranking_target_space=str(ranking_target_space),
-            ranking_margin=float(ranking_margin),
-            lambda_ranking=float(lambda_ranking),
-            lambda_bce=float(lambda_bce),
-            anti_saturation_weight=float(anti_saturation_weight),
-            anti_saturation_logit_threshold=float(anti_saturation_logit_threshold),
-            reward_centering_weight=float(reward_centering_weight),
-            chosen_local_logits=chosen_out.get("local_logits"),
-            rejected_local_logits=rejected_out.get("local_logits"),
-            chosen_local_scores=chosen_out.get("local_scores"),
-            rejected_local_scores=rejected_out.get("local_scores"),
-            local_pair_weights=(
-                weight_batch * local_route_batch if local_route_batch is not None else None
-            ),
-            chosen_terminal_logits=chosen_out.get("terminal_logits"),
-            rejected_terminal_logits=rejected_out.get("terminal_logits"),
-            chosen_terminal_scores=chosen_out.get("terminal_scores"),
-            rejected_terminal_scores=rejected_out.get("terminal_scores"),
-            terminal_pair_weights=(
-                weight_batch * terminal_route_batch if terminal_route_batch is not None else None
-            ),
-            lambda_terminal_bce=float(lambda_terminal_bce),
-            torch_module=torch_module,
-        )
-        loss_value = float(loss.detach().cpu().item())
-        if not math.isfinite(loss_value):
-            batch_pair_ids = [
-                str(pair_cache["pair_ids"][int(idx)])
-                for idx in indices[: min(len(indices), 3)].tolist()
-            ]
-            chosen_logit_abs_max = float(chosen_out["logits"].detach().abs().max().cpu().item())
-            rejected_logit_abs_max = float(rejected_out["logits"].detach().abs().max().cpu().item())
-            raise RuntimeError(
-                "Non-finite training loss detected. "
-                f"batch_idx={batch_idx} "
-                f"global_step={global_step} "
-                f"batch_pair_ids={batch_pair_ids} "
-                f"chosen_logit_abs_max={chosen_logit_abs_max:.6f} "
-                f"rejected_logit_abs_max={rejected_logit_abs_max:.6f}"
-            )
-        (loss / float(grad_accum_steps)).backward()
-        running_loss += float(loss_value)
+                chosen_out = value_head(chosen_batch)
+                rejected_out = value_head(rejected_batch)
+                loss = compute_pair_objective(
+                    chosen_logits=chosen_out["logits"],
+                    rejected_logits=rejected_out["logits"],
+                    chosen_scores=chosen_out["scores"],
+                    rejected_scores=rejected_out["scores"],
+                    pair_weights=weight_batch,
+                    objective_mode=str(objective_mode),
+                    ranking_target_space=str(ranking_target_space),
+                    ranking_margin=float(ranking_margin),
+                    lambda_ranking=float(lambda_ranking),
+                    lambda_bce=float(lambda_bce),
+                    anti_saturation_weight=float(anti_saturation_weight),
+                    anti_saturation_logit_threshold=float(anti_saturation_logit_threshold),
+                    reward_centering_weight=float(reward_centering_weight),
+                    chosen_local_logits=chosen_out.get("local_logits"),
+                    rejected_local_logits=rejected_out.get("local_logits"),
+                    chosen_local_scores=chosen_out.get("local_scores"),
+                    rejected_local_scores=rejected_out.get("local_scores"),
+                    local_pair_weights=(
+                        weight_batch * local_route_batch if local_route_batch is not None else None
+                    ),
+                    chosen_terminal_logits=chosen_out.get("terminal_logits"),
+                    rejected_terminal_logits=rejected_out.get("terminal_logits"),
+                    chosen_terminal_scores=chosen_out.get("terminal_scores"),
+                    rejected_terminal_scores=rejected_out.get("terminal_scores"),
+                    terminal_pair_weights=(
+                        weight_batch * terminal_route_batch if terminal_route_batch is not None else None
+                    ),
+                    lambda_terminal_bce=float(lambda_terminal_bce),
+                    torch_module=torch_module,
+                )
+                loss_value = float(loss.detach().cpu().item())
+                if not math.isfinite(loss_value):
+                    batch_pair_ids = [
+                        str(pair_cache["pair_ids"][int(idx)])
+                        for idx in local_indices[: min(len(local_indices), 3)].tolist()
+                    ]
+                    chosen_logit_abs_max = float(chosen_out["logits"].detach().abs().max().cpu().item())
+                    rejected_logit_abs_max = float(rejected_out["logits"].detach().abs().max().cpu().item())
+                    raise RuntimeError(
+                        "Non-finite training loss detected. "
+                        f"batch_idx={batch_idx} "
+                        f"global_step={global_step} "
+                        f"batch_pair_ids={batch_pair_ids} "
+                        f"chosen_logit_abs_max={chosen_logit_abs_max:.6f} "
+                        f"rejected_logit_abs_max={rejected_logit_abs_max:.6f}"
+                    )
+                if int(current_chunk_size) < int(indices.numel()):
+                    chunk_scale = _weighted_chunk_scale(
+                        weight_batch=weight_batch_cpu,
+                        local_indices=local_indices,
+                    )
+                else:
+                    chunk_scale = 1.0
+                (loss * (float(chunk_scale) / float(grad_accum_steps))).backward()
+                logical_batch_loss += float(loss_value) * float(chunk_scale)
+                logical_batch_microbatches += 1
+                microbatches += 1
+                chunk_start = int(chunk_stop)
+            except Exception as exc:  # noqa: BLE001
+                if not bool(train_oom_backoff) or not _is_cuda_oom_exception(exc):
+                    raise
+                attempted_chunk_size = int(chunk_stop - chunk_start)
+                if attempted_chunk_size <= int(train_oom_minibatch_size):
+                    raise RuntimeError(
+                        "Train-loop OOM backoff exhausted. "
+                        f"batch_idx={batch_idx} "
+                        f"attempted_chunk_size={attempted_chunk_size} "
+                        f"min_chunk_size={int(train_oom_minibatch_size)}"
+                    ) from exc
+                next_chunk_size = max(int(train_oom_minibatch_size), attempted_chunk_size // 2)
+                oom_backoff_events += 1
+                min_chunk_size_seen = min(int(min_chunk_size_seen), int(next_chunk_size))
+                optimizer.zero_grad(set_to_none=True)
+                _cleanup_after_train_oom(torch_module=torch_module)
+                print(
+                    "train_oom_backoff: "
+                    f"batch_idx={batch_idx} "
+                    f"global_step={global_step} "
+                    f"chunk_size={attempted_chunk_size} -> {next_chunk_size}",
+                    flush=True,
+                )
+                current_chunk_size = int(next_chunk_size)
+                logical_batch_loss = 0.0
+                logical_batch_microbatches = 0
+                chunk_start = 0
+                continue
+
+        running_loss += float(logical_batch_loss)
         batches += 1
 
         # We step the optimizer either:
@@ -1064,8 +1482,265 @@ def _run_one_epoch(
     return {
         "avg_loss": float(running_loss / max(batches, 1)),
         "num_batches": int(batches),
+        "num_microbatches": int(microbatches),
         "optimizer_steps": int(optimizer_steps),
         "global_step_end": int(global_step),
+        "oom_backoff_events": int(oom_backoff_events),
+        "min_chunk_size_seen": int(min_chunk_size_seen),
+    }
+
+
+def _run_one_epoch_lora(
+    *,
+    value_head: Any,
+    backbone: Any,
+    tokenized_cache: dict[str, Any],
+    torch_module: Any,
+    optimizer: Any,
+    scheduler: Any,
+    batch_size: int,
+    grad_accum_steps: int,
+    max_grad_norm: float,
+    objective_mode: str,
+    ranking_target_space: str,
+    ranking_margin: float,
+    lambda_ranking: float,
+    lambda_bce: float,
+    lambda_terminal_bce: float,
+    anti_saturation_weight: float,
+    anti_saturation_logit_threshold: float,
+    reward_centering_weight: float,
+    source_balance: str,
+    permutation_mode: str,
+    logging_steps: int,
+    global_step_start: int,
+    train_oom_backoff: bool,
+    train_oom_minibatch_size: int,
+) -> dict[str, Any]:
+    """Train one epoch with LoRA backbone fine-tuning.
+
+    English
+    -------
+    Unlike `_run_one_epoch` (which trains only the value head on pre-computed
+    frozen features), this variant runs the backbone forward pass on every
+    mini-batch so that gradients can flow through the LoRA adapter layers.
+
+    Memory strategy:
+    - Backbone stays on GPU in bfloat16 (as loaded).
+    - Mini-batches are small (default 4–8) to fit backbone + value head.
+    - OOM backoff is preserved from the original training loop.
+
+    中文
+    ----
+    与 `_run_one_epoch` 不同（它只在预缓存特征上训练 value head），
+    这个变体每个 mini-batch 都运行 backbone 前向传播，
+    使梯度能够流经 LoRA adapter 层。
+    """
+    from ours.phase_b.value_head import pool_last_token, resolve_model_input_device  # type: ignore
+
+    # Build a temporary "tokenized pair cache" permutation using pair weights.
+    # We need a dummy feature cache just for build_pair_permutation.
+    head_device = next(value_head.parameters()).device
+    head_dtype = next(value_head.parameters()).dtype
+    backbone_device = resolve_model_input_device(backbone)
+
+    num_pairs = int(tokenized_cache["num_pairs"])
+    pair_weights_cpu = tokenized_cache["pair_weights"]
+    local_route_weights_cpu = tokenized_cache["local_route_weights"]
+    terminal_route_weights_cpu = tokenized_cache["terminal_route_weights"]
+    chosen_ids_cpu = tokenized_cache["chosen_input_ids"]
+    chosen_mask_cpu = tokenized_cache["chosen_attention_mask"]
+    rejected_ids_cpu = tokenized_cache["rejected_input_ids"]
+    rejected_mask_cpu = tokenized_cache["rejected_attention_mask"]
+    pair_ids = tokenized_cache["pair_ids"]
+
+    # Build permutation from pair_ids and source_tags (reuse stable_hash_order logic).
+    if permutation_mode not in {"random", "stable_hash"}:
+        raise ValueError(f"Unsupported permutation_mode: {permutation_mode!r}")
+    base_indices = list(range(num_pairs))
+    if permutation_mode == "random":
+        perm_order = torch_module.randperm(num_pairs).tolist()
+    else:
+        from ours.phase_e.runtime import stable_hash_order  # type: ignore
+        perm_order = stable_hash_order(base_indices, ids=[str(pid) for pid in pair_ids])
+    permutation = torch_module.tensor(perm_order, dtype=torch_module.long)
+
+    optimizer.zero_grad(set_to_none=True)
+    running_loss = 0.0
+    batches = 0
+    microbatches = 0
+    optimizer_steps = 0
+    global_step = int(global_step_start)
+    oom_backoff_events = 0
+    min_chunk_size_seen = int(batch_size)
+
+    for batch_idx, start in enumerate(range(0, num_pairs, int(batch_size)), start=1):
+        indices = permutation[start : start + int(batch_size)]
+        weight_batch_cpu = pair_weights_cpu[indices]
+        current_chunk_size = int(indices.numel())
+        logical_batch_loss = 0.0
+        logical_batch_microbatches = 0
+        chunk_start = 0
+
+        while chunk_start < int(indices.numel()):
+            chunk_stop = min(chunk_start + int(current_chunk_size), int(indices.numel()))
+            local_indices = indices[chunk_start:chunk_stop]
+            try:
+                # Move tokenized inputs to backbone device.
+                cids = chosen_ids_cpu[local_indices].to(backbone_device)
+                cmask = chosen_mask_cpu[local_indices].to(backbone_device)
+                rids = rejected_ids_cpu[local_indices].to(backbone_device)
+                rmask = rejected_mask_cpu[local_indices].to(backbone_device)
+
+                # Run backbone forward with gradient tracking (LoRA layers need grad).
+                c_out = backbone(
+                    input_ids=cids,
+                    attention_mask=cmask,
+                    output_hidden_states=True,
+                    use_cache=False,
+                    return_dict=True,
+                )
+                c_last = c_out.hidden_states[-1]
+                c_mask_aligned = cmask.to(c_last.device)
+                chosen_features = pool_last_token(c_last, c_mask_aligned, torch_module=torch_module)
+                chosen_features = chosen_features.to(device=head_device, dtype=head_dtype)
+
+                r_out = backbone(
+                    input_ids=rids,
+                    attention_mask=rmask,
+                    output_hidden_states=True,
+                    use_cache=False,
+                    return_dict=True,
+                )
+                r_last = r_out.hidden_states[-1]
+                r_mask_aligned = rmask.to(r_last.device)
+                rejected_features = pool_last_token(r_last, r_mask_aligned, torch_module=torch_module)
+                rejected_features = rejected_features.to(device=head_device, dtype=head_dtype)
+
+                # Weights and route weights.
+                weight_batch = pair_weights_cpu[local_indices].to(device=head_device, dtype=head_dtype)
+                local_route_batch = local_route_weights_cpu[local_indices].to(
+                    device=head_device, dtype=head_dtype
+                )
+                terminal_route_batch = terminal_route_weights_cpu[local_indices].to(
+                    device=head_device, dtype=head_dtype
+                )
+
+                # Value head forward.
+                chosen_out = value_head(chosen_features)
+                rejected_out = value_head(rejected_features)
+
+                loss = compute_pair_objective(
+                    chosen_logits=chosen_out["logits"],
+                    rejected_logits=rejected_out["logits"],
+                    chosen_scores=chosen_out["scores"],
+                    rejected_scores=rejected_out["scores"],
+                    pair_weights=weight_batch,
+                    objective_mode=str(objective_mode),
+                    ranking_target_space=str(ranking_target_space),
+                    ranking_margin=float(ranking_margin),
+                    lambda_ranking=float(lambda_ranking),
+                    lambda_bce=float(lambda_bce),
+                    anti_saturation_weight=float(anti_saturation_weight),
+                    anti_saturation_logit_threshold=float(anti_saturation_logit_threshold),
+                    reward_centering_weight=float(reward_centering_weight),
+                    chosen_local_logits=chosen_out.get("local_logits"),
+                    rejected_local_logits=rejected_out.get("local_logits"),
+                    chosen_local_scores=chosen_out.get("local_scores"),
+                    rejected_local_scores=rejected_out.get("local_scores"),
+                    local_pair_weights=weight_batch * local_route_batch,
+                    chosen_terminal_logits=chosen_out.get("terminal_logits"),
+                    rejected_terminal_logits=rejected_out.get("terminal_logits"),
+                    chosen_terminal_scores=chosen_out.get("terminal_scores"),
+                    rejected_terminal_scores=rejected_out.get("terminal_scores"),
+                    terminal_pair_weights=weight_batch * terminal_route_batch,
+                    lambda_terminal_bce=float(lambda_terminal_bce),
+                    torch_module=torch_module,
+                )
+                loss_value = float(loss.detach().cpu().item())
+                if not math.isfinite(loss_value):
+                    batch_pair_ids = [
+                        str(pair_ids[int(idx)]) for idx in local_indices[: min(len(local_indices), 3)].tolist()
+                    ]
+                    raise RuntimeError(
+                        "Non-finite LoRA training loss detected. "
+                        f"batch_idx={batch_idx} global_step={global_step} "
+                        f"batch_pair_ids={batch_pair_ids}"
+                    )
+
+                if int(current_chunk_size) < int(indices.numel()):
+                    chunk_scale = _weighted_chunk_scale(
+                        weight_batch=weight_batch_cpu,
+                        local_indices=local_indices,
+                    )
+                else:
+                    chunk_scale = 1.0
+                (loss * (float(chunk_scale) / float(grad_accum_steps))).backward()
+                logical_batch_loss += float(loss_value) * float(chunk_scale)
+                logical_batch_microbatches += 1
+                microbatches += 1
+                chunk_start = int(chunk_stop)
+
+            except Exception as exc:  # noqa: BLE001
+                if not bool(train_oom_backoff) or not _is_cuda_oom_exception(exc):
+                    raise
+                attempted_chunk_size = int(chunk_stop - chunk_start)
+                if attempted_chunk_size <= int(train_oom_minibatch_size):
+                    raise RuntimeError(
+                        "LoRA train-loop OOM backoff exhausted. "
+                        f"batch_idx={batch_idx} attempted_chunk_size={attempted_chunk_size}"
+                    ) from exc
+                next_chunk_size = max(int(train_oom_minibatch_size), attempted_chunk_size // 2)
+                oom_backoff_events += 1
+                min_chunk_size_seen = min(int(min_chunk_size_seen), int(next_chunk_size))
+                optimizer.zero_grad(set_to_none=True)
+                _cleanup_after_train_oom(torch_module=torch_module)
+                print(
+                    "lora_train_oom_backoff: "
+                    f"batch_idx={batch_idx} chunk_size={attempted_chunk_size} -> {next_chunk_size}",
+                    flush=True,
+                )
+                current_chunk_size = int(next_chunk_size)
+                logical_batch_loss = 0.0
+                logical_batch_microbatches = 0
+                chunk_start = 0
+                continue
+
+        running_loss += float(logical_batch_loss)
+        batches += 1
+
+        should_step = (batch_idx % int(grad_accum_steps) == 0) or (
+            start + int(batch_size) >= num_pairs
+        )
+        if should_step:
+            if float(max_grad_norm) > 0.0:
+                # Clip all trainable params: value head + backbone LoRA.
+                all_params = list(value_head.parameters()) + [
+                    p for p in backbone.parameters() if p.requires_grad
+                ]
+                torch_module.nn.utils.clip_grad_norm_(all_params, float(max_grad_norm))
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad(set_to_none=True)
+            optimizer_steps += 1
+            global_step += 1
+            if global_step % int(logging_steps) == 0:
+                print(
+                    "lora_train       : "
+                    f"step={global_step} "
+                    f"loss={running_loss / max(batches, 1):.6f} "
+                    f"lr={scheduler.get_last_lr()[0]:.6g}",
+                    flush=True,
+                )
+
+    return {
+        "avg_loss": float(running_loss / max(batches, 1)),
+        "num_batches": int(batches),
+        "num_microbatches": int(microbatches),
+        "optimizer_steps": int(optimizer_steps),
+        "global_step_end": int(global_step),
+        "oom_backoff_events": int(oom_backoff_events),
+        "min_chunk_size_seen": int(min_chunk_size_seen),
     }
 
 
@@ -1188,6 +1863,8 @@ def _render_summary_markdown(summary: dict[str, Any]) -> str:
         f"- selection_value: {summary['selection_value']:.6f}",
         f"- ranking_target_space: {summary.get('ranking_target_space', 'score')}",
         f"- head_architecture: {summary.get('head_architecture', 'linear')}",
+        f"- recipe_risk_max_severity: {summary.get('recipe_risk_report', {}).get('max_severity', 'info')}",
+        f"- training_health: {summary.get('training_health', {}).get('diagnosis', 'unknown')}",
         f"- train_pairs: {summary['train_pairs']}",
         f"- eval_pairs: {summary['eval_pairs_n']}",
         "",

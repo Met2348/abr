@@ -197,6 +197,50 @@ def _std(values: list[float]) -> float | None:
     return float(statistics.pstdev(values))
 
 
+def _resolve_best_checkpoint_path(value_run_dir: Path) -> tuple[str, list[str]]:
+    """Resolve the checkpoint path this report should publish.
+
+    English
+    -------
+    Older Phase E runs are not uniform:
+    1. some keep `best_value_head.pt`,
+    2. some only retain `final_value_head.pt`,
+    3. and some publish those paths through `manifest.json`.
+
+    中文
+    ----
+    老的 Phase E intradataset 运行并不统一：
+    1. 有些保留 `best_value_head.pt`，
+    2. 有些只保留 `final_value_head.pt`，
+    3. 还有些需要从 `manifest.json` 里解析真实路径。
+    """
+    notes: list[str] = []
+    manifest_path = value_run_dir / "manifest.json"
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        output_files = dict(manifest.get("output_files", {}))
+        best_path_text = str(output_files.get("best_value_head") or "").strip()
+        if best_path_text:
+            best_path = Path(best_path_text)
+            if best_path.exists():
+                return str(best_path), notes
+        final_path_text = str(output_files.get("final_value_head") or "").strip()
+        if final_path_text:
+            final_path = Path(final_path_text)
+            if final_path.exists():
+                notes.append("best checkpoint missing; resolved best_checkpoint_path to final_value_head")
+                return str(final_path), notes
+    best_path = value_run_dir / "best_value_head.pt"
+    if best_path.exists():
+        return str(best_path), notes
+    final_path = value_run_dir / "final_value_head.pt"
+    if final_path.exists():
+        notes.append("best checkpoint missing; resolved best_checkpoint_path to final_value_head")
+        return str(final_path), notes
+    notes.append("best checkpoint path unresolved")
+    return str(best_path), notes
+
+
 def _build_group_summary(suite_dir: Path, args: argparse.Namespace) -> GroupSummary:
     summary_path = suite_dir / "final_summary.md"
     rows_path = suite_dir / "seed_results.jsonl"
@@ -244,6 +288,8 @@ def _build_group_summary(suite_dir: Path, args: argparse.Namespace) -> GroupSumm
             float(row.heldout_ranking_score),
         ),
     )
+    best_checkpoint_path, checkpoint_notes = _resolve_best_checkpoint_path(Path(best_row.value_run_dir))
+    notes.extend(f"best_seed={int(best_row.seed)}: {note}" for note in checkpoint_notes)
     trust_score = float(
         0.50 * _mean(pair_values)
         + 0.30 * _mean(auc_values)
@@ -267,7 +313,7 @@ def _build_group_summary(suite_dir: Path, args: argparse.Namespace) -> GroupSumm
         gate_pass=gate_pass,
         trust_score=trust_score,
         best_seed=int(best_row.seed),
-        best_checkpoint_path=str(Path(best_row.value_run_dir) / "best_value_head.pt"),
+        best_checkpoint_path=best_checkpoint_path,
         notes=notes,
     )
 

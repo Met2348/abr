@@ -1,5 +1,68 @@
 # Phase E RL-Ready Research, Redesign, And Smoke Results (2026-03-11)
 
+## 2026-03-11 21:40 补充更新
+
+在本文成稿后，又完成了一轮 `Phase E` 基础设施安全收口：
+
+1. 活跃 Phase E wrapper 已统一显式传递 `--recipe-risk-policy`；
+2. 直接 trainer 的默认 checkpoint 选择口径已切换到：
+   - `pair_acc`
+3. 这意味着本文后续关于 RL-readiness 的方法学判断，今后可以更少担心“旧 wrapper 误把危险 recipe 带回主线”的实现噪音。
+
+新增参考：
+1. `docs/phase_e_pipeline_redesign_20260311.md`
+2. `docs/phase_e_literature_refresh_20260311.md`
+
+## 2026-03-11 23:35 再次补充更新
+
+又完成了一轮更广的 `2025-03 -> 2026-03` 联网 refresh，重点不再是“又多了几篇 PRM paper”，而是 verifier system design 的共识已经更清楚：
+
+1. `ABR` 的核心先验仍然成立；
+2. 但 `single scalar verifier` 的角色应进一步收缩为：
+   - cheap student
+   - router
+   - conservative scorer
+3. 当前仓库最缺的不是再换一个 head，而是四个系统层：
+   - 独立 `answer verifier`
+   - `invalid / abstain / escalate` 机制
+   - weak-ensemble / teacher-assisted hard-slice 标注
+   - `process-outcome alignment + format robustness` gate
+
+这轮新增纳入的更广证据包括：
+
+1. `CompassVerifier`
+   - https://aclanthology.org/2025.acl-long.1102/
+2. `VerifyBench`
+   - https://arxiv.org/abs/2507.09884
+3. `Verifying the Verifiers`
+   - https://arxiv.org/abs/2506.13342
+4. `Weaver`
+   - https://arxiv.org/abs/2510.18084
+5. `When to Trust the Cheap Check`
+   - https://arxiv.org/abs/2603.05390
+6. `MathQ-Verify`
+   - https://arxiv.org/abs/2603.03307
+
+新的主判断：
+
+1. `ProcessBench` 迁移困难，不再应只理解为“local vs terminal supervision 没混好”；
+2. 它更像是：
+   - answer-equivalence / completeness 未显式拆开，
+   - verifier 对输入 contract 可能过敏，
+   - cheap verifier 本该 abstain 的地方被迫给分，
+   - 以及 teacher/student 角色没有分离。
+
+因此本文后续关于 RL-ready redesign 的建议，应再补上四条：
+
+1. `ABR_AVCal_v1`
+   - 先做 answer-equivalence / invalid / false-negative calibration
+2. `ABR_WeaverLite_v1`
+   - 先做弱 verifier 组合和 disagreement distillation
+3. `ABR_POA_v1`
+   - 加 process-outcome alignment slice
+4. `ABR_FormatInv_v1`
+   - 把 prompt / answer-style / delimiter robustness 变成正式 gate
+
 ## Purpose
 
 This note answers four linked questions:
@@ -10,6 +73,40 @@ This note answers four linked questions:
 4. which redesigns already show positive signal in local smoke experiments.
 
 ## External Research And Community Reading
+
+### 0. Newer evidence after the old 2025-03 cutoff
+
+The repository now explicitly incorporates four later sources that materially
+change the design space:
+
+1. `PRIME (2026)` — process-outcome alignment benchmark
+   - https://arxiv.org/abs/2602.11570
+2. `Hard2Verify (2025)` — human-annotated frontier step-verification benchmark
+   - https://arxiv.org/abs/2510.13744
+3. `RISE (2025)` — online self-verification inside RLVR
+   - https://arxiv.org/abs/2505.13445
+4. `VPRM (2026)` — deterministic verifiable process reward models
+   - https://arxiv.org/abs/2601.17223
+
+New interpretation:
+
+1. 旧结论“不要过早宣称 RL-ready”仍然成立；
+2. 但到 `2026-03`，更重要的更新已经不是单条新 benchmark，而是 verifier
+   system design 本身发生了变化：
+   - answer verifier 独立化，
+   - factorized supervision，
+   - uncertainty gating，
+   - generative / reasoning reward model，
+   - generator-verifier co-adaptation。
+3. 更完整的晚近综述与重设计建议见：
+   - `docs/phase_e_literature_refresh_20260311.md`
+4. 因此当前 scalar verifier 主线应被理解为：
+   - bounded-support baseline，
+   - 不是最终 RL-ready object。
+5. 后续 RL-ready redesign 需要显式补上：
+   - process-outcome alignment，
+   - critique / self-verification behavior，
+   - deterministic checks where available。
 
 ### 1. `ProcessBench` says the benchmark is not just local first-bad discrimination
 
@@ -219,6 +316,116 @@ Two architectures were tested this round on the same mixed artifact:
      - one expert can fit local ranking structure
      - another can absorb harder/global calibration patterns
 
+## 2026-03-11 Follow-Up: New Data-Geometry Probes
+
+This note originally stopped at the mixed-artifact repair pilots.
+The newest follow-up extended that redesign logic with three more targeted
+profiles and one architecture sweep.
+
+### 1. `NDS5_MS_STRICT_ONLY_SMOKE`
+
+Question:
+
+1. if we remove fanout/grid and keep only `strict first-bad + terminal`,
+   does transfer recover automatically?
+
+Observed result:
+
+1. `PB GSM`: `pair_acc=0.4048`, `auc=0.4210`
+2. `PB Math`: `pair_acc=0.3876`, `auc=0.4321`
+
+Reading:
+
+1. no;
+2. this rules out the simplistic explanation that the earlier failure was only
+   caused by `Math-Shepherd` fanout/grid length shortcuts.
+
+### 2. `NDS6_RLHFLOW_STRICT_ONLY_SMOKE`
+
+Question:
+
+1. if we replace `Math-Shepherd` with stronger `RLHFlow` step labels but keep
+   the same strict-local geometry, does that fix transfer?
+
+Observed result:
+
+1. `PB GSM`: `pair_acc=0.6224`, `auc=0.5022`, `first_edge=0.6585`
+2. `PB Math`: `pair_acc=0.4357`, `auc=0.4520`, `first_edge=0.6383`
+
+Reading:
+
+1. label quality helps,
+2. but the geometry is still too narrow,
+3. especially on `ProcessBench Math`.
+
+### 3. `NDS7_MS_DPO_CALIBRATED_SMOKE`
+
+Question:
+
+1. if we make `Math-Step-DPO sibling_branch` the dominant new signal and keep
+   only a smaller `Math-Shepherd strict + terminal` support set, does benchmark
+   transfer move in the right direction?
+
+Observed result (`mlp`):
+
+1. `PB GSM`: `pair_acc=0.5374`, `auc=0.5575`, `first_edge=0.5854`
+2. `PB Math`: `pair_acc=0.5301`, `auc=0.5594`, `first_edge=0.7234`
+
+Reading:
+
+1. yes;
+2. `sibling_branch` is the first clearly effective new signal in this pass.
+
+### 4. `NDS7 + gated_mlp`
+
+The same curated `NDS7` data was then re-run with `gated_mlp`.
+
+3-seed benchmark summary:
+
+1. `PB GSM`
+   - `pair_acc = 0.6757 ± 0.0297`
+   - `auc = 0.6596 ± 0.0158`
+   - `first_edge = 0.7642 ± 0.0415`
+2. `PB Math`
+   - `pair_acc = 0.8099 ± 0.0112`
+   - `auc = 0.7460 ± 0.0145`
+   - `first_edge = 0.7447 ± 0.0347`
+
+Interpretation:
+
+1. once data geometry is corrected with `sibling_branch`, head capacity does
+   matter;
+2. but bucket diagnostics show the remaining weakness is still concentrated in:
+   - `all-correct terminal completion ordering`
+3. in other words:
+   - local / global ranking is now strong,
+   - terminal completion is the residual gap.
+
+## Updated Redesign Judgment
+
+The redesign recommendation is now more specific than it was in the first draft.
+
+What should remain:
+
+1. `sibling_branch` as the main new supervision family,
+2. bounded `strict first-bad` support,
+3. small `terminal anchor` support,
+4. `gated_mlp` as a serious benchmark-facing probe rather than only a side
+   curiosity.
+
+What should not be treated as the next mainline:
+
+1. pure `strict-only` recipes,
+2. pure `RLHFlow strict-only` recipes,
+3. generic “find an even better source” exploration without explicitly
+   targeting terminal completion.
+
+What the next stage should target:
+
+1. terminal-completion-aware objectives that preserve the new DPO-driven local
+   gains,
+2. not another round of undirected source churn.
+
 ## Experiments
 
 ### Baselines used for comparison
@@ -275,6 +482,59 @@ ProcessBench eval:
 
 1. `assets/artifacts/phase_e_eval/phase_e_pb_repair_0311_e76_mixed_small_gated_math50_20260311T043534Z`
 
+## Late Web Addendum (2026-03-11)
+
+Two newer external references further support the repository's current redesign
+direction.
+
+### 1. `R-PRM` reinforces that data geometry and preference-style optimization matter
+
+Source:
+
+1. `R-PRM` repository
+   - https://github.com/NJUNLP/R-PRM
+
+Relevant takeaway:
+
+1. their open training recipe is explicitly staged:
+   - supervised cold start,
+   - preference optimization,
+   - inference-time scaling
+2. their public README reports meaningful `ProcessBench` gains from the DPO
+   stage, not from a scalar-head-only setup.
+
+Repository implication:
+
+1. this supports the local move toward DPO/fork-point supervision as the main
+   signal carrier,
+2. and it further weakens the case for staying on "small frozen scalar head +
+   weak local labels" as the only mainline.
+
+### 2. `TRL PRMTrainer` reflects current community defaults for stable PRM training
+
+Source:
+
+1. Hugging Face TRL PRM trainer docs
+   - https://huggingface.co/docs/trl/prm_trainer
+
+Relevant takeaway:
+
+1. the public trainer defaults emphasize stability primitives:
+   - `disable_dropout=True`
+   - `gradient_checkpointing=True`
+   - `max_length` controls
+   - explicit best-checkpoint metric plumbing
+
+Repository implication:
+
+1. this is broadly aligned with the repo's current direction:
+   - safer checkpoint selection defaults,
+   - more explicit OOM handling,
+   - and more explicit training-health diagnostics.
+2. it does not prove the local pipeline is optimal,
+   but it does support the decision to treat training stability and selection
+   hygiene as first-class infrastructure rather than "optional cleanup".
+
 ## Results
 
 Main comparison artifact:
@@ -328,3 +588,112 @@ So the next mainline experiment should be:
 2. add one extra later-bad branch if needed,
 3. run full same-family trust + full `ProcessBench GSM8K/Math`,
 4. and only then revisit RL-readiness under conservative credit assignment.
+
+## New Controlled Residual Sweep: Data vs Loss vs Architecture (2026-03-11)
+
+After the later `NDS7 + gated_mlp` result, the main residual narrowed further:
+
+1. local discrimination was already strong;
+2. global `good > bad` ranking was already strong;
+3. the persistent gap was terminal completion ordering.
+
+That suggested a more surgical comparison:
+
+1. repair the data geometry,
+2. or repair the loss,
+3. or repair the head / routing.
+
+### Shared Baseline
+
+Reference:
+
+1. `NDS7 + gated_mlp`, `seed=42`
+
+| benchmark | pair_acc | auc | first_edge | terminal_top1 | terminal_gap |
+|---|---:|---:|---:|---:|---:|
+| `PB GSM8K` | `0.6565` | `0.6456` | `0.8049` | `0.2174` | `-0.1640` |
+| `PB Math`  | `0.7992` | `0.7519` | `0.7447` | `0.1538` | `-0.1461` |
+
+### A. Data-Level Repair: `ms_dpo_terminalboost_v1`
+
+Intent:
+
+1. keep `NDS7`'s successful `sibling_branch + strict` skeleton,
+2. increase `terminal_completion_anchor` mass from about `10%` to about `20%`.
+
+Artifact:
+
+1. `assets/artifacts/phase_e_pairs/phase_e_nds8_termboost_0311_pairs__480ab06bf8d6`
+
+Run:
+
+1. `assets/artifacts/phase_e_runs/phase_e_nds8_termboost_gated_pilot_value_retry2_20260311T124818Z`
+
+Results:
+
+| benchmark | pair_acc | auc | first_edge | terminal_top1 | terminal_gap |
+|---|---:|---:|---:|---:|---:|
+| `PB GSM8K` | `0.6752` | `0.6816` | `0.7118` | `0.2798` | `-0.1038` |
+| `PB Math`  | `0.7316` | `0.7046` | `0.6848` | `0.1823` | `-0.1670` |
+
+Interpretation:
+
+1. this is a real GSM-side terminal improvement;
+2. but it introduces a Math-side tradeoff;
+3. terminal mass alone is not a globally safe repair knob.
+
+### B. Loss-Level Repair: `NDS7 + terminal BCE`
+
+Run:
+
+1. `assets/artifacts/phase_e_runs/phase_e_nds7_termbce_gated_pilot_value_retry1_20260311T125922Z`
+
+Results:
+
+| benchmark | pair_acc | auc | first_edge | terminal_top1 | terminal_gap |
+|---|---:|---:|---:|---:|---:|
+| `PB GSM8K` | `0.6053` | `0.6612` | `0.6353` | `0.2073` | `-0.1383` |
+| `PB Math`  | `0.7229` | `0.7049` | `0.6555` | `0.1650` | `-0.1842` |
+
+Interpretation:
+
+1. terminal BCE by itself is not enough;
+2. it mostly hurts the already-good local/global side;
+3. terminal behavior barely improves.
+
+### C. Architecture-Level Repair: `dual_head + terminal BCE`
+
+Run:
+
+1. `assets/artifacts/phase_e_runs/phase_e_nds7_dualhead_termbce_pilot_value_20260311T130037Z`
+
+Results:
+
+| benchmark | pair_acc | auc | first_edge | terminal_top1 | terminal_gap |
+|---|---:|---:|---:|---:|---:|
+| `PB GSM8K` | `0.8150` | `0.7489` | `0.7882` | `0.0829` | `-0.2312` |
+| `PB Math`  | `0.7820` | `0.7105` | `0.6806` | `0.0739` | `-0.2535` |
+
+Interpretation:
+
+1. explicit factorization does create a stronger local error detector;
+2. but with the current inference mixture, it makes terminal ordering much worse;
+3. so the repo now has direct evidence that:
+   - local error detection
+   - and terminal completion ordering
+   are separable subskills.
+
+### Updated Practical Takeaway
+
+The current evidence argues against three naive next steps:
+
+1. "just add more terminal anchors",
+2. "just add terminal BCE",
+3. "just switch to dual-head".
+
+The better next-step interpretation is:
+
+1. keep `NDS7 + gated_mlp` as the strongest balanced offline baseline;
+2. treat terminal completion ordering as a narrow residual problem;
+3. and fix that residual with more explicit routing / calibration logic rather
+   than heavier mixed supervision.

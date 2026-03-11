@@ -4,6 +4,33 @@ This file defines the official **Phase E** execution plan.
 
 Date baseline: 2026-03-10.
 
+## 0.0 Infrastructure Hardening Rule (2026-03-11 update)
+
+Phase E now treats certain recipe families as infrastructure risk, not just as
+"bad experiment outcomes".
+
+Current operational rule:
+1. the default Phase E trainer path uses `--recipe-risk-policy error`;
+2. known catastrophic combinations should be blocked before backbone load;
+3. every new Phase E run should emit a structured training-health artifact,
+   rather than relying on manual log reading alone.
+
+Why this was added:
+1. recent `NDSBH / PBR` evidence showed that mixed-semantics math artifacts can
+   catastrophically collapse under:
+   - `ranking_target_space = logit`
+   - semantic-style pair weighting
+   - `checkpoint_selection_metric = ranking_score`
+2. if these recipes are allowed to run silently, future source-quality
+   comparisons become methodologically polluted.
+
+Operational consequence:
+1. all active `run_phase_e*.sh` wrappers should pass explicit `--recipe-risk-policy`;
+2. direct trainer use should assume:
+   - `checkpoint_selection_metric = pair_acc`
+   unless the run is a controlled diagnostic;
+3. evidence collected through stale wrappers should be treated as lower-trust until rerun.
+
 Phase transition rule:
 1. Phase D is not discarded.
 2. Phase D is now treated as the methodology-correction and bridge-evidence stage.
@@ -11,6 +38,28 @@ Phase transition rule:
    - validate value-head learnability on datasets that genuinely provide
      high-quality process/pair supervision,
    - then transfer the validated method back to StrategyQA.
+
+Reference redesign note:
+1. `docs/phase_e_pipeline_redesign_20260311.md`
+2. `docs/phase_e_updated_literature_redesign_20260311.md`
+
+## 0.3 2026 Literature Refresh
+
+Newer evidence beyond the older `2025-03` assumption set now matters:
+1. `PRIME (2026)` says verifier quality on process-outcome alignment strongly
+   predicts RLVR effectiveness.
+2. `Hard2Verify (2025)` shows open-source step verifiers still lag badly on
+   frontier open-ended verification.
+3. `RISE (2025)` treats self-verification as a first-class online training
+   signal, not just an offline scalar label.
+4. `VPRM (2026)` shows deterministic process verification can outperform
+   outcome-only or opaque-neural-only approaches in structured settings.
+
+Operational interpretation:
+1. same-source pair fit is necessary but no longer sufficient;
+2. Phase E should now develop along two parallel tracks:
+   - bounded-support scalar verifier,
+   - benchmark-aligned process / critique verifier.
 
 ---
 

@@ -66,6 +66,7 @@ from ours.phase_e.runtime import (  # noqa: E402
     import_runtime_deps,
     load_backbone_and_tokenizer,
     load_or_encode_text_features,
+    resolve_checkpoint_resolution,
     resolve_checkpoint_path,
     resolve_value_device,
     score_feature_tensor,
@@ -95,6 +96,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=Path("assets/artifacts/phase_e_eval"),
     )
     parser.add_argument("--checkpoint-name", choices=["best", "final"], default="best")
+    parser.add_argument(
+        "--checkpoint-missing-policy",
+        choices=["fail", "fallback_final"],
+        default="fail",
+        help=(
+            "How to handle `--checkpoint-name best` when best_value_head.pt is missing. "
+            "`fail` is the safe default; `fallback_final` is only for legacy diagnostics."
+        ),
+    )
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--max-length", type=int, default=None)
@@ -214,27 +224,18 @@ def main(argv: list[str] | None = None) -> int:
     # 直接复用训练时记录下来的 backbone/adapter 解析结果，
     # 避免评测时不小心换了一个“看起来差不多、其实不完全一样”的模型栈。
     run_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    checkpoint_resolution = resolve_checkpoint_resolution(
+        value_run_dir=Path(args.value_run_dir),
+        run_manifest=run_manifest,
+        checkpoint_name=str(args.checkpoint_name),
+        checkpoint_missing_policy=str(args.checkpoint_missing_policy),
+    )
     checkpoint_path = resolve_checkpoint_path(
         value_run_dir=Path(args.value_run_dir),
         run_manifest=run_manifest,
         checkpoint_name=str(args.checkpoint_name),
+        checkpoint_missing_policy=str(args.checkpoint_missing_policy),
     )
-    requested_checkpoint_path = str(
-        dict(run_manifest.get("output_files", {})).get(
-            "best_value_head" if str(args.checkpoint_name) == "best" else "final_value_head",
-            "",
-        )
-    ).strip()
-    checkpoint_resolution = {
-        "requested_checkpoint_name": str(args.checkpoint_name),
-        "requested_checkpoint_path": requested_checkpoint_path,
-        "resolved_checkpoint_path": str(checkpoint_path),
-        "fallback_to_final": bool(
-            str(args.checkpoint_name) == "best"
-            and requested_checkpoint_path != ""
-            and Path(requested_checkpoint_path) != checkpoint_path
-        ),
-    }
     value_head, _, _ = load_value_head_checkpoint(checkpoint_path)
 
     resolved_backbone = dict(run_manifest.get("resolved_backbone", {}))
@@ -280,6 +281,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"benchmark_type    : {benchmark_spec.benchmark_type}")
     print(f"benchmark_path    : {benchmark_path}")
     print(f"checkpoint_path   : {checkpoint_path}")
+    print(f"checkpoint_policy : {args.checkpoint_missing_policy}")
     print(f"checkpoint_fallback: {checkpoint_resolution['fallback_to_final']}")
     print(f"model_path        : {model_path}")
     print(f"adapter_path      : {adapter_path if adapter_path is not None else '<none>'}")
@@ -428,6 +430,9 @@ def main(argv: list[str] | None = None) -> int:
             metadata={
                 "value_run_dir": args.value_run_dir,
                 "checkpoint_path": checkpoint_path,
+                "checkpoint_requested": checkpoint_resolution["requested_checkpoint_name"],
+                "checkpoint_resolved": checkpoint_resolution["resolved_checkpoint_name"],
+                "checkpoint_fallback": checkpoint_resolution["fallback_to_final"],
                 "benchmark_path": benchmark_path,
             },
             metrics=metrics,

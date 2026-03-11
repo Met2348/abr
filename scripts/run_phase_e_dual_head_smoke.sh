@@ -47,6 +47,7 @@ MAX_LENGTH="${MAX_LENGTH:-1024}"
 HEAD_MLP_HIDDEN_SIZE="${HEAD_MLP_HIDDEN_SIZE:-1024}"
 HEAD_DROPOUT_PROB="${HEAD_DROPOUT_PROB:-0.05}"
 BENCH_MAX_SAMPLES="${BENCH_MAX_SAMPLES:-96}"
+RECIPE_RISK_POLICY="${RECIPE_RISK_POLICY:-warn}"
 
 # Reuse the existing ms_align_v1 artifact from PBR2a.
 # If the PBR2a version not found, fall back to the PBR research version.
@@ -113,6 +114,7 @@ run_train() {
     --head-activation gelu \
     --anti-saturation-weight 5e-4 \
     --anti-saturation-logit-threshold 3.5 \
+    --recipe-risk-policy $RECIPE_RISK_POLICY \
     --require-cuda"
   $PYTHON_BIN -u scripts/phase_e_train_value.py \
     --train-pairs-jsonl "$MSALIGN_PAIRS_DIR/train_pairs.jsonl" \
@@ -145,6 +147,7 @@ run_train() {
     --head-activation gelu \
     --anti-saturation-weight 5e-4 \
     --anti-saturation-logit-threshold 3.5 \
+    --recipe-risk-policy "$RECIPE_RISK_POLICY" \
     --require-cuda \
     2>&1 | tee -a "$LOG_ROOT/${run_name}.log"
 }

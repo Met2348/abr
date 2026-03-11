@@ -44,6 +44,8 @@ FEATURE_CACHE_MODE="${FEATURE_CACHE_MODE:-read_write}"
 FEATURE_CACHE_LOCK_TIMEOUT_SEC="${FEATURE_CACHE_LOCK_TIMEOUT_SEC:-600}"
 DTYPE="${DTYPE:-bfloat16}"
 DEVICE_MAP="${DEVICE_MAP:-auto}"
+RECIPE_RISK_POLICY="${RECIPE_RISK_POLICY:-error}"
+RPRM_STEP_LABEL_PAIR_MODE="${RPRM_STEP_LABEL_PAIR_MODE:-first_bad_edge_strict}"
 
 GROUP_TITLE=""
 GROUP_INTENTION=""
@@ -166,6 +168,7 @@ prepare_pairs() {
     --max-pairs-per-source "$PAIR_MAX_PER_SOURCE"
     --min-pair-confidence "$pair_min_conf"
     --r-prm-pair-mode compact_verdict
+    --step-label-pair-mode "$RPRM_STEP_LABEL_PAIR_MODE"
   )
   log_line "RUN: ${prep_cmd[*]}" | tee -a "$SUITE_LOG_FILE" >&2
   local prep_output=""
@@ -318,6 +321,7 @@ train_recipe() {
     --head-architecture "$head_arch"
     --head-mlp-hidden-size 1024
     --head-dropout-prob "$head_dropout"
+    --recipe-risk-policy "$RECIPE_RISK_POLICY"
     --head-init-std 0.02
     --head-activation gelu
     --strict-determinism

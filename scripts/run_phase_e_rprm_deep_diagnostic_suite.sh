@@ -47,6 +47,8 @@ FEATURE_CACHE_MODE="${FEATURE_CACHE_MODE:-read_write}"
 FEATURE_CACHE_LOCK_TIMEOUT_SEC="${FEATURE_CACHE_LOCK_TIMEOUT_SEC:-600}"
 DTYPE="${DTYPE:-bfloat16}"
 DEVICE_MAP="${DEVICE_MAP:-auto}"
+RECIPE_RISK_POLICY="${RECIPE_RISK_POLICY:-error}"
+RPRM_STEP_LABEL_PAIR_MODE="${RPRM_STEP_LABEL_PAIR_MODE:-first_bad_edge_strict}"
 
 log_line() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$1"
@@ -283,6 +285,7 @@ prep_cmd=(
   --max-pairs-per-source "$PAIR_MAX_PER_SOURCE"
   --min-pair-confidence "$PAIR_MIN_CONFIDENCE"
   --r-prm-pair-mode compact_verdict
+  --step-label-pair-mode "$RPRM_STEP_LABEL_PAIR_MODE"
 )
 log_line "RUN: ${prep_cmd[*]}" | tee -a "$SUITE_LOG_FILE"
 prep_output=""
@@ -354,6 +357,7 @@ for spec in "${CONFIG_SPECS[@]}"; do
     --ranking-margin 0.02
     --head-architecture "$head_architecture"
     --strict-determinism
+    --recipe-risk-policy "$RECIPE_RISK_POLICY"
     --require-cuda
   )
   if [[ "$objective_mode" == "joint" ]]; then

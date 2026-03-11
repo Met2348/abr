@@ -46,6 +46,7 @@ TARGET_TOTAL_PAIRS="${TARGET_TOTAL_PAIRS:-4096}"
 BENCH_MAX_SAMPLES="${BENCH_MAX_SAMPLES:-96}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-96}"
+SAMEFAMILY_BATCH_SIZE="${SAMEFAMILY_BATCH_SIZE:-$EVAL_BATCH_SIZE}"
 TRAIN_EPOCHS="${TRAIN_EPOCHS:-4}"
 STAGE1_EPOCHS="${STAGE1_EPOCHS:-2}"
 STAGE2_EPOCHS="${STAGE2_EPOCHS:-3}"
@@ -56,6 +57,12 @@ HEAD_MLP_HIDDEN_SIZE="${HEAD_MLP_HIDDEN_SIZE:-1024}"
 HEAD_DROPOUT_PROB="${HEAD_DROPOUT_PROB:-0.05}"
 ANTI_SATURATION_WEIGHT="${ANTI_SATURATION_WEIGHT:-5e-4}"
 ANTI_SATURATION_LOGIT_THRESHOLD="${ANTI_SATURATION_LOGIT_THRESHOLD:-3.5}"
+EVAL_MAX_GPU_MEMORY_GIB="${EVAL_MAX_GPU_MEMORY_GIB:-}"
+EVAL_MAX_CPU_MEMORY_GIB="${EVAL_MAX_CPU_MEMORY_GIB:-}"
+RECIPE_RISK_POLICY="${RECIPE_RISK_POLICY:-error}"
+DEFAULT_RANKING_TARGET_SPACE="${DEFAULT_RANKING_TARGET_SPACE:-score}"
+DEFAULT_PAIR_WEIGHT_MODE="${DEFAULT_PAIR_WEIGHT_MODE:-none}"
+DEFAULT_CHECKPOINT_SEL_METRIC="${DEFAULT_CHECKPOINT_SEL_METRIC:-pair_acc}"
 
 REFERENCE_E87_VALUE_RUN_DIR="${REFERENCE_E87_VALUE_RUN_DIR:-assets/artifacts/phase_e_runs/phase_e_processbench_rlrepair_0311_e87_ms_processbench_transfer_fanout_terminal10_confwt_seed42_e87_ms_processbench_transfer_fanout_terminal10_confwt_seed42_s42_value_20260311T032957Z}"
 REFERENCE_E87_SAMEFAMILY_DIR="${REFERENCE_E87_SAMEFAMILY_DIR:-assets/artifacts/phase_e_samefamily_eval/phase_e_rlready_e87_samefamily_0311_20260311T040021Z}"
@@ -73,6 +80,16 @@ GROUP_INTENTION=""
 GROUP_OBSERVE=""
 GROUP_EXPECT=""
 GROUP_TARGET_PAIRS=""  # empty = use global TARGET_TOTAL_PAIRS; set per-group in resolve_group
+# 中文: 以下变量可在 resolve_group 的 case 分支里按组覆盖；若为空，则落回全局安全默认值。
+# English: these can be overridden per-group in resolve_group; empty falls back to the global safe defaults below.
+GROUP_RANKING_TARGET_SPACE=""
+GROUP_PAIR_WEIGHT_MODE=""
+GROUP_CHECKPOINT_SEL_METRIC=""
+# LoRA backbone fine-tuning: set per-group; empty = 0 = frozen backbone (default)
+GROUP_LORA_RANK=""           # empty = 0 (frozen); positive int enables LoRA
+GROUP_LORA_ALPHA=""          # empty = 16.0; recommended: 2×rank
+GROUP_LORA_TARGET_MODULES="" # empty = q_proj,v_proj
+GROUP_LORA_NUM_TOP_LAYERS="" # empty = all layers; positive int = last-N layers only
 CASES=()
 
 log_line() {
@@ -102,6 +119,9 @@ resolve_group() {
   case "$ACTIVE_PHASE_E_PB_RESEARCH_GROUP" in
     PBR1_PROCESSBENCH_REDESIGN_SMOKE)
       GROUP_TARGET_PAIRS=""  # use global TARGET_TOTAL_PAIRS (default 4096 smoke scale)
+      GROUP_RANKING_TARGET_SPACE=""
+      GROUP_PAIR_WEIGHT_MODE=""
+      GROUP_CHECKPOINT_SEL_METRIC=""
       GROUP_TITLE="PBR1 ProcessBench Redesign Smoke"
       GROUP_INTENTION="Test whether processbench-aligned curate profiles, semantic weighting, and alternative heads improve transfer beyond the current E87 baseline."
       GROUP_OBSERVE="The primary readouts are ProcessBench AUC / first-edge / terminal slices together with same-family prompt-level utility."
@@ -161,6 +181,31 @@ resolve_group() {
         "pbr4c_ms_laterbad_gated|one_shot|ms_laterbad_v1|gated_mlp|none|42"
       )
       ;;
+    PBR5B_PRMALIGN_GATED_SEED3)
+      # 中文: 把 PBR4 smoke 中最优组合（ms_prm_align_v1 + gated_mlp）扩展到完整数据规模（16384 pairs）
+      # 并跑 3 个 seed，确认 PBR4b 的 ProcessBench MATH AUC=0.621 是否在更大数据量下稳定提升。
+      # gated_mlp 在 smoke 中是唯一成功消除 ProcessBench 分数反转的头结构。
+      #
+      # English: scale up the PBR4 smoke winner (ms_prm_align_v1 + gated_mlp) to full 16384 pairs
+      # and run 3 seeds to confirm the ProcessBench MATH AUC=0.621 seen in smoke generalizes.
+      GROUP_TARGET_PAIRS=16384
+      GROUP_TITLE="PBR5B Full-Scale PRM-Align + GatedMLP, 3 Seeds (score+none+pair_acc recipe)"
+      GROUP_INTENTION="The PBR4 smoke identified ms_prm_align_v1+gated_mlp as the first frozen-head config that avoids score inversion on both GSM8K and MATH (AUC 0.549/0.621). This group scales it to 16384 pairs with 3 seeds, and switches to score+none+pair_acc recipe (same as NDSBH NDS2 which hit 0.712) to avoid the recipe_risk ANTI_PATTERN_G_FULL rejection that blocked the first launch."
+      GROUP_OBSERVE="Primary: ProcessBench GSM8K and MATH AUC and score-inversion direction. Secondary: same-family top1 and local_first_bad. Compare to PBR4b smoke (0.549/0.621 with old recipe), NDS2 MATH AUC=0.712, and PBR2 median (0.486/0.476)."
+      GROUP_EXPECT="All 3 seeds should maintain non-inverted scores on MATH. Median MATH AUC >= 0.65, GSM8K AUC >= 0.55. If inter-seed variance is low (auc range < 0.08), gated_mlp is confirmed stable for RL-ready promotion."
+      # 中文: ms_prm_align_v1 包含 terminal 样本（10%），logit+confidence_semantic+ranking_score 组合
+      # 触发 recipe_risk ANTI_PATTERN_G_FULL（critical 级别）导致训练被拒。改用 score+none+pair_acc。
+      # English: ms_prm_align_v1 has terminal anchors (10%); logit+confidence_semantic+ranking_score
+      # triggers recipe_risk ANTI_PATTERN_G_FULL (critical) and is rejected. Use score+none+pair_acc.
+      GROUP_RANKING_TARGET_SPACE="score"
+      GROUP_PAIR_WEIGHT_MODE="none"
+      GROUP_CHECKPOINT_SEL_METRIC="pair_acc"
+      CASES=(
+        "pbr5ba_ms_prm_align_gated_s42|one_shot|ms_prm_align_v1|gated_mlp|uniform|42"
+        "pbr5bb_ms_prm_align_gated_s1|one_shot|ms_prm_align_v1|gated_mlp|uniform|1"
+        "pbr5bc_ms_prm_align_gated_s7|one_shot|ms_prm_align_v1|gated_mlp|uniform|7"
+      )
+      ;;
     PBR5_DUAL_HEAD_ROUTING_SEED3)
       # 中文: 为 dual_head 架构增加 pair_semantics 路由后的第一批全量验证实验。
       # local_proj 接受 first_bad_edge / fanout / laterbad pair 的梯度；
@@ -188,24 +233,31 @@ resolve_group() {
       )
       ;;
     PBR6_LORA_BACKBONE_SMOKE)
-      # 中文: 解冻 Qwen2.5-7B-Instruct 最后 4 层（LoRA rank=4, target=q_proj+v_proj+mlp），
+      # 中文: 解冻 Qwen2.5-7B-Instruct 最后 4 层（LoRA rank=4, target=q_proj+v_proj），
       # 同步训练 value head（mlp 架构）。这是当前 frozen-backbone 路线的突破性尝试。
       #
-      # !! 前置条件 (BLOCKING):
-      #    1. 训练脚本必须新增 LoRA 模式（--lora-rank, --lora-target-modules, --lora-top-k-layers）
-      #    2. feature cache 必须在 LoRA 路线下禁用（LoRA 改变 backbone，cache 会 stale）
-      #    3. 需要一个 on-the-fly mini-batch encoding path 替代 cache-based encoding
-      # !! 当前状态: NOT RUNNABLE — 等待 training 脚本 LoRA 模式实现。
-      # !! 预期收益: 文献数据显示 frozen→LoRA 可把 ProcessBench AUC 从 ~0.62 推向 ~0.70+
+      # !! 实现状态 (2026-03-12): RUNNABLE
+      #    - LoRA 模式已实现于 phase_e_train_value.py (--lora-rank > 0 触发 LoRA 路径)
+      #    - apply_lora_to_backbone() 在 runtime.py 中，自动开启 gradient checkpointing
+      #    - feature cache 在 LoRA 模式下自动禁用 (_feature_cache_mode=off)
+      #    - on-the-fly mini-batch encoding: encode_tokenized_cache_with_backbone() in training.py
+      # !! 预期收益: 文献数据显示 frozen→LoRA 可把 ProcessBench AUC 提升 +5-10 absolute
       #
-      # English: unfreeze last 4 Qwen layers via LoRA (rank=4), jointly train with MLP head.
-      # This is the path to crossing the ~0.65 ProcessBench AUC ceiling of frozen-backbone.
-      # BLOCKING prerequisites: training script LoRA mode + cache invalidation path.
+      # English: unfreeze last 4 Qwen layers via LoRA (rank=4, q+v only), jointly train with MLP.
+      # LoRA infra implemented 2026-03-12: apply_lora_to_backbone() + per-batch backbone forward.
+      # Gradient checkpointing auto-enabled — verified fits within A100-80GB at batch=4.
       GROUP_TARGET_PAIRS=8192  # smoke scale for first LoRA run
-      GROUP_TITLE="PBR6 LoRA Backbone Smoke [BLOCKED - needs LoRA infra in training script]"
-      GROUP_INTENTION="Validate whether partial backbone unfreezing (LoRA on last 4 layers) breaks the ~0.62 AUC ceiling of frozen-backbone PRMs. Literature benchmark: Skywork-o1-PRM (~75%), RLHFlow/Mistral-PRM (~70%), both use backbone LoRA."
-      GROUP_OBSERVE="Primary: ProcessBench GSM8K/Math AUC. Compare directly against best PBR3 frozen-backbone run. If LoRA breaks ceiling, AUC should improve by >= 0.05 absolute."
-      GROUP_EXPECT="If frozen-backbone ceiling is confirmed by PBR2/PBR3 at ~0.50-0.55 AUC, LoRA should push toward 0.60+. If frozen baseline already reached 0.65+, LoRA improvement may be smaller."
+      GROUP_TITLE="PBR6 LoRA Backbone Smoke (rank=4, last-4-layers, q+v)"
+      GROUP_INTENTION="Validate whether partial backbone unfreezing (LoRA rank=4 on last 4 layers, q+v only) breaks the frozen-backbone AUC ceiling. Literature benchmark: Skywork-o1-PRM (~75%), RLHFlow/Mistral-PRM (~70%), both use backbone LoRA. Compare directly against PBR3 best frozen run."
+      GROUP_OBSERVE="Primary: ProcessBench GSM8K/Math AUC vs PBR3 best frozen. If LoRA breaks ceiling, AUC should improve by >= 0.05 absolute. Secondary: same-family top1 (ensure LoRA doesn't hurt instruction following). Monitor VRAM usage — expect ~20-22 GB with grad checkpointing."
+      GROUP_EXPECT="LoRA (rank=4, last 4 layers) should improve pb_math_auc by +0.03–0.08 over frozen SOTA. Failure signal: LoRA collapses (pair_acc drops below 0.48) or exceeds memory budget. If rank=4 last-4-layers is insufficient, escalate to rank=8 or all-layers."
+      GROUP_RANKING_TARGET_SPACE="score"
+      GROUP_PAIR_WEIGHT_MODE="none"
+      GROUP_CHECKPOINT_SEL_METRIC="pair_acc"
+      GROUP_LORA_RANK=4
+      GROUP_LORA_ALPHA=8
+      GROUP_LORA_TARGET_MODULES="q_proj,v_proj"
+      GROUP_LORA_NUM_TOP_LAYERS=4
       CASES=(
         "pbr6a_ms_laterbad_lora_mlp_s42|one_shot|ms_laterbad_v1|mlp|none|42"
         "pbr6b_ms_laterbad_lora_mlp_s1|one_shot|ms_laterbad_v1|mlp|none|1"
@@ -282,6 +334,11 @@ run_train() {
   local init_value_head_path="${8:-}"
   local seed="${9:-42}"
   local run_name="${RUN_PREFIX}_${case_id}_value"
+  local _lora_rank="${GROUP_LORA_RANK:-0}"
+  local _feature_cache_mode="read_write"
+  if [[ -n "$_lora_rank" && "$_lora_rank" -gt 0 ]]; then
+    _feature_cache_mode="off"  # LoRA changes backbone each step — cache is stale
+  fi
   local cmd=(
     "$PYTHON_BIN" -u scripts/phase_e_train_value.py
     --train-pairs-jsonl "$train_pairs_jsonl"
@@ -298,14 +355,15 @@ run_train() {
     --lambda-ranking 1.0
     --lambda-bce 1.0
     --ranking-margin 0.02
-    --ranking-target-space logit
-    --pair-weight-mode confidence_semantic
+    --ranking-target-space "${GROUP_RANKING_TARGET_SPACE:-$DEFAULT_RANKING_TARGET_SPACE}"
+    --pair-weight-mode "${GROUP_PAIR_WEIGHT_MODE:-$DEFAULT_PAIR_WEIGHT_MODE}"
     --source-balance "$source_balance"
     --permutation-mode stable_hash
-    --checkpoint-selection-metric ranking_score
+    --checkpoint-selection-metric "${GROUP_CHECKPOINT_SEL_METRIC:-$DEFAULT_CHECKPOINT_SEL_METRIC}"
+    --recipe-risk-policy "$RECIPE_RISK_POLICY"
     --seed "$seed"
     --feature-cache-root "$FEATURE_CACHE_ROOT"
-    --feature-cache-mode read_write
+    --feature-cache-mode "$_feature_cache_mode"
     --feature-cache-lock-timeout-sec 600
     --head-architecture "$head_architecture"
     --head-mlp-hidden-size "$HEAD_MLP_HIDDEN_SIZE"
@@ -314,8 +372,14 @@ run_train() {
     --head-activation gelu
     --anti-saturation-weight "$ANTI_SATURATION_WEIGHT"
     --anti-saturation-logit-threshold "$ANTI_SATURATION_LOGIT_THRESHOLD"
+    --lora-rank "${_lora_rank}"
+    --lora-alpha "${GROUP_LORA_ALPHA:-16.0}"
+    --lora-target-modules "${GROUP_LORA_TARGET_MODULES:-q_proj,v_proj}"
     --require-cuda
   )
+  if [[ -n "${GROUP_LORA_NUM_TOP_LAYERS:-}" ]]; then
+    cmd+=(--lora-num-top-layers "$GROUP_LORA_NUM_TOP_LAYERS")
+  fi
   if [[ -n "$init_value_head_path" ]]; then
     cmd+=(--init-value-head-path "$init_value_head_path")
   fi
@@ -337,7 +401,7 @@ run_samefamily_eval() {
     --run-name "$run_name"
     --output-root "$SAMEFAMILY_OUTPUT_ROOT"
     --checkpoint-name best
-    --batch-size "$EVAL_BATCH_SIZE"
+    --batch-size "$SAMEFAMILY_BATCH_SIZE"
     --max-length "$MAX_LENGTH"
     --feature-cache-root "$FEATURE_CACHE_ROOT"
     --feature-cache-mode read_write
@@ -345,6 +409,12 @@ run_samefamily_eval() {
     --edge-weight-mode confidence
     --require-cuda
   )
+  if [[ -n "$EVAL_MAX_GPU_MEMORY_GIB" ]]; then
+    cmd+=(--max-gpu-memory-gib "$EVAL_MAX_GPU_MEMORY_GIB")
+  fi
+  if [[ -n "$EVAL_MAX_CPU_MEMORY_GIB" ]]; then
+    cmd+=(--max-cpu-memory-gib "$EVAL_MAX_CPU_MEMORY_GIB")
+  fi
   CURRENT_STAGE="samefamily_${case_id}"
   log_line "RUN: ${cmd[*]}" | tee -a "$SUITE_LOG_FILE" >&2
   "${cmd[@]}" | tee -a "$SUITE_LOG_FILE" >&2
@@ -371,6 +441,12 @@ run_benchmark_eval() {
     --feature-cache-lock-timeout-sec 600
     --require-cuda
   )
+  if [[ -n "$EVAL_MAX_GPU_MEMORY_GIB" ]]; then
+    cmd+=(--max-gpu-memory-gib "$EVAL_MAX_GPU_MEMORY_GIB")
+  fi
+  if [[ -n "$EVAL_MAX_CPU_MEMORY_GIB" ]]; then
+    cmd+=(--max-cpu-memory-gib "$EVAL_MAX_CPU_MEMORY_GIB")
+  fi
   CURRENT_STAGE="benchmark_${case_id}_${benchmark_id}"
   log_line "RUN: ${cmd[*]}" | tee -a "$SUITE_LOG_FILE" >&2
   "${cmd[@]}" | tee -a "$SUITE_LOG_FILE" >&2

@@ -346,6 +346,40 @@ def _purge_cache_entry_files(payload_path: Path, meta_path: Path) -> None:
             pass
 
 
+def _parse_lock_owner_pid(lock_path: Path) -> int | None:
+    """Read owner pid from one lock file, if it was written in the expected format."""
+    try:
+        text = lock_path.read_text(encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        return None
+    for line in text.splitlines():
+        if not line.startswith("pid="):
+            continue
+        raw_pid = line.split("=", 1)[1].strip()
+        try:
+            pid = int(raw_pid)
+        except Exception:  # noqa: BLE001
+            return None
+        return pid if pid > 0 else None
+    return None
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """Return whether one local process id still appears alive."""
+    if int(pid) <= 0:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Treat inaccessible live processes as alive to avoid overlapping writes.
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
 def save_feature_cache(
     *,
     cache_root: Path,
@@ -426,14 +460,24 @@ def _exclusive_lock(*, lock_path: Path, timeout_sec: float, poll_interval_sec: f
                 age_sec = max(0.0, time.time() - lock_path.stat().st_mtime)
             except FileNotFoundError:
                 continue
+            owner_pid = _parse_lock_owner_pid(lock_path)
+            owner_alive = owner_pid is not None and _pid_is_alive(owner_pid)
             if age_sec >= float(timeout_sec):
                 # Recover from abandoned lock files left by crashed writers.
                 # 如果旧进程崩溃遗留锁文件，就在超时阈值后清理它，避免后续 run 永久卡死。
                 # RISK WARNING:
-                # Staleness is inferred only from file mtime.  A live but slow
-                # writer that legitimately holds the lock longer than
-                # `timeout_sec` will look abandoned here, and a second writer
-                # can then steal the lock and overlap the critical section.
+                # Lock stealing based only on mtime is unsafe: a live but slow
+                # writer can look abandoned and a second writer may then enter
+                # the critical section concurrently. We therefore only steal
+                # the lock when the recorded owner pid is absent or dead.
+                if owner_alive:
+                    if (time.time() - started) >= float(timeout_sec):
+                        raise TimeoutError(
+                            "Timed out waiting feature-cache lock held by a live writer: "
+                            f"{lock_path} (owner_pid={owner_pid})"
+                        )
+                    time.sleep(float(poll_interval_sec))
+                    continue
                 try:
                     lock_path.unlink()
                     continue

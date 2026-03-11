@@ -61,6 +61,9 @@ EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-192}"
 HEAD_ARCHITECTURE="${HEAD_ARCHITECTURE:-mlp}"
 OBJECTIVE_MODE="${OBJECTIVE_MODE:-ranking_only}"
 PAIR_WEIGHT_MODE="${PAIR_WEIGHT_MODE:-confidence}"
+RANKING_TARGET_SPACE="${RANKING_TARGET_SPACE:-score}"
+CHECKPOINT_SELECTION_METRIC="${CHECKPOINT_SELECTION_METRIC:-pair_acc}"
+RECIPE_RISK_POLICY="${RECIPE_RISK_POLICY:-error}"
 SOURCE_BALANCE="${SOURCE_BALANCE:-none}"
 MAX_GPU_MEMORY_GIB="${MAX_GPU_MEMORY_GIB:-}"
 MAX_CPU_MEMORY_GIB="${MAX_CPU_MEMORY_GIB:-}"
@@ -161,9 +164,11 @@ for RATIO in "${TERMINAL_ANCHOR_RATIOS[@]}"; do
     --per-device-train-batch-size "$TRAIN_BATCH_SIZE"
     --per-device-eval-batch-size "$EVAL_BATCH_SIZE"
     --pair-weight-mode "$PAIR_WEIGHT_MODE"
+    --ranking-target-space "$RANKING_TARGET_SPACE"
     --source-balance "$SOURCE_BALANCE"
     --permutation-mode stable_hash
-    --checkpoint-selection-metric ranking_score
+    --checkpoint-selection-metric "$CHECKPOINT_SELECTION_METRIC"
+    --recipe-risk-policy "$RECIPE_RISK_POLICY"
     --seed "$SEED"
     --dtype bfloat16
     --device-map auto

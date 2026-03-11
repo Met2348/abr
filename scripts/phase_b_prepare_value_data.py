@@ -2395,15 +2395,16 @@ def _load_rollout_runtime_dependencies() -> dict[str, Any]:
 
 def _resolve_dtype(dtype_name: str, torch_module: Any):
     """Map a CLI dtype name onto one torch dtype object."""
+    dtype_name = str(dtype_name).strip().lower()
     if dtype_name == "auto":
         if torch_module.cuda.is_available():
             return torch_module.bfloat16
         return torch_module.float32
-    if dtype_name == "float32":
+    if dtype_name in {"float32", "fp32"}:
         return torch_module.float32
-    if dtype_name == "float16":
+    if dtype_name in {"float16", "fp16"}:
         return torch_module.float16
-    if dtype_name == "bfloat16":
+    if dtype_name in {"bfloat16", "bf16"}:
         return torch_module.bfloat16
     raise ValueError(f"Unsupported dtype: {dtype_name}")
 

@@ -2,6 +2,958 @@
 
 This repository is building an in-house reasoning-faithfulness pipeline from scratch.
 
+## 2026-03-13 Breakthrough Verification
+
+Newest verification report:
+
+1. `docs/phase_e_latest_breakthrough_verification_20260312.md`
+   - verifies the newest `PBR26` / `PBR31` breakthrough claims
+   - corrected status:
+     - `PBR26` = best verified frozen benchmark candidate, not RL-ready
+     - `PBR31` = best verified LoRA balance so far, not Math-AUC SOTA, not RL-ready
+
+## 2026-03-13 Phase F Controller Sweep
+
+New artifact:
+
+1. [controller sweep summary](/home/zling/y/bcr/ref/assets/artifacts/phase_f_controller_sweep/phase_f_controller_sweep_0312_main_20260311T181216Z/summary.md)
+
+What changed:
+
+1. the earlier `F2 FAIL` conclusion was correct for the old `baseline_immediate` controller;
+2. but once we sweep multiple controller families offline, the picture changes sharply.
+
+Best redesigned controller results:
+
+1. `pbr19_math`
+   - old baseline: `0.5537`
+   - `threshold_only tau=0.38`: `0.8674`
+2. `pbr21_math`
+   - old baseline: `0.5588`
+   - `threshold_only tau=0.35`: `0.8641`
+3. `pbr26_math`
+   - old baseline: `0.5752`
+   - `threshold_only tau=0.38`: `0.8639`
+4. `pbr19_gsm`
+   - old baseline: `0.6713`
+   - `delayed_drop`: `0.9052`
+5. `pbr26_gsm`
+   - old baseline: `0.6509`
+   - `delayed_drop`: `0.9053`
+
+Shared simple policies also transfer well:
+
+1. `threshold_only tau=0.42`
+   - mean `balanced_f1 = 0.8552`
+2. `delayed_drop tau=0.42 delta=0.25 min_step=4`
+   - mean `balanced_f1 = 0.8501`
+
+Interpretation:
+
+1. verifier quality is now strong enough for a real heuristic controller baseline;
+2. the immediate next step is **controller redesign + live validation**;
+3. RL is no longer the first thing to do.
+
+## 2026-03-13 Eval Provenance Hardening
+
+One more repository-wide audit pass closed a real trust risk in `Phase B/C/D/E`
+standalone evaluation:
+
+1. older eval paths could silently replace a requested `best` checkpoint with
+   `final`;
+2. some `posthoc_calibration=from_run` paths could silently replace the missing
+   `best` calibrator with `final`.
+
+Current rule:
+
+1. default = strict `fail`
+2. legacy fallback requires explicit opt-in:
+   - `--checkpoint-missing-policy fallback_final`
+   - `--posthoc-missing-policy fallback_final`
+3. any fallback is now persisted into:
+   - `metrics.json`
+   - `manifest.json`
+   - `summary.md`
+   - console logs
+
+Affected entrypoints:
+
+1. `scripts/phase_b_eval_faithfulness.py`
+2. `scripts/phase_c_eval_pik.py`
+3. `scripts/phase_d_eval_external_pairs.py`
+4. `scripts/phase_e_eval_benchmark.py`
+5. `scripts/phase_e_eval_samefamily_trust.py`
+
+Minimal verification commands:
+
+```bash
+python -u scripts/phase_b_eval_faithfulness.py \
+  --value-run-dir <phase_c_run_dir> \
+  --eval-dir <phase_c_eval_dir> \
+  --checkpoint-name best \
+  --checkpoint-missing-policy fail
+
+python -u scripts/phase_c_eval_pik.py \
+  --value-run-dir <phase_c_pik_run_dir> \
+  --eval-dir <phase_c_pik_eval_dir> \
+  --checkpoint-name best \
+  --checkpoint-missing-policy fail \
+  --posthoc-calibration from_run \
+  --posthoc-missing-policy fail
+```
+
+This audit pass also rechecked benchmark leakage:
+
+1. the primary `Phase E` source-bundle training path does **not** directly ingest
+   `ProcessBench` or `PRMBench` benchmark test files;
+2. benchmark-facing scripts remain separated as:
+   - eval
+   - alignment audit
+   - curated research utilities
+
+Newest focused report:
+
+1. `docs/phase_e_paradigm_refresh_experiments_20260311.md`
+   - plain-language explanation of newer verifier / PRM terminology
+   - targeted repair sweep around `PBR10`
+   - clean conclusion:
+     - `PRX1` helps terminal completeness
+   - `PRX2 dual_head` helps terminal ordering but damages same-family verifier quality
+
+## 2026-03-12 Phase F Audit Correction
+
+The current `Phase F` audit is **not fully green**.
+
+What is supported by artifact:
+
+1. `threshold / generator-shift` audit
+2. `reward-hacking` probe
+
+What was overstated and is now corrected:
+
+1. the earlier doc wording around `F2 ABR-lite` was too optimistic
+2. raw artifact:
+   - [summary.json](/home/zling/y/bcr/ref/assets/artifacts/phase_f_simulation/pbr19_math_abr_lite_0312/summary.json)
+3. corrected numbers:
+   - `balanced_f1=0.3388`
+   - `positive_f1=0.7806`
+   - `acc_erroneous=0.9882`
+   - `acc_correct=0.2044`
+   - `mean_step_fraction=0.3524`
+
+Correct interpretation:
+
+1. the offline controller catches errors very aggressively,
+2. but it wrongly stops too many all-correct traces,
+3. so `Phase F live RL / ABR-lite promotion` is **not yet justified**.
+
+## 2026-03-11 Frontier Suite: Three New Directions On The Strongest Shared Artifact
+
+Newest frontier wrapper:
+
+1. `scripts/run_phase_e_frontier_suite.sh`
+
+It tests three directions that are all motivated by the newer verifier
+literature:
+
+1. `F1_JUDGE_FILTER_PBR10`
+   - idea:
+     - use a stronger math judge as a conservative offline denoiser
+   - command:
+```bash
+RUN_PREFIX=phase_e_frontier_judge_$(date +%m%d_%H%M) \
+ACTIVE_PHASE_E_FRONTIER_GROUP=F1_JUDGE_FILTER_PBR10 \
+BENCH_MAX_SAMPLES=192 \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_e_frontier_suite.sh
+```
+2. `F2_DUAL_HEAD_PBR10`
+   - idea:
+     - split local-vs-terminal scoring pressure with `dual_head`
+   - command:
+```bash
+RUN_PREFIX=phase_e_frontier_dual_$(date +%m%d_%H%M) \
+ACTIVE_PHASE_E_FRONTIER_GROUP=F2_DUAL_HEAD_PBR10 \
+BENCH_MAX_SAMPLES=192 \
+CUDA_VISIBLE_DEVICES=3 \
+bash scripts/run_phase_e_frontier_suite.sh
+```
+3. `F3_LORA_PBR10`
+   - idea:
+     - test whether the remaining bottleneck is representation-limited
+   - command:
+```bash
+RUN_PREFIX=phase_e_frontier_lora_$(date +%m%d_%H%M) \
+ACTIVE_PHASE_E_FRONTIER_GROUP=F3_LORA_PBR10 \
+BENCH_MAX_SAMPLES=192 \
+CUDA_VISIBLE_DEVICES=0 \
+bash scripts/run_phase_e_frontier_suite.sh
+```
+
+Important current intermediate finding:
+
+1. `judge-filter` already shows a strong negative contract result on the shared
+   `PBR10` artifact:
+   - artifact:
+     - `assets/artifacts/phase_e_pairs/phase_e_frontier_judge_0311_2031_judgefilter__88888f79419b`
+   - all `1783` auditable `local_first_bad_edge` pairs were dropped as
+     `parse_failed`
+   - the resulting train set contains:
+     - `4679 sibling_branch`
+     - `485 terminal_completion_anchor`
+     - `0 local_first_bad_edge`
+2. interpretation:
+   - the current strict judge contract does not act as a useful local denoiser;
+   - it changes the data geometry instead.
+
+## 2026-03-11 Latest Mainline State
+
+The repository now has one new benchmark-facing mainline that materially changes
+the earlier picture:
+
+1. code audit:
+   - A-E implementation paths were re-audited;
+   - highest-risk infra issues fixed this round:
+     - feature-cache live-writer lock stealing,
+     - Phase B silent `best -> final` eval fallback provenance,
+     - dtype alias drift across A/B/C entrypoints.
+2. method:
+   - the new strong path is no longer pure `Math-Shepherd` local supervision;
+   - it is `math_step_dpo_v1` curation + `Qwen2.5-Math-PRM-7B` backbone + `mlp` head.
+3. benchmark:
+   - `PBR10 mlp` reached:
+     - `ProcessBench Math`: `AUC=0.863`, `F1_oracle=0.659`, `F1_fixed@0.5=0.654`
+     - `ProcessBench GSM8K`: `AUC=0.873`, `F1_oracle=0.724`, `F1_fixed@0.5=0.693`
+4. architecture interpretation:
+   - `gated_mlp` improves held-out ranking and edge metrics,
+   - but hurts fixed-threshold F1,
+   - so it remains a secondary probe rather than the main deployment head.
+5. infrastructure:
+   - all active `run_phase_e*.sh` wrappers now pass explicit `--recipe-risk-policy`;
+   - direct `scripts/phase_e_train_value.py` now defaults to `pair_acc` checkpoint selection.
+6. research direction:
+   - after refreshing the literature to 2026-03, the repository should treat the
+     scalar value head as a bounded-support verifier baseline rather than the
+     assumed final RL-ready object.
+7. broader verifier refresh:
+   - the newest `2025H2 -> 2026-03` evidence further says the future mainline
+     should not be `single scalar verifier`;
+   - it should be:
+     - separate answer verifier,
+     - `invalid / abstain / escalate` behavior,
+     - weak-ensemble or teacher-assisted hard-slice labeling,
+     - factorized ABR student outputs,
+     - and stricter `process-outcome alignment + format robustness` gates.
+
+Primary reference document for this update:
+
+1. `docs/phase_abcde_impl_audit_and_redesign_20260311.md`
+2. `docs/phase_e_literature_refresh_20260311.md`
+3. `docs/phase_e_rl_ready_research_redesign_20260311.md`
+
+### Follow-Up Validation: Teammate Breakthrough Report
+
+The teammate report contained one strong claim that needed local validation:
+
+1. `Math-PRM-7B frozen backbone` is the real breakthrough
+2. and the newest `PRX1` line may now be the strongest candidate
+
+The local evidence audit now supports the first claim, but not the second.
+
+#### Controlled backbone evidence
+
+`FLB2` comparison on recent ProcessBench evals:
+
+| case | backbone | GSM AUC | GSM F1 | Math AUC | Math F1 |
+|---|---|---:|---:|---:|---:|
+| `FLB2 math-instruct gated` | `Qwen2.5-Math-7B-Instruct` | `0.7461` | `0.5158` | `0.7423` | `0.4275` |
+| `FLB2 prm-backbone mlp` | `Qwen2.5-Math-PRM-7B` | `0.8581` | `0.7148` | `0.8313` | `0.6276` |
+
+This is a real step change. The backbone breakthrough is not speculative.
+
+#### Current strong-candidate comparison
+
+Oracle ProcessBench:
+
+| case | GSM AUC | GSM F1 | Math AUC | Math F1 |
+|---|---:|---:|---:|---:|
+| `PBR10 mlp` | `0.8730` | `0.7243` | `0.8631` | `0.6589` |
+| `PBR12` | `0.9093` | `0.7523` | `0.8874` | `0.6439` |
+| `PBR21` | `0.9045` | `0.7565` | `0.8697` | `0.6632` |
+| `PRX1` | `0.8869` | `0.7518` | `0.8529` | `0.6482` |
+
+Fixed-threshold `0.5`:
+
+| case | GSM F1@0.5 | Math F1@0.5 |
+|---|---:|---:|
+| `PBR12` | `0.7023` | `0.6344` |
+| `PBR21` | `0.7185` | `0.6051` |
+| `PRX1`  | `0.7454` | `0.6040` |
+
+Interpretation:
+
+1. `PRX1` is not a clean global replacement for `PBR12 / PBR21`;
+2. it is strongest on the checked `GSM fixed@0.5` slice;
+3. but `PBR12` still owns the best `Math AUC`;
+4. and `PBR21` still owns the best `Math oracle F1`.
+
+So the correct headline is:
+
+1. the PRM-backbone breakthrough is real;
+2. the repo now has a strong candidate triangle:
+   - `PBR12`
+   - `PBR21`
+   - `PRX1`
+3. but there is not yet one single globally dominant winner.
+
+## 2026-03-11 Fresh A-E Audit + New ProcessBench Transfer Follow-Up
+
+This pass combined:
+
+1. one fresh A-E implementation audit,
+2. one new Phase E transfer-profile sweep,
+3. and one new architecture follow-up on the strongest newly discovered data profile.
+
+### Fresh Audit Result
+
+The repository is no longer in a broad “implementation instability” state:
+
+1. `PYTHONPATH=src pytest -q tests/unit`
+   - `217 passed, 2 warnings`
+2. active `run_phase_*.sh` entrypoints:
+   - syntax clean
+
+One newly confirmed high-risk bug was fixed:
+
+1. file:
+   - `scripts/phase_a_prepare.py`
+2. old behavior:
+   - in `official` split mode, prepared rows were written according to the
+     requested CLI `--source-split`, even when the dataset loader had already
+     resolved that request to another effective split
+3. risk:
+   - test rows could silently land in `validation.jsonl`
+4. fix:
+   - official-mode routing now uses the effective loader-provided
+     `metadata["source_split"]`
+   - emitted rows preserve both:
+     - `source_split`
+     - `requested_source_split`
+5. regression:
+   - `tests/unit/test_phase_a_prepare_script.py`
+
+### New Transfer Experiments
+
+#### `NDS5_MS_STRICT_ONLY_SMOKE`
+
+```bash
+CUDA_DEVICE=2 \
+TARGET_TOTAL_PAIRS=4096 \
+BENCH_MAX_SAMPLES=96 \
+TRAIN_BATCH_SIZE=64 \
+EVAL_BATCH_SIZE=96 \
+ACTIVE_PHASE_E_NDS_GROUP=NDS5_MS_STRICT_ONLY_SMOKE \
+RUN_PREFIX=phase_e_nds5_strictonly_0311 \
+bash scripts/run_phase_e_newdataset_suite.sh
+```
+
+Result:
+
+1. `PB GSM`: `pair_acc=0.4048`, `auc=0.4210`, `first_edge=0.5122`
+2. `PB Math`: `pair_acc=0.3876`, `auc=0.4321`, `first_edge=0.5957`
+
+Interpretation:
+
+1. removing `fanout/grid` alone does not fix transfer;
+2. the old failure is not just length bias.
+
+#### `NDS6_RLHFLOW_STRICT_ONLY_SMOKE`
+
+```bash
+CUDA_DEVICE=2 \
+TARGET_TOTAL_PAIRS=4096 \
+BENCH_MAX_SAMPLES=96 \
+TRAIN_BATCH_SIZE=64 \
+EVAL_BATCH_SIZE=96 \
+ACTIVE_PHASE_E_NDS_GROUP=NDS6_RLHFLOW_STRICT_ONLY_SMOKE \
+RUN_PREFIX=phase_e_nds6_rlhstrict_0311 \
+bash scripts/run_phase_e_newdataset_suite.sh
+```
+
+Result:
+
+1. `PB GSM`: `pair_acc=0.6224`, `auc=0.5022`, `first_edge=0.6585`
+2. `PB Math`: `pair_acc=0.4357`, `auc=0.4520`, `first_edge=0.6383`
+
+Interpretation:
+
+1. better step labels alone help some local edge behavior,
+2. but strict-only geometry is still not enough.
+
+#### `NDS7_MS_DPO_CALIBRATED_SMOKE`
+
+```bash
+CUDA_DEVICE=2 \
+TARGET_TOTAL_PAIRS=4096 \
+BENCH_MAX_SAMPLES=96 \
+TRAIN_BATCH_SIZE=64 \
+EVAL_BATCH_SIZE=96 \
+ACTIVE_PHASE_E_NDS_GROUP=NDS7_MS_DPO_CALIBRATED_SMOKE \
+RUN_PREFIX=phase_e_nds7_dpocal_0311 \
+bash scripts/run_phase_e_newdataset_suite.sh
+```
+
+Result (`mlp`):
+
+1. `PB GSM`: `pair_acc=0.5374`, `auc=0.5575`, `first_edge=0.5854`
+2. `PB Math`: `pair_acc=0.5301`, `auc=0.5594`, `first_edge=0.7234`
+
+Interpretation:
+
+1. `Math-Step-DPO sibling_branch` supervision is clearly more benchmark-aligned
+   than strict-only variants;
+2. this was the first new smoke in this pass that improved both `Math AUC` and
+   `Math first_edge` together.
+
+### Architecture Follow-Up: `NDS7 + gated_mlp`
+
+Shared curated data:
+
+1. `local_first_bad_edge = 1474`
+2. `sibling_branch = 1831`
+3. `terminal_completion_anchor = 387`
+
+3-seed benchmark summary:
+
+| seed | GSM pair_acc | GSM auc | GSM first_edge | Math pair_acc | Math auc | Math first_edge |
+|---|---:|---:|---:|---:|---:|---:|
+| 42 | 0.6565 | 0.6456 | 0.8049 | 0.7992 | 0.7519 | 0.7447 |
+| 1  | 0.6531 | 0.6514 | 0.7805 | 0.8052 | 0.7260 | 0.7872 |
+| 7  | 0.7177 | 0.6817 | 0.7073 | 0.8253 | 0.7601 | 0.7021 |
+
+Aggregate:
+
+1. `PB GSM`
+   - `pair_acc = 0.6757 ± 0.0297`
+   - `auc = 0.6596 ± 0.0158`
+   - `first_edge = 0.7642 ± 0.0415`
+2. `PB Math`
+   - `pair_acc = 0.8099 ± 0.0112`
+   - `auc = 0.7460 ± 0.0145`
+   - `first_edge = 0.7447 ± 0.0347`
+
+Relative to the older `PBR5B ms_prm_align_v1 + gated_mlp` line:
+
+1. `PB GSM AUC`: `~0.589 -> ~0.660`
+2. `PB Math AUC`: `~0.613 -> ~0.746`
+
+This is a real step change, not noise-level movement.
+
+### Updated Diagnosis
+
+The repo is no longer stuck in the older failure mode:
+
+1. not “frozen-head ProcessBench transfer is broadly broken”;
+2. not “the head cannot learn benchmark-facing ranking”;
+3. and not “fanout/grid length bias is the whole problem”.
+
+The new narrower bottleneck is:
+
+1. `DPO sibling_branch` is now the strongest current signal carrier;
+2. with `gated_mlp`, local and global benchmark ranking are already strong;
+3. the main residual weakness is **all-correct terminal completion ordering**.
+
+That means the next repair stage should stop searching for generic better
+sources and instead target terminal completion directly while preserving the new
+DPO-driven local gains.
+
+### Terminal-Residual Repair Sweep (`seed=42`, controlled comparison)
+
+To avoid mixing source, objective, and head changes in one opaque jump, a
+three-way controlled sweep was run around the `NDS7` baseline:
+
+1. data-level repair:
+   - `ms_dpo_terminalboost_v1`
+2. loss-level repair:
+   - `NDS7 + terminal BCE`
+3. architecture-level repair:
+   - `NDS7 + dual_head + terminal BCE`
+
+Representative commands:
+
+```bash
+# A) data-level repair: terminal-boosted pair curation
+python -u scripts/phase_e_curate_processbench_transfer_pairs.py \
+  --profile ms_dpo_terminalboost_v1 \
+  --run-name phase_e_nds8_termboost_0311_pairs \
+  --output-root assets/artifacts/phase_e_pairs \
+  --seed 42 \
+  --validation-ratio 0.1 \
+  --split-granularity source_sample \
+  --target-total-pairs 4096 \
+  --min-pair-confidence 0.55
+
+# B) train on the terminal-boost artifact
+CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_e_train_value.py \
+  --train-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_nds8_termboost_0311_pairs__480ab06bf8d6/train_pairs.jsonl \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_nds8_termboost_0311_pairs__480ab06bf8d6/validation_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_e_nds8_termboost_gated_pilot_value_retry2 \
+  --output-root assets/artifacts/phase_e_runs \
+  --objective-mode joint \
+  --learning-rate 3e-5 \
+  --num-train-epochs 5 \
+  --per-device-train-batch-size 16 \
+  --per-device-eval-batch-size 32 \
+  --max-length 1024 \
+  --lambda-ranking 1.0 \
+  --lambda-bce 1.0 \
+  --ranking-margin 0.02 \
+  --ranking-target-space score \
+  --pair-weight-mode none \
+  --source-balance none \
+  --permutation-mode stable_hash \
+  --checkpoint-selection-metric pair_acc \
+  --seed 42 \
+  --feature-cache-root assets/artifacts/phase_e_feature_cache \
+  --feature-cache-mode read_write \
+  --head-architecture gated_mlp \
+  --head-mlp-hidden-size 1024 \
+  --head-dropout-prob 0.05 \
+  --head-init-std 0.02 \
+  --head-activation gelu \
+  --anti-saturation-weight 5e-4 \
+  --anti-saturation-logit-threshold 3.5 \
+  --max-gpu-memory-gib 24 \
+  --max-cpu-memory-gib 256 \
+  --require-cuda
+
+# C) same data, loss-level repair
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_e_train_value.py \
+  --train-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_nds7_dpocal_0311_nds7_ms_dpo_calibrated_mlp_ms_dpo_calibrated_v1_pairs__ffabba63a6bf/train_pairs.jsonl \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_nds7_dpocal_0311_nds7_ms_dpo_calibrated_mlp_ms_dpo_calibrated_v1_pairs__ffabba63a6bf/validation_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_e_nds7_termbce_gated_pilot_value_retry1 \
+  --output-root assets/artifacts/phase_e_runs \
+  --objective-mode joint \
+  --learning-rate 3e-5 \
+  --num-train-epochs 5 \
+  --per-device-train-batch-size 16 \
+  --per-device-eval-batch-size 32 \
+  --max-length 1024 \
+  --lambda-ranking 1.0 \
+  --lambda-bce 1.0 \
+  --terminal-bce-lambda 0.25 \
+  --ranking-margin 0.02 \
+  --ranking-target-space score \
+  --pair-weight-mode none \
+  --source-balance none \
+  --permutation-mode stable_hash \
+  --checkpoint-selection-metric pair_acc \
+  --seed 42 \
+  --feature-cache-root assets/artifacts/phase_e_feature_cache \
+  --feature-cache-mode read_write \
+  --head-architecture gated_mlp \
+  --head-mlp-hidden-size 1024 \
+  --head-dropout-prob 0.05 \
+  --head-init-std 0.02 \
+  --head-activation gelu \
+  --anti-saturation-weight 5e-4 \
+  --anti-saturation-logit-threshold 3.5 \
+  --max-gpu-memory-gib 24 \
+  --max-cpu-memory-gib 256 \
+  --require-cuda
+
+# D) same data, architecture-level repair
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_e_train_value.py \
+  --train-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_nds7_dpocal_0311_nds7_ms_dpo_calibrated_mlp_ms_dpo_calibrated_v1_pairs__ffabba63a6bf/train_pairs.jsonl \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_nds7_dpocal_0311_nds7_ms_dpo_calibrated_mlp_ms_dpo_calibrated_v1_pairs__ffabba63a6bf/validation_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_e_nds7_dualhead_termbce_pilot_value \
+  --output-root assets/artifacts/phase_e_runs \
+  --objective-mode joint \
+  --learning-rate 3e-5 \
+  --num-train-epochs 5 \
+  --per-device-train-batch-size 16 \
+  --per-device-eval-batch-size 32 \
+  --max-length 1024 \
+  --lambda-ranking 1.0 \
+  --lambda-bce 1.0 \
+  --terminal-bce-lambda 0.25 \
+  --ranking-margin 0.02 \
+  --ranking-target-space score \
+  --pair-weight-mode none \
+  --source-balance none \
+  --permutation-mode stable_hash \
+  --checkpoint-selection-metric pair_acc \
+  --seed 42 \
+  --feature-cache-root assets/artifacts/phase_e_feature_cache \
+  --feature-cache-mode read_write \
+  --head-architecture dual_head \
+  --head-inference-alpha 0.65 \
+  --head-mlp-hidden-size 1024 \
+  --head-dropout-prob 0.05 \
+  --head-init-std 0.02 \
+  --head-activation gelu \
+  --anti-saturation-weight 5e-4 \
+  --anti-saturation-logit-threshold 3.5 \
+  --max-gpu-memory-gib 24 \
+  --max-cpu-memory-gib 256 \
+  --require-cuda
+```
+
+#### Baseline: `NDS7 + gated_mlp`
+
+| benchmark | pair_acc | auc | first_edge | terminal_top1 | terminal_gap |
+|---|---:|---:|---:|---:|---:|
+| `PB GSM8K` | `0.6565` | `0.6456` | `0.8049` | `0.2174` | `-0.1640` |
+| `PB Math`  | `0.7992` | `0.7519` | `0.7447` | `0.1538` | `-0.1461` |
+
+#### Repair A: data-level terminal boost
+
+Artifact / run:
+
+1. pair artifact:
+   - `assets/artifacts/phase_e_pairs/phase_e_nds8_termboost_0311_pairs__480ab06bf8d6`
+2. value run:
+   - `assets/artifacts/phase_e_runs/phase_e_nds8_termboost_gated_pilot_value_retry2_20260311T124818Z`
+
+ProcessBench:
+
+| benchmark | pair_acc | auc | first_edge | terminal_top1 | terminal_gap |
+|---|---:|---:|---:|---:|---:|
+| `PB GSM8K` | `0.6752` | `0.6816` | `0.7118` | `0.2798` | `-0.1038` |
+| `PB Math`  | `0.7316` | `0.7046` | `0.6848` | `0.1823` | `-0.1670` |
+
+Interpretation:
+
+1. GSM terminal ordering improved in a real way;
+2. Math suffered a local/global tradeoff;
+3. therefore "just add more terminal anchors" is not a safe global fix.
+
+#### Repair B: loss-level terminal BCE on original `NDS7`
+
+Run:
+
+1. `assets/artifacts/phase_e_runs/phase_e_nds7_termbce_gated_pilot_value_retry1_20260311T125922Z`
+
+ProcessBench:
+
+| benchmark | pair_acc | auc | first_edge | terminal_top1 | terminal_gap |
+|---|---:|---:|---:|---:|---:|
+| `PB GSM8K` | `0.6053` | `0.6612` | `0.6353` | `0.2073` | `-0.1383` |
+| `PB Math`  | `0.7229` | `0.7049` | `0.6555` | `0.1650` | `-0.1842` |
+
+Interpretation:
+
+1. terminal BCE alone does not solve the residual;
+2. it mostly hurts local/global behavior while barely helping terminal ordering.
+
+#### Repair C: `dual_head + terminal BCE` on original `NDS7`
+
+Run:
+
+1. `assets/artifacts/phase_e_runs/phase_e_nds7_dualhead_termbce_pilot_value_20260311T130037Z`
+
+ProcessBench:
+
+| benchmark | pair_acc | auc | first_edge | terminal_top1 | terminal_gap |
+|---|---:|---:|---:|---:|---:|
+| `PB GSM8K` | `0.8150` | `0.7489` | `0.7882` | `0.0829` | `-0.2312` |
+| `PB Math`  | `0.7820` | `0.7105` | `0.6806` | `0.0739` | `-0.2535` |
+
+Interpretation:
+
+1. `dual_head` creates a much stronger local verifier;
+2. but the current inference mixture catastrophically undervalues final correct
+   traces;
+3. the repository now has hard evidence that:
+   - local error detection
+   - and terminal completion ordering
+   are separable subproblems.
+
+### Updated Takeaway
+
+The next mainline should **not** be:
+
+1. more terminal data by default,
+2. or terminal BCE by default,
+3. or switching wholesale to `dual_head`.
+
+The safer conclusion is:
+
+1. keep `NDS7 + gated_mlp` as the balanced benchmark-facing baseline;
+2. treat terminal completion ordering as a narrow residual subtask;
+3. and fix it with a more explicit routing / calibration design rather than a
+   naive mixed objective.
+
+## 2026-03-11 Phase E Safety Audit Closure
+
+Static suite audit:
+
+```bash
+python -u scripts/phase_e_audit_suite_recipes.py \
+  --run-name phase_e_suite_recipe_audit_$(date +%m%d_%H%M)
+```
+
+Trainer sanity:
+
+```bash
+python -u scripts/phase_e_train_value.py --help | rg "checkpoint-selection-metric|recipe-risk-policy|train-oom-backoff"
+```
+
+Current evidence:
+1. first pass:
+   - `assets/artifacts/phase_e_audits/phase_e_suite_recipe_audit_0311_1931/summary.md`
+   - findings = `10`
+2. post-fix pass:
+   - `assets/artifacts/phase_e_audits/phase_e_suite_recipe_audit_postfix_0311_1933/summary.md`
+   - findings = `0`
+
+## 2026 Literature Refresh For Phase E
+
+Newer sources that materially change the design:
+1. `PRIME (2026)`:
+   - `https://arxiv.org/abs/2602.11570`
+   - verifier quality on process-outcome alignment strongly predicts RLVR effectiveness
+2. `Hard2Verify (2025)`:
+   - `https://arxiv.org/abs/2510.13744`
+   - open-source step verifiers still lag on frontier open-ended verification
+3. `RISE (2025)`:
+   - `https://arxiv.org/abs/2505.13445`
+   - self-verification should be trained jointly with reasoning, not bolted on later
+4. `VPRM (2026)`:
+   - `https://arxiv.org/abs/2601.17223`
+   - deterministic process verification can beat pure outcome verification in structured domains
+
+Repository interpretation:
+1. same-source held-out accuracy is no longer enough for RL-ready claims;
+2. the next experimental redesign should explicitly add:
+   - process-outcome alignment evaluation,
+   - critique / self-verification auxiliary training,
+   - deterministic verifier hooks wherever the task permits.
+
+Primary redesign note:
+1. `docs/phase_e_updated_literature_redesign_20260311.md`
+
+## 2026-03-11 Postfix Strict RL Re-Audit
+
+After the broad A-E audit and the Phase E safety closure, one more postfix pass
+closed the remaining evaluation-side loopholes and re-ran the newest
+`Qwen2.5-Math-PRM-7B` candidates under the stricter RL gate.
+
+What changed:
+
+1. selector hygiene:
+   - `scripts/phase_e_select_candidate.py`
+   - default `selection_policy=heldout_only`
+   - benchmark metrics remain promotion gates / canaries, but no longer rank
+     candidates by default
+2. intradataset checkpoint publication:
+   - `scripts/phase_e_select_intradataset_candidate.py`
+   - candidate reports now resolve `best/final` checkpoints explicitly instead
+     of publishing a bogus `<run_dir>/best_value_head.pt`
+3. samefamily PRM-7B crash handling:
+   - `src/ours/phase_e/runtime.py`
+   - batched encoding now synchronizes CUDA inside the retry block and treats
+     async capacity failures as retryable batch-backoff events
+
+Validation:
+
+1. `PYTHONPATH=src pytest -q tests/unit/test_phase_e_runtime.py tests/unit/test_phase_e_select_candidate.py tests/unit/test_phase_e_select_intradataset_candidate.py`
+   - `16 passed`
+2. `python -m py_compile src/ours/phase_e/runtime.py scripts/phase_e_select_candidate.py scripts/phase_e_select_intradataset_candidate.py scripts/phase_e_eval_samefamily_trust.py`
+
+Postfix reruns:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src python -u scripts/phase_e_eval_samefamily_trust.py \
+  --value-run-dir assets/artifacts/phase_e_runs/phase_e_pbr10_prm7b_dpo8k_s42_value_20260311T110527Z \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_pbr10_prm7b_dpo8k_s42__6184f7e62f65/validation_pairs.jsonl \
+  --run-name pbr10_s42_samefamily_fix0311 \
+  --output-root assets/artifacts/phase_e_samefamily_eval \
+  --checkpoint-name best \
+  --batch-size 96 \
+  --feature-cache-mode read_write \
+  --require-cuda
+
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src python -u scripts/phase_e_eval_samefamily_trust.py \
+  --value-run-dir assets/artifacts/phase_e_runs/phase_e_pbr13_pbr6_terminalBCE_s42_value_20260311T112822Z \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_ndsbh_0311_ndsbh2_math_step_dpo_mlp_math_step_dpo_v1_pairs__9e4e39b13902/validation_pairs.jsonl \
+  --run-name pbr13_s42_samefamily_fix0311 \
+  --output-root assets/artifacts/phase_e_samefamily_eval \
+  --checkpoint-name best \
+  --batch-size 96 \
+  --feature-cache-mode read_write \
+  --require-cuda
+```
+
+Strict diagnosis:
+
+```bash
+PYTHONPATH=src python -u scripts/phase_e_diagnose_transfer.py \
+  --run-name phase_e_transfer_diag_postfix0311_pbr10 \
+  --output-root assets/artifacts/phase_e_transfer_diag \
+  --audit-spec 'pbr10_dpo8k|math_mixed|assets/artifacts/phase_e_samefamily_eval/pbr10_s42_samefamily_fix0311_20260311T114318Z|assets/artifacts/phase_e_eval/pbr10_dpo8k_gsm_fulleval_20260311T112402Z|assets/artifacts/phase_e_eval/pbr10_dpo8k_math_fulleval_20260311T112402Z'
+
+PYTHONPATH=src python -u scripts/phase_e_diagnose_transfer.py \
+  --run-name phase_e_transfer_diag_postfix0311_pbr13 \
+  --output-root assets/artifacts/phase_e_transfer_diag \
+  --audit-spec 'pbr13_terminalbce|math_mixed|assets/artifacts/phase_e_samefamily_eval/pbr13_s42_samefamily_fix0311_20260311T113935Z|assets/artifacts/phase_e_eval/pbr13_terminalBCE_gsm_fulleval_20260311T112921Z|assets/artifacts/phase_e_eval/pbr13_terminalBCE_math_fulleval_20260311T112921Z'
+```
+
+Postfix conclusion:
+
+1. `pbr10_dpo8k` is the strongest current frozen-head checkpoint:
+   - samefamily `top1=0.9098`
+   - samefamily `local_first_bad=0.8981`
+   - `ProcessBench GSM F1=0.7334`
+   - `ProcessBench Math F1=0.6313`
+2. `pbr13_terminalbce` improves benchmark headline scores but still does not fix
+   terminal completion ordering, and it weakens samefamily trust.
+3. no current checkpoint clears the strict internal RL gate yet.
+4. the remaining blocker is no longer generic benchmark transfer collapse, but
+   **all-correct terminal completion undervaluation**.
+
+## 2026-03-11 Formal Judge Follow-Up: PRMBench Selected Relabel + ProcessBench Hard-Slice Adjudication
+
+Question:
+1. if we promote judge usage from pilot to formal experiments, does it now help on
+   `PRMBench_Preview selected relabel`?
+2. if we move judge to the safer benchmark side, can it adjudicate the hardest
+   `ProcessBench` failure slices?
+
+Short answer:
+1. not in the way that matters:
+   - formal `selected relabel` improved held-out `PRMBench_Preview`,
+   - but the judge itself only preserved `1/64` selected boundary pairs,
+   - so the gain is better read as `targeted pruning / truncation cleanup`, not
+     successful semantic relabel;
+2. no:
+   - on `ProcessBench` hard slices, current local judge is effectively unusable as
+     a benchmark-side adjudicator.
+
+New scripts:
+1. `scripts/phase_e_slice_pairs_by_margin.py`
+2. `scripts/phase_e_materialize_selected_relabel_pairs.py`
+3. `scripts/phase_e_prepare_processbench_hardslice_pairs.py`
+4. `scripts/run_phase_e_prmbench_selected_relabel_suite.sh`
+5. `scripts/run_phase_e_processbench_hardslice_adjudication_suite.sh`
+
+Commands actually executed:
+
+Formal `PRMBench_Preview selected relabel`:
+
+```bash
+RUN_PREFIX=phase_e_prmbench_selected_relabel_formal_0311 \
+SLICE_GPU=0 \
+JUDGE_GPU=1 \
+TRAIN_GPU=0 \
+bash scripts/run_phase_e_prmbench_selected_relabel_suite.sh
+```
+
+Formal `ProcessBench` benchmark-side hard-slice adjudication:
+
+```bash
+RUN_PREFIX=phase_e_processbench_hardslice_adj_0311_r2 \
+PREP_GPU=2 \
+JUDGE_GPU=3 \
+bash scripts/run_phase_e_processbench_hardslice_adjudication_suite.sh
+```
+
+Key results:
+1. `PRMBench_Preview selected relabel`
+   - selected slice:
+     - `64` lowest-abs-margin rows from `5407` train pairs
+     - `58/64` selected rows already had negative margin under baseline `E78`
+   - judge on selected slice:
+     - `both_parse_ok_rate = 0.0469`
+     - `pair_acc_majority = 0.0312`
+     - `label_preserving_keep_rate = 0.0156`
+   - materialized train set:
+     - `5344` rows total
+     - only `1` judge-kept row from the selected slice
+   - retrain vs baseline:
+     - `baseline_e78`: `pair_acc = 0.9521`, `auc = 0.9071`
+     - `selected_relabel`: `pair_acc = 0.9555`, `auc = 0.9207`
+2. `ProcessBench hard-slice adjudication`
+   - `math`:
+     - `29` pairs
+     - `both_parse_ok_rate = 0.0345`
+     - `pair_acc_majority = 0.1034`
+     - `label_preserving_keep_rate = 0.0000`
+   - `gsm8k`:
+     - `27` pairs
+     - `both_parse_ok_rate = 0.0370`
+     - `pair_acc_majority = 0.0000`
+     - `label_preserving_keep_rate = 0.0000`
+
+Interpretation:
+1. the formal `selected relabel` run does **not** show that local judge can now
+   semantically repair hard `PRMBench_Preview` labels;
+2. the observed held-out gain is much more plausibly explained by deleting the
+   hardest and most truncation-prone boundary rows:
+   - baseline train truncation:
+     - `frac_pairs_over_limit = 0.0146`
+     - `frac_pairs_identical_after_truncation = 0.0074`
+   - materialized train truncation:
+     - `frac_pairs_over_limit = 0.0067`
+     - `frac_pairs_identical_after_truncation = 0.0000`
+3. current local judge should therefore remain:
+   - an audit / disagreement / selective-pruning tool on judge-friendly pair data,
+   not:
+   - a trusted relabeler,
+   - or a benchmark-side adjudicator for `ProcessBench`.
+
+## 2026-03-11 Phase E Recipe Guard And Collapse Diagnosis
+
+`Phase E` 现在新增了两层基础设施防护：
+
+1. 训练前 recipe 风险检查
+   - 默认 `--recipe-risk-policy error`
+   - 会直接拦截仓库里已经确认会灾难性失败的组合
+2. 训练后 health 诊断
+   - 每个新 run 会自动产出：
+     - `recipe_risk.json`
+     - `training_health.json`
+     - `training_health.md`
+
+关键脚本：
+1. `scripts/phase_e_train_value.py`
+2. `scripts/phase_e_diagnose_training_collapse.py`
+
+直接复现实验：
+
+坏配方会被训练前直接拒绝：
+
+```bash
+python -u scripts/phase_e_train_value.py \
+  --train-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_ndsbh_0311_ndsbh3_ms_align_baseline_mlp_ms_align_v1_pairs__c2631693ee5b/train_pairs.jsonl \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_ndsbh_0311_ndsbh3_ms_align_baseline_mlp_ms_align_v1_pairs__c2631693ee5b/validation_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_e_recipe_guard_badprobe \
+  --max-train-samples 128 \
+  --max-eval-samples 64 \
+  --objective-mode joint \
+  --learning-rate 3e-5 \
+  --num-train-epochs 2 \
+  --per-device-train-batch-size 16 \
+  --per-device-eval-batch-size 16 \
+  --max-length 1024 \
+  --ranking-margin 0.02 \
+  --ranking-target-space logit \
+  --pair-weight-mode confidence_semantic \
+  --checkpoint-selection-metric ranking_score \
+  --recipe-risk-policy error
+```
+
+对历史坏 run 做统一复诊：
+
+```bash
+python -u scripts/phase_e_diagnose_training_collapse.py \
+  --run-dir assets/artifacts/phase_e_runs/phase_e_ms_trust_smoke_0310_1400_e1_math_shepherd_pair_learn_smoke_e1_math_shepherd_pair_learn_smoke_s42_value_20260310T060115Z
+```
+
 ## 2026-03-11 Pairwise Judge Benchmark And Filter Pilot
 
 Question:

@@ -777,8 +777,11 @@ def _resolve_dtype(dtype_name: str, torch_module: Any) -> Any:
         return "auto"
     mapping = {
         "float32": torch_module.float32,
+        "fp32": torch_module.float32,
         "float16": torch_module.float16,
+        "fp16": torch_module.float16,
         "bfloat16": torch_module.bfloat16,
+        "bf16": torch_module.bfloat16,
     }
     if dtype_name not in mapping:
         raise ValueError(f"Unsupported dtype: {dtype_name!r}")

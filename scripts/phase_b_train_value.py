@@ -4121,15 +4121,16 @@ def _linear_warmup_decay(step: int, *, warmup_steps: int, total_steps: int) -> f
 
 def _resolve_dtype(name: str, torch_module: Any):
     """Map a user-facing dtype string onto one torch dtype object."""
+    name = str(name).strip().lower()
     if name == "auto":
         if torch_module.cuda.is_available():
             return torch_module.bfloat16
         return torch_module.float32
-    if name == "float32":
+    if name in {"float32", "fp32"}:
         return torch_module.float32
-    if name == "float16":
+    if name in {"float16", "fp16"}:
         return torch_module.float16
-    if name == "bfloat16":
+    if name in {"bfloat16", "bf16"}:
         return torch_module.bfloat16
     raise ValueError(f"Unsupported dtype: {name}")
 

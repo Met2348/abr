@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# Changelog (prepend-only, newest first):
+# 2026-03-12 11:10: [FIX] Support Math-PRM-7B backbone (Qwen2RMConfig).
+#   AutoModelForCausalLM.from_pretrained fails for process_reward_model backbones.
+#   Now uses resolve_backbone_loader_family() to detect PRM family and falls back
+#   to AutoModel.from_pretrained, which successfully loads Qwen2ForProcessRewardModel.
+#   Math-PRM-7B hidden_states[-1] extraction is identical to CausalLM — no other changes.
+#   Math-PRM-7B 用 Qwen2RMConfig，不能用 AutoModelForCausalLM 加载，改用 AutoModel。
 """Train a Phase E value head while adapting the backbone with LoRA.
 
 English
@@ -61,6 +68,11 @@ from ours.phase_b.value_head import (  # noqa: E402
     write_value_head_config_json,
 )
 from ours.phase_d.external_pairs import ExternalPairRecord, load_external_pair_jsonl  # noqa: E402
+from ours.phase_e.recipe_safety import (  # noqa: E402
+    assess_phase_e_recipe_risk,
+    enforce_phase_e_recipe_risk,
+    render_phase_e_recipe_risk_console_report,
+)
 from ours.phase_e.runtime import import_runtime_deps, resolve_dtype, set_seed, stable_hash_order  # noqa: E402
 from ours.phase_e.training import (  # noqa: E402
     compute_external_pair_metrics,
@@ -207,7 +219,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--anti-saturation-weight", type=float, default=5e-4)
     parser.add_argument("--anti-saturation-logit-threshold", type=float, default=3.5)
     parser.add_argument("--reward-centering-weight", type=float, default=0.0)
-    parser.add_argument("--checkpoint-selection-metric", choices=["pair_acc", "auc", "ranking_score", "pair_loss"], default="ranking_score")
+    parser.add_argument("--checkpoint-selection-metric", choices=["pair_acc", "auc", "ranking_score", "pair_loss"], default="pair_acc")
+    parser.add_argument(
+        "--recipe-risk-policy",
+        choices=["off", "warn", "error"],
+        default="error",
+        help=(
+            "Preflight recipe risk policy. `error` is recommended for production-like "
+            "Phase E LoRA runs; use `warn` only for controlled diagnostic reproductions."
+        ),
+    )
     parser.add_argument("--logging-steps", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dtype", default="bfloat16")
@@ -591,17 +612,26 @@ def _attach_lora(
         layers_to_transform = list(range(start_idx, int(num_hidden_layers)))
     else:
         layers_to_transform = None
-    peft_cfg = LoraConfig(
-        task_type=TaskType.CAUSAL_LM,
+    # Qwen2ForProcessRewardModel lacks prepare_inputs_for_generation, so TaskType.CAUSAL_LM
+    # wrapping fails on older peft versions. FEATURE_EXTRACTION creates a plain PeftModel
+    # without any generation-specific attributes — safe for all backbone types.
+    # Qwen2ForProcessRewardModel 缺少 prepare_inputs_for_generation，旧版 peft 用
+    # CAUSAL_LM 会报错；FEATURE_EXTRACTION 不需要该方法，对所有 backbone 类型均安全。
+    _resolved_task_type = TaskType.FEATURE_EXTRACTION
+    # layers_pattern is only valid when layers_to_transform is also specified (peft constraint).
+    _lora_cfg_kwargs: dict = dict(
+        task_type=_resolved_task_type,
         inference_mode=False,
         r=int(rank),
         lora_alpha=int(alpha),
         lora_dropout=float(dropout),
         target_modules=list(target_modules),
         bias="none",
-        layers_to_transform=layers_to_transform,
-        layers_pattern="layers",
     )
+    if layers_to_transform is not None:
+        _lora_cfg_kwargs["layers_to_transform"] = layers_to_transform
+        _lora_cfg_kwargs["layers_pattern"] = "layers"
+    peft_cfg = LoraConfig(**_lora_cfg_kwargs)
     peft_model = get_peft_model(model, peft_cfg)
     return peft_model, {
         "rank": int(rank),
@@ -609,7 +639,7 @@ def _attach_lora(
         "dropout": float(dropout),
         "target_modules": list(target_modules),
         "layers_to_transform": layers_to_transform,
-        "layers_pattern": "layers",
+        "layers_pattern": ("layers" if layers_to_transform is not None else None),
     }
 
 
@@ -735,6 +765,7 @@ def main(argv: list[str] | None = None) -> int:
     config_json_path = run_dir / "value_head_config.json"
     eval_pair_scores_path = run_dir / "eval_pair_scores.jsonl"
     train_curve_path = run_dir / "train_curve.jsonl"
+    recipe_risk_path = run_dir / "recipe_risk.json"
 
     print("=" * 88)
     print("Phase E: Train Value Head with LoRA")
@@ -751,11 +782,28 @@ def main(argv: list[str] | None = None) -> int:
     print(f"grad_accum         : {args.gradient_accumulation_steps}")
     print(f"max_length         : {args.max_length}")
     print(f"pair_weight_mode   : {args.pair_weight_mode}")
+    print(f"selection_metric   : {args.checkpoint_selection_metric}")
+    print(f"recipe_risk_policy : {args.recipe_risk_policy}")
     print(f"head_architecture  : {args.head_architecture}")
     print(f"lora_rank          : {args.lora_rank}")
     print(f"lora_target_modules: {train_config.lora_target_modules}")
     print(f"lora_top_k_layers  : {train_config.lora_top_k_layers}")
     print("=" * 88)
+
+    recipe_risk_report = assess_phase_e_recipe_risk(
+        train_pair_summary=train_pair_stats,
+        train_config=train_config.to_dict(),
+    )
+    for line in render_phase_e_recipe_risk_console_report(recipe_risk_report):
+        print(line, flush=True)
+    enforce_phase_e_recipe_risk(
+        recipe_risk_report=recipe_risk_report,
+        policy=str(args.recipe_risk_policy),
+    )
+    recipe_risk_path.write_text(
+        json.dumps(recipe_risk_report, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
 
     tokenizer = AutoTokenizer.from_pretrained(str(args.model_path), trust_remote_code=True)
     synthesized_pad_token = ensure_tokenizer_has_pad_token(tokenizer)
@@ -784,12 +832,23 @@ def main(argv: list[str] | None = None) -> int:
 
     load_start = time.perf_counter()
     resolved_dtype = resolve_dtype(str(args.dtype), torch)
-    model = AutoModelForCausalLM.from_pretrained(
-        str(args.model_path),
-        torch_dtype=resolved_dtype,
-        low_cpu_mem_usage=True,
-        trust_remote_code=True,
-    )
+    _load_kwargs: dict = {
+        "torch_dtype": resolved_dtype,
+        "low_cpu_mem_usage": True,
+        "trust_remote_code": True,
+    }
+    from ours.phase_e.runtime import resolve_backbone_loader_family
+    _backbone_family = resolve_backbone_loader_family(model_path=str(args.model_path), trust_remote_code=True)
+    if _backbone_family == "process_reward_model":
+        # Math-PRM-7B uses Qwen2RMConfig / Qwen2ForProcessRewardModel — not a CausalLM.
+        # AutoModel loads it correctly via trust_remote_code; LoRA then attaches to the
+        # underlying Qwen2 transformer layers the same way as for standard CausalLM.
+        # Math-PRM-7B 使用自定义 Qwen2RMConfig，不能用 AutoModelForCausalLM 加载。
+        # 用 AutoModel + trust_remote_code 加载，LoRA 方式与普通 CausalLM 相同。
+        from transformers import AutoModel
+        model = AutoModel.from_pretrained(str(args.model_path), **_load_kwargs)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(str(args.model_path), **_load_kwargs)
     if synthesized_pad_token:
         maybe_resize_embeddings_for_tokenizer(backbone=model, tokenizer=tokenizer)
     if bool(args.gradient_checkpointing) and hasattr(model, "gradient_checkpointing_enable"):
@@ -1094,6 +1153,7 @@ def main(argv: list[str] | None = None) -> int:
         "train_config": train_config.to_dict(),
         "train_pair_summary": train_pair_stats,
         "eval_pair_summary": eval_pair_stats,
+        "recipe_risk": recipe_risk_report,
         "train_truncation_diagnostics": train_truncation_diagnostics,
         "eval_truncation_diagnostics": eval_truncation_diagnostics,
         "init_value_head": init_info,
@@ -1112,6 +1172,7 @@ def main(argv: list[str] | None = None) -> int:
             "value_head_config": str(config_json_path),
             "eval_pair_scores": str(eval_pair_scores_path),
             "train_curve": str(train_curve_path),
+            "recipe_risk": str(recipe_risk_path),
         },
     }
     summary = {
@@ -1121,6 +1182,7 @@ def main(argv: list[str] | None = None) -> int:
         "selection_metric": str(args.checkpoint_selection_metric),
         "selection_value": float(best_selection_value),
         "head_architecture": str(args.head_architecture),
+        "recipe_risk_max_severity": str(recipe_risk_report.get("max_severity", "info")),
         "lora_top_k_layers": train_config.lora_top_k_layers,
         "lora_target_modules": train_config.lora_target_modules,
         "eval_pairs": best_eval_metrics,
