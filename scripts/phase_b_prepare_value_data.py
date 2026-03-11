@@ -88,6 +88,10 @@ from ours.phase_b.value_targets import (  # noqa: E402
     summarize_prefix_artifacts,
     summarize_rollout_targets,
 )
+from ours.phase_b.value_head import (  # noqa: E402
+    ensure_tokenizer_has_pad_token,
+    maybe_resize_embeddings_for_tokenizer,
+)
 from ours.data.step_builder import StepBuildConfig, StepSequence  # noqa: E402
 
 
@@ -1292,11 +1296,7 @@ def _build_rollout_targets(
         adapter_path=(Path(config.adapter_path) if config.adapter_path is not None else None),
     )
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-    if tokenizer.pad_token_id is None:
-        if tokenizer.eos_token is not None:
-            tokenizer.pad_token = tokenizer.eos_token
-        else:
-            tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+    synthesized_pad_token = ensure_tokenizer_has_pad_token(tokenizer)
 
     model = AutoModelForCausalLM.from_pretrained(
         config.model_path,
@@ -1304,6 +1304,8 @@ def _build_rollout_targets(
         device_map=config.device_map,
         trust_remote_code=True,
     )
+    if synthesized_pad_token:
+        maybe_resize_embeddings_for_tokenizer(backbone=model, tokenizer=tokenizer)
     if config.adapter_path is not None:
         model = _attach_peft_adapter_for_inference(model, Path(config.adapter_path))
     model.eval()
@@ -1906,11 +1908,7 @@ def _build_corruption_rollout_targets_and_pair_quality(
         adapter_path=(Path(config.adapter_path) if config.adapter_path is not None else None),
     )
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-    if tokenizer.pad_token_id is None:
-        if tokenizer.eos_token is not None:
-            tokenizer.pad_token = tokenizer.eos_token
-        else:
-            tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+    synthesized_pad_token = ensure_tokenizer_has_pad_token(tokenizer)
 
     model = AutoModelForCausalLM.from_pretrained(
         config.model_path,
@@ -1918,6 +1916,8 @@ def _build_corruption_rollout_targets_and_pair_quality(
         device_map=config.device_map,
         trust_remote_code=True,
     )
+    if synthesized_pad_token:
+        maybe_resize_embeddings_for_tokenizer(backbone=model, tokenizer=tokenizer)
     if config.adapter_path is not None:
         model = _attach_peft_adapter_for_inference(model, Path(config.adapter_path))
     model.eval()

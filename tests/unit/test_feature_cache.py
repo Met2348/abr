@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import torch
 
 from ours.phase_b.feature_cache import (
     FEATURE_CACHE_SCHEMA_VERSION,
+    _exclusive_lock,
     build_cache_key,
     collect_path_signature,
     save_feature_cache,
@@ -87,6 +89,46 @@ def test_save_feature_cache_rewrites_corrupt_existing_entry(tmp_path: Path) -> N
     )
     assert loaded is not None
     assert torch.equal(loaded["features"], payload["features"])
+
+
+def test_exclusive_lock_timeout_can_overlap_live_writer(tmp_path: Path) -> None:
+    """Audit the current timeout-based lock stealing behavior explicitly."""
+    lock_path = tmp_path / ".write.lock"
+    events: list[tuple[str, float]] = []
+    failures: list[BaseException] = []
+    entered_a = threading.Event()
+
+    def writer_a() -> None:
+        try:
+            with _exclusive_lock(lock_path=lock_path, timeout_sec=0.2, poll_interval_sec=0.01):
+                events.append(("a_enter", time.perf_counter()))
+                entered_a.set()
+                time.sleep(0.35)
+                events.append(("a_exit", time.perf_counter()))
+        except BaseException as exc:  # pragma: no cover - test collects failures explicitly
+            failures.append(exc)
+
+    def writer_b() -> None:
+        entered_a.wait(timeout=1.0)
+        time.sleep(0.05)
+        try:
+            with _exclusive_lock(lock_path=lock_path, timeout_sec=0.2, poll_interval_sec=0.01):
+                events.append(("b_enter", time.perf_counter()))
+                time.sleep(0.02)
+                events.append(("b_exit", time.perf_counter()))
+        except BaseException as exc:  # pragma: no cover - test collects failures explicitly
+            failures.append(exc)
+
+    thread_a = threading.Thread(target=writer_a)
+    thread_b = threading.Thread(target=writer_b)
+    thread_a.start()
+    thread_b.start()
+    thread_a.join()
+    thread_b.join()
+
+    assert failures == []
+    timestamps = {name: ts for name, ts in events}
+    assert timestamps["b_enter"] < timestamps["a_exit"]
 
 
 def test_save_feature_cache_recovers_from_stale_lock(tmp_path: Path) -> None:

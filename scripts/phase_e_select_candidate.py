@@ -77,6 +77,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--suite-log-dirs",
         type=Path,
         nargs="+",
+        action="append",
         required=True,
         help="One or more Phase E suite log directories that contain final_summary.md and seed_results.jsonl",
     )
@@ -103,8 +104,32 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _flatten_suite_log_dirs(grouped_dirs: list[list[Path]]) -> list[Path]:
+    """展开并去重重复传入的 suite 目录列表。
+
+    某些 wrapper 会重复传入多次 `--suite-log-dirs DIR`。
+    这里统一把 argparse 返回的嵌套列表展开，并按首次出现顺序去重。
+
+    Flatten and deduplicate repeated suite-log-dir groups.
+
+    Some wrappers may repeat `--suite-log-dirs DIR` multiple times.
+    We normalize argparse's nested list into a flat first-seen-ordered list.
+    """
+    flattened: list[Path] = []
+    seen: set[str] = set()
+    for dir_group in grouped_dirs:
+        for suite_dir in dir_group:
+            suite_dir_key = str(suite_dir)
+            if suite_dir_key in seen:
+                continue
+            seen.add(suite_dir_key)
+            flattened.append(suite_dir)
+    return flattened
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = _build_parser().parse_args(argv)
+    args.suite_log_dirs = _flatten_suite_log_dirs(args.suite_log_dirs)
     for suite_dir in args.suite_log_dirs:
         if not suite_dir.exists():
             raise FileNotFoundError(f"--suite-log-dirs entry not found: {suite_dir}")
@@ -181,6 +206,46 @@ def _seed_score(row: SeedCandidateRow, required_benchmark_ids: list[str]) -> flo
         + 0.15 * benchmark_pair_mean
         + 0.20 * benchmark_auc_mean
     )
+
+
+def _resolve_seed_checkpoint_path(value_run_dir: Path) -> tuple[str, list[str]]:
+    """Resolve the checkpoint path a candidate report should publish.
+
+    English
+    -------
+    Historical Phase E runs are not uniform:
+    1. some wrote `best_value_head.pt`,
+    2. some only retained `final_value_head.pt`,
+    3. and some manifests point at absolute paths outside the run directory.
+
+    Candidate reports must therefore resolve the path explicitly instead of
+    blindly concatenating `<run_dir>/best_value_head.pt`.
+    """
+    notes: list[str] = []
+    manifest_path = value_run_dir / "manifest.json"
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        output_files = dict(manifest.get("output_files", {}))
+        best_path_text = str(output_files.get("best_value_head") or "").strip()
+        if best_path_text:
+            best_path = Path(best_path_text)
+            if best_path.exists():
+                return str(best_path), notes
+        final_path_text = str(output_files.get("final_value_head") or "").strip()
+        if final_path_text:
+            final_path = Path(final_path_text)
+            if final_path.exists():
+                notes.append("best checkpoint missing; resolved best_checkpoint_path to final_value_head")
+                return str(final_path), notes
+    best_path = value_run_dir / "best_value_head.pt"
+    if best_path.exists():
+        return str(best_path), notes
+    final_path = value_run_dir / "final_value_head.pt"
+    if final_path.exists():
+        notes.append("best checkpoint missing; resolved best_checkpoint_path to final_value_head")
+        return str(final_path), notes
+    notes.append("best checkpoint path unresolved")
+    return str(best_path), notes
 
 
 def _build_group_summary(
@@ -296,7 +361,8 @@ def _build_group_summary(
         )
         best_seed_score, best_row = per_seed_scored[0]
         best_seed = int(best_row.seed)
-        best_checkpoint_path = str(Path(best_row.value_run_dir) / "best_value_head.pt")
+        best_checkpoint_path, checkpoint_notes = _resolve_seed_checkpoint_path(Path(best_row.value_run_dir))
+        notes.extend(f"best_seed={best_seed}: {note}" for note in checkpoint_notes)
 
     return GroupCandidateSummary(
         group_id=str(header.get("group_id") or suite_log_dir.name),

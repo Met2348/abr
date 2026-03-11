@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
 """Select the best same-source Phase E candidate under an ACC90 objective.
 
-Why this file exists
---------------------
-The existing `phase_e_select_candidate.py` assumes benchmark-native trust is the
-main target. For the user's current Phase E pivot, that is the wrong target.
+这个脚本只回答一个更窄的问题：在单个数据集自己的 held-out pair 上，
+当前 value head 能不能把 chosen / rejected 分得足够开。
+This script only answers a narrower question: on one dataset's own held-out
+pairs, can the current value head separate chosen from rejected strongly enough.
 
-This script only asks one narrower question:
+为什么这个文件存在：
+1. 旧的 `phase_e_select_candidate.py` 主要面向 benchmark-native trust。
+2. 对当前 `ACC90` 分支来说，这个目标太宽了。
+Why this file exists:
+1. The older `phase_e_select_candidate.py` mainly targets benchmark-native trust.
+2. That target is too broad for the current `ACC90` branch.
 
-1. On one dataset's own held-out split, can the value head discriminate chosen
-   vs rejected pairs with very high accuracy?
-2. Across recipe sweeps, which checkpoint is the strongest same-source
-   candidate?
-3. Did any group clear the explicit ACC90 gate?
+这个脚本只问三件事：
+1. 单数据集 held-out discriminability 是否足够高？
+2. 多个 recipe 里哪个 same-source candidate 最强？
+3. 有没有组真正通过了显式 `ACC90` gate？
+This script only asks three things:
+1. Is single-dataset held-out discriminability high enough?
+2. Which same-source candidate is strongest across recipe sweeps?
+3. Did any group actually clear the explicit `ACC90` gate?
 """
 
 from __future__ import annotations
@@ -65,7 +73,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Select same-source Phase E candidates under a held-out ACC90 objective."
     )
-    parser.add_argument("--suite-log-dirs", type=Path, nargs="+", required=True)
+    # 修复点：wrapper 会重复传入多次 `--suite-log-dirs DIR`。
+    # 这里用 `append + nargs='+'` 接住所有出现，再在 parse 阶段展开。
+    # Bug fix: the wrapper repeats `--suite-log-dirs DIR` multiple times.
+    # We accept all occurrences via `append + nargs='+'` and flatten later.
+    parser.add_argument(
+        "--suite-log-dirs",
+        type=Path,
+        nargs="+",
+        action="append",
+        required=True,
+    )
     parser.add_argument("--run-name", default="phase_e_intradataset_candidate")
     parser.add_argument(
         "--output-root",
@@ -81,8 +99,53 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _flatten_suite_log_dirs(grouped_dirs: list[list[Path]]) -> list[Path]:
+    """展开并去重重复传入的 suite 目录列表。
+
+    关键输入：
+    - `grouped_dirs`: argparse 在 `append + nargs='+'` 下返回的嵌套列表。
+
+    关键输出：
+    - 按首次出现顺序展开后的 `Path` 列表。
+
+    边界行为：
+    - 重复目录会被去重，避免同一 group 被重复统计。
+
+    简短示例：
+    - `[[Path("a")], [Path("b"), Path("c")], [Path("a")]]`
+      -> `[Path("a"), Path("b"), Path("c")]`
+
+    Flatten and deduplicate repeated suite-log-dir groups.
+
+    Key inputs:
+    - `grouped_dirs`: nested lists returned by argparse under
+      `append + nargs='+'`.
+
+    Key outputs:
+    - a flattened `Path` list that preserves first-seen order.
+
+    Edge behavior:
+    - duplicate directories are removed so one group is not counted twice.
+
+    Short example:
+    - `[[Path("a")], [Path("b"), Path("c")], [Path("a")]]`
+      -> `[Path("a"), Path("b"), Path("c")]`
+    """
+    flattened: list[Path] = []
+    seen: set[str] = set()
+    for dir_group in grouped_dirs:
+        for suite_dir in dir_group:
+            suite_dir_key = str(suite_dir)
+            if suite_dir_key in seen:
+                continue
+            seen.add(suite_dir_key)
+            flattened.append(suite_dir)
+    return flattened
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = _build_parser().parse_args(argv)
+    args.suite_log_dirs = _flatten_suite_log_dirs(args.suite_log_dirs)
     for suite_dir in args.suite_log_dirs:
         if not suite_dir.exists():
             raise FileNotFoundError(f"Missing suite log dir: {suite_dir}")

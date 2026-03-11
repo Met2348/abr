@@ -54,9 +54,15 @@ from ours.phase_b.feature_cache import (  # noqa: E402
 )
 from ours.phase_b.value_head import (  # noqa: E402
     encode_text_features,
+    ensure_tokenizer_has_pad_token,
     load_value_head_checkpoint,
+    maybe_resize_embeddings_for_tokenizer,
 )
 from ours.phase_d.external_pairs import ExternalPairRecord, load_external_pair_jsonl  # noqa: E402
+from ours.phase_e.training import (  # noqa: E402
+    compute_pair_truncation_diagnostics,
+    validate_pair_truncation_diagnostics,
+)
 
 
 @dataclass(slots=True)
@@ -78,6 +84,7 @@ class EvalRuntimeConfig:
     feature_cache_root: str
     feature_cache_mode: str
     feature_cache_lock_timeout_sec: float
+    max_truncation_over_limit_fraction: float
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -96,6 +103,7 @@ class EvalRuntimeConfig:
             "feature_cache_root": self.feature_cache_root,
             "feature_cache_mode": self.feature_cache_mode,
             "feature_cache_lock_timeout_sec": self.feature_cache_lock_timeout_sec,
+            "max_truncation_over_limit_fraction": self.max_truncation_over_limit_fraction,
         }
 
 
@@ -151,6 +159,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default="read_write",
     )
     parser.add_argument("--feature-cache-lock-timeout-sec", type=float, default=600.0)
+    parser.add_argument(
+        "--max-truncation-over-limit-fraction",
+        type=float,
+        default=0.10,
+        help=(
+            "Fail fast if more than this fraction of external pairs exceed max_length. "
+            "This prevents heavily truncated evals from looking like genuine model failures."
+        ),
+    )
     return parser
 
 
@@ -169,6 +186,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--batch-size must be > 0")
     if args.max_length is not None and int(args.max_length) <= 8:
         raise ValueError("--max-length must be > 8")
+    if not (0.0 <= float(args.max_truncation_over_limit_fraction) <= 1.0):
+        raise ValueError("--max-truncation-over-limit-fraction must be in [0, 1]")
     if float(args.feature_cache_lock_timeout_sec) <= 0.0:
         raise ValueError("--feature-cache-lock-timeout-sec must be > 0")
     args.feature_cache_mode = validate_feature_cache_mode(str(args.feature_cache_mode))
@@ -223,11 +242,7 @@ def main(argv: list[str] | None = None) -> int:
         adapter_path=(Path(str(adapter_path)) if adapter_path else None),
     )
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-    if tokenizer.pad_token_id is None:
-        if tokenizer.eos_token is not None:
-            tokenizer.pad_token = tokenizer.eos_token
-        else:
-            tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+    synthesized_pad_token = ensure_tokenizer_has_pad_token(tokenizer)
 
     model_load_kwargs: dict[str, Any] = {
         "device_map": device_map,
@@ -253,12 +268,15 @@ def main(argv: list[str] | None = None) -> int:
     print(f"device_map        : {device_map}")
     print(f"batch_size        : {args.batch_size}")
     print(f"max_length        : {max_length}")
+    print(f"trunc_overlimit_max: {float(args.max_truncation_over_limit_fraction):.4f}")
     print(f"feature_cache_mode: {args.feature_cache_mode}")
     print(f"feature_cache_root: {args.feature_cache_root}")
     print("=" * 88)
 
     model_load_start = time.perf_counter()
     backbone = AutoModelForCausalLM.from_pretrained(str(model_path), **model_load_kwargs)
+    if synthesized_pad_token:
+        maybe_resize_embeddings_for_tokenizer(backbone=backbone, tokenizer=tokenizer)
     if adapter_path:
         backbone = _attach_peft_adapter_for_inference(backbone, Path(str(adapter_path)))
     backbone.eval()
@@ -271,6 +289,17 @@ def main(argv: list[str] | None = None) -> int:
 
     chosen_texts = [pair.chosen_input_text() for pair in external_pairs]
     rejected_texts = [pair.rejected_input_text() for pair in external_pairs]
+    truncation_diagnostics = compute_pair_truncation_diagnostics(
+        pairs=external_pairs,
+        tokenizer=tokenizer,
+        max_length=int(max_length),
+        batch_size=int(args.batch_size),
+    )
+    validate_pair_truncation_diagnostics(
+        diagnostics=truncation_diagnostics,
+        context_label="Phase D external pair eval",
+        max_allowed_over_limit_fraction=float(args.max_truncation_over_limit_fraction),
+    )
 
     feature_cache_root = Path(args.feature_cache_root)
     backbone_signature = build_backbone_signature(
@@ -376,6 +405,7 @@ def main(argv: list[str] | None = None) -> int:
         "median_margin": float(statistics.median(margins)),
         "by_source": by_source,
         "by_domain": by_domain,
+        "truncation_diagnostics": truncation_diagnostics,
         "model_load_seconds": float(model_load_elapsed),
         "encode_seconds": float(encode_elapsed),
         "feature_cache": feature_cache_stats,
@@ -398,6 +428,7 @@ def main(argv: list[str] | None = None) -> int:
         feature_cache_root=str(feature_cache_root),
         feature_cache_mode=str(args.feature_cache_mode),
         feature_cache_lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
+        max_truncation_over_limit_fraction=float(args.max_truncation_over_limit_fraction),
     )
     manifest_out = {
         "artifact_stage": "phase_d_external_pair_eval",
@@ -409,6 +440,7 @@ def main(argv: list[str] | None = None) -> int:
             "adapter_path": adapter_path,
             "tokenizer_path": tokenizer_path,
         },
+        "truncation_diagnostics": truncation_diagnostics,
         "value_run_manifest": str(manifest_path),
         "value_head_checkpoint": str(checkpoint_path),
         "output_files": {
@@ -433,11 +465,30 @@ def main(argv: list[str] | None = None) -> int:
         f"- mean_margin: `{metrics['mean_margin']:.6f}`",
         f"- median_margin: `{metrics['median_margin']:.6f}`",
         "",
+        "## Truncation Diagnostics",
+        "",
+        f"- frac_pairs_over_limit: `{float(truncation_diagnostics['overall']['frac_pairs_over_limit']):.6f}`",
+        f"- frac_pairs_identical_after_truncation: `{float(truncation_diagnostics['overall']['frac_pairs_identical_after_truncation']):.6f}`",
+        f"- frac_pairs_first_diff_after_cutoff: `{float(truncation_diagnostics['overall']['frac_pairs_first_diff_after_cutoff']):.6f}`",
+        "",
+        "| source | frac_over_limit | frac_collapse_after_cut | frac_hidden_diff_after_cut |",
+        "|---|---:|---:|---:|",
+    ]
+    for source, payload in sorted(truncation_diagnostics.get("by_source", {}).items()):
+        summary_lines.append(
+            f"| {source} | {float(payload['frac_pairs_over_limit']):.4f} | "
+            f"{float(payload['frac_pairs_identical_after_truncation']):.4f} | "
+            f"{float(payload['frac_pairs_first_diff_after_cutoff']):.4f} |"
+        )
+    summary_lines.extend(
+        [
+            "",
         "## By Source",
         "",
         "| source | n | pair_acc | auc | mean_margin |",
         "|---|---:|---:|---:|---:|",
-    ]
+        ]
+    )
     for source, payload in sorted(by_source.items()):
         summary_lines.append(
             f"| {source} | {payload['n']} | {payload['pair_accuracy']:.4f} | "
@@ -468,6 +519,10 @@ def _resolve_checkpoint_path(*, value_run_dir: Path, run_manifest: dict[str, Any
             if path.exists():
                 return path
         # fallback keeps this script robust for runs without best checkpoint saved.
+        # RISK WARNING:
+        # When this fallback triggers, the operator asked for "best" but the
+        # script evaluates the final checkpoint instead.  That behavior is easy
+        # to miss in retrospective experiment analysis.
         final_path = files.get("final_value_head")
         if isinstance(final_path, str) and final_path.strip():
             path = Path(final_path)

@@ -98,6 +98,126 @@ Operational implication:
    - we have obtained one bounded-support process reward model that may guide
      conservative RL inside the same distribution.
 
+## 0.2 Empirical Diagnosis: Head Capacity vs Training Sufficiency
+
+The intradataset ACC90 branch already produced a useful structural diagnosis.
+
+What is now supported by evidence:
+1. `Math-Shepherd`
+   - `E40_MS_ACC90_LINEAR_ROBUST_SEED3`
+   - `mean_heldout_pair_acc = 0.9172`
+   - `mean_heldout_auc = 0.8623`
+   - therefore the linear head is already sufficient to solve the same-source
+     held-out discrimination task.
+2. `Math-Shepherd` still benefits from a stronger head:
+   - `E41/E42/E43` move same-source performance into the `0.96 ~ 0.99` pair
+     accuracy range.
+   - therefore higher capacity helps, but here it is an improvement over a
+     working baseline, not a rescue from complete underfitting.
+3. `PRMBench_Preview`
+   - `E44_PRMBENCH_ACC90_LINEAR_SEED3`
+     - `mean_heldout_pair_acc = 0.7380`
+   - `E45_PRMBENCH_ACC90_MLP_RANK_SEED3`
+     - `mean_heldout_pair_acc = 0.9315`
+   - `E46_PRMBENCH_ACC90_MLP_JOINT_SEED3`
+     - `mean_heldout_pair_acc = 0.9309`
+   - therefore this source does provide strong evidence that the linear head
+     can be too simple.
+4. Weak runs cannot be explained by under-training alone:
+   - `E12_MS_TRUST_LOWLR_SEED3`
+   - `mean_heldout_pair_acc = 0.5853`
+   - `mean_heldout_auc = 0.5856`
+   - so "lower LR + more epochs" is not a universal explanation.
+
+Methodological implication:
+1. head capacity is a source-specific issue, not one global yes/no diagnosis;
+2. future Phase E design should treat architecture choice as
+   dataset-conditioned;
+3. high same-source held-out ACC still does **not** imply cross-task
+   trustworthiness.
+
+## 0.3 RL Trustworthiness: What Is Still Missing?
+
+The current literature does **not** support one universal rule such as:
+1. `pair_acc > 0.90` means a value head is already ready for RL,
+2. or `auc > 0.90` means the utility is already trustworthy.
+
+The more defensible consensus is operational:
+1. strong same-source held-out discrimination is necessary;
+2. it is not sufficient;
+3. reward/value models that will be used inside optimization loops must also
+   remain meaningful under stronger selection pressure.
+
+### Literature-guided reading
+
+1. `PRM800K / Let's Verify Step by Step`
+   - process supervision can produce useful reward signals,
+   - but usefulness is demonstrated through downstream policy gains, not one
+     isolated held-out scalar metric.
+2. `ProcessBench`
+   - many apparently competent PRMs still fail explicit process-error
+     identification.
+3. `PRMBench`
+   - process verification quality is multi-dimensional and harder than simple
+     pair classification.
+4. `The Lessons of Developing PRMs`
+   - label quality, evaluation design, and optimization behavior dominate
+     naive comfort metrics.
+5. `ThinkPRM`, `R-PRM`, `VersaPRM`
+   - stronger verifier formulations and richer supervision are often needed
+     when the final goal is robust process judgement under optimization.
+
+### Practical trust rule for this repository
+
+For the current RL-faithfulness objective, a head should only be called
+`trustworthy enough for bounded same-source RL use` if:
+1. same-source held-out discrimination is strong:
+   - `mean_pair_acc >= 0.90`
+   - `mean_auc >= 0.90`
+   - low seed variance
+2. the behavior is stable:
+   - no worst-seed collapse,
+   - no obvious margin collapse,
+   - no brittle flip under a small recipe change
+3. same-family policy-level benefit is shown:
+   - reranking / rejection / conservative search should improve answer or
+     process quality inside that same dataset family
+4. same-family local-faithfulness checks are positive
+5. even then, the correct narration remains:
+   - bounded-support utility,
+   - not universal verifier.
+
+### What we already have
+
+1. `Math-Shepherd`
+   - same-source held-out metrics are already strong:
+     - `E40`: `0.9172 / 0.8623`
+     - `E41`: `0.9863 / 0.9056`
+     - `E42`: `0.9641 / 0.9408`
+     - `E43`: `0.9619 / 0.9425`
+2. `PRMBench_Preview`
+   - same-source held-out metrics are strong once `MLP` is used:
+     - `E45`: `0.9315 / 0.8711`
+     - `E46`: `0.9309 / 0.9057`
+
+### What is still missing
+
+1. same-family policy-improvement evidence
+   - we have not yet shown that these heads reliably improve reranking,
+     branching, or conservative search on their own source family
+2. same-family local-faithfulness evidence
+   - we have pair discrimination,
+   - but not yet a stronger same-family local-error gate for all candidate
+     heads
+3. robustness under optimization pressure
+   - we have not yet shown that high-scoring processes are not merely
+     exploiting source-specific shortcuts
+
+Therefore the current correct statement is:
+1. same-source learnability is now established on some sources;
+2. RL-level trustworthiness is **not yet** established, even after ignoring
+   cross-dataset transfer.
+
 ### 0.1A Data-Semantics Risk Update
 
 Mentor audit identified one adapter-level 一级风险, and this has now been
@@ -137,6 +257,170 @@ Interpretation rule after the fix:
    pooled with post-fix runs.
 5. Detailed audit record:
    - `docs/data_semantics_risk_audit_20260310.md`
+
+### 0.1B Internet-Guided ProcessBench Redesign Update (2026-03-11)
+
+The newest internet literature/community scan changed the practical reading of
+the current `ProcessBench` blocker.
+
+Sources checked in this round:
+1. `Let's Verify Step by Step (PRM800K)`:
+   - https://arxiv.org/abs/2305.20050
+2. `OmegaPRM`:
+   - https://arxiv.org/abs/2406.06592
+3. `ProcessBench`:
+   - https://arxiv.org/abs/2412.06559
+   - https://github.com/QwenLM/ProcessBench
+4. `PRMBench`:
+   - https://arxiv.org/abs/2501.03124
+5. `The Lessons of Developing PRMs`:
+   - https://arxiv.org/abs/2501.07301
+6. `PathFinder-PRM`:
+   - https://arxiv.org/abs/2501.11690
+   - https://github.com/Gen-Verse/PathFinder-PRM
+
+What these sources jointly imply for this repo:
+1. same-source learnability is real,
+   but benchmark transfer remains structurally hard;
+2. preserving local first-error supervision is still necessary;
+3. wider `later-bad` / completion support should be added as bounded auxiliary
+   supervision, not as an equal-mass replacement;
+4. hierarchy-aware or expert-style heads can be worth trying,
+   but they only matter after the training support is re-curated coherently.
+
+That directly led to a new local redesign:
+1. new curated profiles:
+   - `ms_core_v1`
+   - `ms_align_v1`
+   - `ms_prm_align_v1`
+2. new trainer weighting modes:
+   - `semantic`
+   - `confidence_semantic`
+3. new research wrapper:
+   - `scripts/run_phase_e_processbench_research_suite.sh`
+
+Current smoke outcome on `2026-03-11`:
+1. the best new case is `pbr2_ms_align_gated`
+   - same-family:
+     - `top1 = 0.8947`
+     - `local_first_bad = 0.9231`
+   - `ProcessBench GSM8K`:
+     - `auc = 0.4713`
+     - `first_edge = 0.5600`
+     - `terminal_top1 = 0.5806`
+   - `ProcessBench Math`:
+     - `auc = 0.5055`
+     - `first_edge = 0.5357`
+     - `terminal_top1 = 0.6154`
+2. compared with `E87`:
+   - AUC improved on both `gsm8k` and `math`,
+   - terminal completion improved strongly on both,
+   - same-family trust improved materially,
+   - but `first_edge` and `good_vs_laterbad` still stay below the current
+     RL-facing gate.
+3. current diagnosis therefore changed from:
+   - `terminal signal missing`
+   to:
+   - `later-bad generalization and benchmark-first-edge preservation remain the
+     next blocking canaries`.
+
+Operational conclusion:
+1. keep the conservative aligned curate profile and semantic weighting;
+2. keep `gated_mlp` as the strongest current research candidate;
+3. do not promote the current curriculum variant to the mainline;
+4. the next repair should target:
+   - `later-bad` generalization,
+   - while explicitly preserving `first_edge`,
+   - instead of continuing to push terminal anchors harder.
+
+### 0.1C Second Internet Scan And Experiment Design (2026-03-11 — second pass)
+
+Additional papers found in the second internet scan (beyond the first-round coverage):
+
+1. `ThinkPRM` (generative step verifier, +7.2% F1 on ProcessBench vs scalar PRM):
+   - https://arxiv.org/abs/2504.09418
+2. `GenPRM` (AAAI 2026, generative PRM with visible rationale):
+   - https://arxiv.org/abs/2504.00891
+3. `PathFinder-PRM` (hierarchical error-typing, PRMBench SOTA 67.7):
+   - https://arxiv.org/abs/2501.11690
+4. `PRIME` (online implicit PRM via DPO log-ratio reward):
+   - https://arxiv.org/abs/2502.01456
+5. `VersaPRM` (multi-domain self-filtering):
+   - https://arxiv.org/abs/2504.08481
+6. `OmegaPRM` (MCTS sibling-branch pairs, binary-search first-error):
+   - https://arxiv.org/abs/2406.06592
+7. `Full-Step-DPO` (DPO applied at every step, not just outcome):
+   - related to step-level DPO work
+8. `BiPRM` (bidirectional backbone for richer local features):
+   - see VersaPRM discussion
+
+Key joint lesson from this round:
+1. the strongest frozen-head scalar PRMs on ProcessBench all rely on
+   richer supervision geometry than local-first-bad only;
+2. `all_good_vs_all_bad` grid supervision is the closest in-dataset
+   approximation to MC-step estimation without additional rollouts;
+3. inter-seed variance at smoke scale (4096 pairs) is expected to be
+   high; scaling to 16384 pairs is the minimum for stable estimates.
+
+New data profile added:
+1. `ms_laterbad_v1` (in `scripts/phase_e_curate_processbench_transfer_pairs.py`):
+   - `ms_strict` 40% (unchanged vs ms_align_v1), semantic_weight 1.0
+   - `ms_fanout` 20% (unchanged vs ms_align_v1), semantic_weight 0.9
+   - `ms_laterbad` 30% — `all_good_vs_all_bad` filtered via `pair_type_allowlist`
+     to only `lastsafe_vs_laterbad` + `earlygood_vs_laterbad` pair types, semantic_weight 0.85
+   - `ms_terminal` 10% (unchanged), semantic_weight 0.40
+   - Key: the `pair_type_allowlist` filter (via `classify_step_label_pair_type`
+     in `src/ours/phase_e/processbench_alignment.py`) ensures only later-bad
+     pair types are included, avoiding overlap with strict/fanout coverage.
+   - Required new infrastructure: `CurateComponent.pair_type_allowlist` field,
+     `_filter_rows_by_pair_type` function in the curate script.
+
+New experiment groups added to `scripts/run_phase_e_processbench_research_suite.sh`:
+1. `PBR2_FULL_MIXED_MLP_SEED3`:
+   - profile: `ms_align_v1`, head: `mlp`, 3 seeds (42/1/7)
+   - target pairs: 16384 (via `GROUP_TARGET_PAIRS=16384`)
+   - success criterion: median pb_math_auc >= 0.58, pb_gsm_auc >= 0.52
+   - failure criterion: inter-seed AUC range > 0.05 (recipe unstable)
+2. `PBR3_LATER_BAD_BRANCH_SEED3`:
+   - profile: `ms_laterbad_v1`, head: `mlp`, 3 seeds (42/1/7)
+   - target pairs: 16384
+   - success criterion: pb_math_auc improves vs PBR2, first_edge regression <= 0.05
+   - failure criterion: first_edge < 0.45 (grid fraction too heavy)
+
+Infrastructure changes (2026-03-11):
+1. extended case spec to 6-field format: `case_id|mode|profile|head|balance|seed`
+2. added `GROUP_TARGET_PAIRS` to allow per-group artifact scale override
+3. `run_curate` and `run_train` now accept per-case seed argument
+
+Research note:
+- `docs/research_survey_processverifier_20260311.md` contains the full
+  literature survey and experiment hypothesis chain from both internet rounds.
+
+Architecture research findings (2026-03-11 second round):
+1. **All PRMs achieving >75% ProcessBench fine-tune the backbone** (at minimum LoRA).
+   Frozen backbone is a representation gap, not a capacity gap. No head change can fix it.
+2. `dual_head` architecture is already implemented in `src/ours/phase_b/value_head.py`,
+   but the training loop has no `pair_semantics` routing logic yet.
+   Without routing, `dual_head` ≈ wider `gated_mlp` with same expected outcome.
+3. Step-position metadata injection (append `step_frac + is_terminal` to pooled vector)
+   is a low-cost experiment that can give the gate explicit structural context.
+   Blocked on: `training.py` and `phase_e_train_value.py` not plumbing aux metadata yet.
+4. mean_pool is NOT recommended for causal LMs (confirmed by all published PRM papers).
+   Do not implement mean_pool ablation — it is a known worse design.
+5. LoRA on last 4 Qwen2.5-7B layers = the highest-impact architecture change.
+   Blocked on: feature cache invalidation and on-the-fly encoding fallback.
+   Priority: after PBR2/PBR3 ceiling is confirmed.
+Full analysis: `docs/research_survey_processverifier_20260311.md` section 9.
+
+Execution order (after this design):
+1. run `PBR2_FULL_MIXED_MLP_SEED3` first to establish full-scale baseline;
+2. if PBR2 is stable (seed variance < 0.05), run `PBR3_LATER_BAD_BRANCH_SEED3`;
+3. if PBR3 first_edge holds (>= 0.45), it becomes the new mainline profile;
+4. if frozen-backbone ProcessBench AUC ceiling is confirmed below 0.65 after PBR3,
+   enter the LoRA backbone path (new Phase E-LoRA suite, separate design);
+5. `dual_head` with pair_semantics routing is a parallel medium-priority option
+   if the data geometry is confirmed stable but local-vs-terminal objective conflict
+   is confirmed as the remaining gap.
 
 ---
 

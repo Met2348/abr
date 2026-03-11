@@ -91,6 +91,10 @@ from ours.phase_b import (  # noqa: E402
     load_phase_b_rows,
     summarize_rows,
 )
+from ours.phase_b.value_head import (  # noqa: E402
+    ensure_tokenizer_has_pad_token,
+    maybe_resize_embeddings_for_tokenizer,
+)
 
 
 @dataclass(slots=True)
@@ -955,8 +959,7 @@ def main() -> int:
     print("model_load       : start")
     # Stage 2: tokenizer/model 加载。
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=False)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    synthesized_pad_token = ensure_tokenizer_has_pad_token(tokenizer)
     tokenizer.padding_side = "right"
 
     model_load_kwargs: dict[str, Any] = {
@@ -973,6 +976,8 @@ def main() -> int:
 
 
     model = AutoModelForCausalLM.from_pretrained(args.model_path, **model_load_kwargs)
+    if synthesized_pad_token:
+        maybe_resize_embeddings_for_tokenizer(backbone=model, tokenizer=tokenizer)
 
 
     # 开启梯度检查点以换显存；在长序列下通常比纯提速更重要。

@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-FEATURE_CACHE_SCHEMA_VERSION = "phase_feature_cache_v2"
+FEATURE_CACHE_SCHEMA_VERSION = "phase_feature_cache_v3"
 _VALID_CACHE_MODES = {"off", "read", "write", "read_write"}
 
 
@@ -429,6 +429,11 @@ def _exclusive_lock(*, lock_path: Path, timeout_sec: float, poll_interval_sec: f
             if age_sec >= float(timeout_sec):
                 # Recover from abandoned lock files left by crashed writers.
                 # 如果旧进程崩溃遗留锁文件，就在超时阈值后清理它，避免后续 run 永久卡死。
+                # RISK WARNING:
+                # Staleness is inferred only from file mtime.  A live but slow
+                # writer that legitimately holds the lock longer than
+                # `timeout_sec` will look abandoned here, and a second writer
+                # can then steal the lock and overlap the critical section.
                 try:
                     lock_path.unlink()
                     continue

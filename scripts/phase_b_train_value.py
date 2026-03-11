@@ -105,9 +105,11 @@ from ours.phase_b.value_head import (  # noqa: E402
     SigmoidValueHead,
     ValueHeadConfig,
     encode_text_features,
+    ensure_tokenizer_has_pad_token,
     freeze_backbone,
     infer_backbone_hidden_size,
     load_value_head_checkpoint,
+    maybe_resize_embeddings_for_tokenizer,
     save_value_head_checkpoint,
     write_value_head_config_json,
 )
@@ -1167,11 +1169,7 @@ def main(argv: list[str] | None = None) -> int:
     resolved_dtype = _resolve_dtype(args.dtype, torch)
     tokenizer_path = _resolve_tokenizer_load_path(model_path=model_path, adapter_path=(Path(adapter_path) if adapter_path else None))
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-    if tokenizer.pad_token_id is None:
-        if tokenizer.eos_token is not None:
-            tokenizer.pad_token = tokenizer.eos_token
-        else:
-            tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+    synthesized_pad_token = ensure_tokenizer_has_pad_token(tokenizer)
 
     model_load_kwargs: dict[str, Any] = {
         "device_map": args.device_map,
@@ -1183,6 +1181,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         model_load_kwargs["torch_dtype"] = resolved_dtype
     backbone = AutoModelForCausalLM.from_pretrained(model_path, **model_load_kwargs)
+    if synthesized_pad_token:
+        maybe_resize_embeddings_for_tokenizer(backbone=backbone, tokenizer=tokenizer)
     if adapter_path is not None:
         backbone = _attach_peft_adapter_for_inference(backbone, Path(adapter_path))
     freeze_backbone(backbone)

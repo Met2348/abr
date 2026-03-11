@@ -78,6 +78,8 @@ def prepare_phase_e_pair_artifact(
     max_pairs_total: int | None,
     max_pairs_per_source: int | None,
     min_pair_confidence: float,
+    split_granularity: str = "pair_id",
+    global_cap_mode: str = "pair_id_head",
     source_weight_overrides: dict[str, float] | None = None,
     resume: bool,
     overwrite: bool,
@@ -105,6 +107,12 @@ def prepare_phase_e_pair_artifact(
         raise ValueError("`validation_ratio` must be in (0, 0.5)")
     if not (0.0 <= float(min_pair_confidence) <= 1.0):
         raise ValueError("`min_pair_confidence` must be in [0, 1]")
+    if str(split_granularity) not in {"pair_id", "source_sample"}:
+        raise ValueError("`split_granularity` must be one of {'pair_id', 'source_sample'}")
+    if str(global_cap_mode) not in {"pair_id_head", "balanced_support_bucket"}:
+        raise ValueError(
+            "`global_cap_mode` must be one of {'pair_id_head', 'balanced_support_bucket'}"
+        )
 
     # We fingerprint the *full* artifact contract, not just the source bundle
     # name.  Any meaningful change in split seed, filtering, pair mode, or
@@ -120,6 +128,8 @@ def prepare_phase_e_pair_artifact(
             "max_pairs_total": max_pairs_total,
             "max_pairs_per_source": max_pairs_per_source,
             "min_pair_confidence": float(min_pair_confidence),
+            "split_granularity": str(split_granularity),
+            "global_cap_mode": str(global_cap_mode),
             "source_weight_overrides": dict(sorted((source_weight_overrides or {}).items())),
             "build_config": asdict(build_config),
             "source_specs": [spec.to_dict() for spec in source_specs],
@@ -193,13 +203,18 @@ def prepare_phase_e_pair_artifact(
     ]
     dedup_rows = _deduplicate_pairs(filtered_rows)
     dedup_rows.sort(key=lambda item: item.pair_id)
-    if max_pairs_total is not None:
-        dedup_rows = dedup_rows[: int(max_pairs_total)]
+    dedup_rows_before_global_cap = list(dedup_rows)
+    dedup_rows, global_cap_summary = _apply_global_cap(
+        rows=dedup_rows,
+        max_pairs_total=max_pairs_total,
+        global_cap_mode=str(global_cap_mode),
+    )
 
     train_rows, validation_rows = _split_train_validation(
         rows=dedup_rows,
         seed=int(seed),
         validation_ratio=float(validation_ratio),
+        split_granularity=str(split_granularity),
     )
     _write_jsonl(train_path, [row.to_dict() for row in train_rows])
     _write_jsonl(validation_path, [row.to_dict() for row in validation_rows])
@@ -209,11 +224,19 @@ def prepare_phase_e_pair_artifact(
         "run_dir": str(run_dir),
         "num_rows_before_filter": int(len(all_rows)),
         "num_rows_after_confidence_filter": int(len(filtered_rows)),
+        "num_rows_after_dedup_before_global_cap": int(len(dedup_rows_before_global_cap)),
         "num_rows_after_dedup": int(len(dedup_rows)),
         "num_train_rows": int(len(train_rows)),
         "num_validation_rows": int(len(validation_rows)),
+        "num_split_units_after_dedup": int(_count_split_units(rows=dedup_rows, split_granularity=str(split_granularity))),
+        "num_train_split_units": int(_count_split_units(rows=train_rows, split_granularity=str(split_granularity))),
+        "num_validation_split_units": int(
+            _count_split_units(rows=validation_rows, split_granularity=str(split_granularity))
+        ),
         "source_rows_before_filter": dict(sorted(source_rows_before_filter.items())),
+        "overall_summary_before_global_cap": summarize_external_pairs(dedup_rows_before_global_cap),
         "overall_summary": summarize_external_pairs(dedup_rows),
+        "global_cap_summary": global_cap_summary,
         "train_summary": summarize_external_pairs(train_rows),
         "validation_summary": summarize_external_pairs(validation_rows),
         "build_config": {
@@ -222,6 +245,8 @@ def prepare_phase_e_pair_artifact(
             "max_pairs_total": max_pairs_total,
             "max_pairs_per_source": max_pairs_per_source,
             "min_pair_confidence": float(min_pair_confidence),
+            "split_granularity": str(split_granularity),
+            "global_cap_mode": str(global_cap_mode),
             "source_weight_overrides": dict(sorted((source_weight_overrides or {}).items())),
             **asdict(build_config),
         },
@@ -346,29 +371,217 @@ def _deduplicate_pairs(rows: list[ExternalPairRecord]) -> list[ExternalPairRecor
     return list(dedup.values())
 
 
+def _apply_global_cap(
+    *,
+    rows: list[ExternalPairRecord],
+    max_pairs_total: int | None,
+    global_cap_mode: str,
+) -> tuple[list[ExternalPairRecord], dict[str, Any]]:
+    """Apply one deterministic global cap policy to the deduplicated pair pool.
+
+    English
+    -------
+    Phase E historically sorted by `pair_id` and took the head of the list.
+    That keeps exact reproducibility, but when a new repair semantic is rare
+    and appended later in source order, a small smoke-time `max_pairs_total`
+    can silently erase the repair from the artifact.
+
+    `balanced_support_bucket` keeps the pool deterministic but performs a
+    round-robin over `(source_tag, pair_semantics)` buckets before the final
+    cap. This is intentionally diagnostic: it preserves minority supervision
+    types so small smoke suites still test the repaired geometry.
+
+    中文
+    ----
+    Phase E 过去的做法是按 `pair_id` 排序后直接截头。这保证了可复现性，但当某种
+    修复语义本来就稀疏、而且在源数据里出现得更晚时，小规模 smoke 的
+    `max_pairs_total` 会把它静默截没。
+
+    `balanced_support_bucket` 仍然是确定性的，但会先按 `(source_tag, pair_semantics)`
+    做 round-robin，再施加最终 cap。这个模式的定位是诊断友好：
+    让便宜 smoke 也能真正测到稀疏修复监督是否有帮助。
+    """
+    sorted_rows = sorted(rows, key=lambda item: item.pair_id)
+    summary_before = _summarize_cap_buckets(sorted_rows)
+    if max_pairs_total is None or len(sorted_rows) <= int(max_pairs_total):
+        return sorted_rows, {
+            "global_cap_mode": str(global_cap_mode),
+            "max_pairs_total": (int(max_pairs_total) if max_pairs_total is not None else None),
+            "num_rows_before_global_cap": int(len(sorted_rows)),
+            "num_rows_after_global_cap": int(len(sorted_rows)),
+            "bucket_summary_before": summary_before,
+            "bucket_summary_after": summary_before,
+            "cap_applied": False,
+        }
+    cap = int(max_pairs_total)
+    if str(global_cap_mode) == "pair_id_head":
+        capped_rows = sorted_rows[:cap]
+    elif str(global_cap_mode) == "balanced_support_bucket":
+        capped_rows = _select_round_robin_by_support_bucket(sorted_rows, cap=cap)
+    else:
+        raise ValueError(f"Unsupported global_cap_mode: {global_cap_mode!r}")
+    return capped_rows, {
+        "global_cap_mode": str(global_cap_mode),
+        "max_pairs_total": int(max_pairs_total),
+        "num_rows_before_global_cap": int(len(sorted_rows)),
+        "num_rows_after_global_cap": int(len(capped_rows)),
+        "bucket_summary_before": summary_before,
+        "bucket_summary_after": _summarize_cap_buckets(capped_rows),
+        "cap_applied": True,
+    }
+
+
+def _select_round_robin_by_support_bucket(
+    rows: list[ExternalPairRecord],
+    *,
+    cap: int,
+) -> list[ExternalPairRecord]:
+    """Deterministically keep a capped set while preserving rare support buckets."""
+    buckets: dict[str, list[ExternalPairRecord]] = {}
+    for row in rows:
+        bucket_key = _support_bucket_key(row)
+        buckets.setdefault(bucket_key, []).append(row)
+    for bucket_rows in buckets.values():
+        bucket_rows.sort(key=lambda item: item.pair_id)
+    ordered_bucket_keys = sorted(buckets)
+    next_index = {key: 0 for key in ordered_bucket_keys}
+    selected: list[ExternalPairRecord] = []
+    while len(selected) < int(cap):
+        progressed = False
+        for bucket_key in ordered_bucket_keys:
+            bucket_rows = buckets[bucket_key]
+            idx = next_index[bucket_key]
+            if idx >= len(bucket_rows):
+                continue
+            selected.append(bucket_rows[idx])
+            next_index[bucket_key] = idx + 1
+            progressed = True
+            if len(selected) >= int(cap):
+                break
+        if not progressed:
+            break
+    selected.sort(key=lambda item: item.pair_id)
+    return selected
+
+
+def _support_bucket_key(row: ExternalPairRecord) -> str:
+    """Return the coarse support bucket used by semantic-aware global caps."""
+    pair_semantics = str((row.metadata or {}).get("pair_semantics", "unspecified"))
+    return f"{row.source_tag}|{pair_semantics}"
+
+
+def _summarize_cap_buckets(rows: list[ExternalPairRecord]) -> dict[str, int]:
+    """Count rows per support bucket for before/after-cap diagnostics."""
+    counts: dict[str, int] = {}
+    for row in rows:
+        bucket_key = _support_bucket_key(row)
+        counts[bucket_key] = counts.get(bucket_key, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def _split_train_validation(
     *,
     rows: list[ExternalPairRecord],
     seed: int,
     validation_ratio: float,
+    split_granularity: str,
 ) -> tuple[list[ExternalPairRecord], list[ExternalPairRecord]]:
-    """Split rows deterministically using pair-id hashing."""
-    train_rows: list[ExternalPairRecord] = []
-    validation_rows: list[ExternalPairRecord] = []
-    # Split by pair_id hash instead of list position so reordering sources does not reshuffle train/val.
-    # 按 pair_id 哈希而不是按列表位置切分，这样即使换了来源顺序，train/val 也不会漂移。
-    for row in rows:
-        if _is_validation_pair(pair_id=row.pair_id, seed=seed, ratio=validation_ratio):
-            validation_rows.append(row)
+    """Split rows deterministically using pair ids or source-sample groups.
+
+    English
+    -------
+    `pair_id` mode reproduces the historical behavior exactly: every canonical
+    pair is split independently.
+
+    `source_sample` mode keeps all pairs derived from the same raw source sample
+    on the same side of the split. This is stricter and avoids near-duplicate
+    supervision leaking across train/validation when one raw sample emits
+    multiple pairs.
+
+    中文
+    ----
+    `pair_id` 模式完全复现历史行为：每个 canonical pair 独立切分。
+
+    `source_sample` 模式会把同一个原始样本衍生出的所有 pair 固定放在同一侧，
+    这样当一个样本能产生多个相关 pair 时，就不会把近重复监督泄漏到 train/validation 两边。
+    """
+    unit_groups = _group_rows_by_split_unit(rows=rows, split_granularity=str(split_granularity))
+    train_unit_keys: list[str] = []
+    validation_unit_keys: list[str] = []
+    # Split by a deterministic unit key instead of list position so source
+    # reordering does not reshuffle train/val.
+    # 按稳定 unit key 而不是列表位置切分，这样来源顺序变化不会让 train/val 漂移。
+    for unit_key in sorted(unit_groups):
+        if _is_validation_pair(pair_id=unit_key, seed=seed, ratio=validation_ratio):
+            validation_unit_keys.append(unit_key)
         else:
-            train_rows.append(row)
-    # Never allow an empty split, because all downstream suites assume both files exist and are non-empty.
-    # 不允许出现空 split，因为后续所有 suite 都默认 train/val 文件同时存在且非空。
-    if not train_rows and validation_rows:
-        train_rows.append(validation_rows.pop())
-    if not validation_rows and train_rows:
-        validation_rows.append(train_rows.pop())
+            train_unit_keys.append(unit_key)
+    # Never allow an empty split, because all downstream suites assume both
+    # files exist and are non-empty. When grouping is enabled we move an entire
+    # split unit instead of breaking that grouping contract.
+    # 不允许出现空 split，因为后续 suite 默认 train/val 都存在且非空。
+    # 如果启用了分组切分，这里要整体移动一个 split unit，而不是打破分组契约。
+    if not train_unit_keys and validation_unit_keys:
+        train_unit_keys.append(validation_unit_keys.pop())
+    if not validation_unit_keys and train_unit_keys:
+        validation_unit_keys.append(train_unit_keys.pop())
+    train_rows = [row for unit_key in train_unit_keys for row in unit_groups[unit_key]]
+    validation_rows = [row for unit_key in validation_unit_keys for row in unit_groups[unit_key]]
     return train_rows, validation_rows
+
+
+def _group_rows_by_split_unit(
+    *,
+    rows: list[ExternalPairRecord],
+    split_granularity: str,
+) -> dict[str, list[ExternalPairRecord]]:
+    """Group rows by the deterministic split unit requested by the caller."""
+    if split_granularity not in {"pair_id", "source_sample"}:
+        raise ValueError(f"Unsupported split_granularity: {split_granularity!r}")
+    groups: dict[str, list[ExternalPairRecord]] = {}
+    for row in rows:
+        if split_granularity == "pair_id":
+            unit_key = str(row.pair_id)
+        else:
+            unit_key = _resolve_split_group_id(row)
+        groups.setdefault(unit_key, []).append(row)
+    return groups
+
+
+def _count_split_units(*, rows: list[ExternalPairRecord], split_granularity: str) -> int:
+    """Return how many effective split units a row set contains."""
+    return int(len(_group_rows_by_split_unit(rows=rows, split_granularity=str(split_granularity))))
+
+
+def _resolve_split_group_id(row: ExternalPairRecord) -> str:
+    """Return a stable source-sample split key for one canonical pair row.
+
+    English
+    -------
+    Adapters now try to populate `metadata.split_group_id` explicitly. This
+    helper still keeps a conservative fallback path so older artifacts or ad-hoc
+    rows can be grouped without crashing.
+
+    中文
+    ----
+    adapter 现在会尽量显式写入 `metadata.split_group_id`。但这里仍然保留保守回退，
+    这样旧产物或临时构造的行也能正常按组切分，而不是直接崩掉。
+    """
+    metadata = dict(row.metadata or {})
+    explicit = str(metadata.get("split_group_id", "")).strip()
+    if explicit:
+        return f"{row.source_tag}|{explicit}"
+    for key in ("source_idx", "source_row_index", "source_row_line", "source_line"):
+        value = metadata.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return f"{row.source_tag}|{key}={text}"
+    prompt_fingerprint = hashlib.sha256(
+        f"{row.source_tag}\n{row.prompt_text}".encode("utf-8")
+    ).hexdigest()[:16]
+    return f"{row.source_tag}|prompt={prompt_fingerprint}"
 
 
 def _is_validation_pair(*, pair_id: str, seed: int, ratio: float) -> bool:
@@ -394,9 +607,15 @@ def _render_summary_markdown(summary: dict[str, Any]) -> str:
         f"- run_dir: {summary.get('run_dir')}",
         f"- rows_before_filter: {summary.get('num_rows_before_filter')}",
         f"- rows_after_conf_filter: {summary.get('num_rows_after_confidence_filter')}",
+        f"- rows_after_dedup_before_global_cap: {summary.get('num_rows_after_dedup_before_global_cap')}",
         f"- rows_after_dedup: {summary.get('num_rows_after_dedup')}",
         f"- train_rows: {summary.get('num_train_rows')}",
         f"- validation_rows: {summary.get('num_validation_rows')}",
+        f"- split_granularity: {summary.get('build_config', {}).get('split_granularity')}",
+        f"- global_cap_mode: {summary.get('build_config', {}).get('global_cap_mode')}",
+        f"- split_units_after_dedup: {summary.get('num_split_units_after_dedup')}",
+        f"- train_split_units: {summary.get('num_train_split_units')}",
+        f"- validation_split_units: {summary.get('num_validation_split_units')}",
         "",
         "## By Source (Before Filter)",
         "",
@@ -408,6 +627,7 @@ def _render_summary_markdown(summary: dict[str, Any]) -> str:
             "",
             "## Train Summary",
             "",
+            f"- global_cap_summary: {summary.get('global_cap_summary')}",
             f"- num_pairs: {summary.get('train_summary', {}).get('num_pairs')}",
             f"- mean_pair_confidence: {summary.get('train_summary', {}).get('mean_pair_confidence')}",
             f"- by_pair_build_mode: {summary.get('train_summary', {}).get('by_pair_build_mode')}",

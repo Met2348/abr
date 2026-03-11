@@ -77,8 +77,10 @@ from ours.phase_b.posthoc_calibration import (  # noqa: E402
 )
 from ours.phase_b.value_head import (  # noqa: E402
     encode_text_features,
+    ensure_tokenizer_has_pad_token,
     freeze_backbone,
     load_value_head_checkpoint,
+    maybe_resize_embeddings_for_tokenizer,
     resolve_model_input_device,
 )
 
@@ -170,8 +172,10 @@ def main(argv: list[str] | None = None) -> int:
     # `best` 不存在时回退到 final，保证中断训练也可复评。
     checkpoint_name = "best_value_head.pt" if args.checkpoint_name == "best" else "final_value_head.pt"
     checkpoint_path = args.value_run_dir / checkpoint_name
+    checkpoint_fallback = False
     if args.checkpoint_name == "best" and not checkpoint_path.exists():
         checkpoint_path = args.value_run_dir / "final_value_head.pt"
+        checkpoint_fallback = True
     value_head, _, _ = load_value_head_checkpoint(checkpoint_path)
 
     eval_examples, _ = load_pik_supervision_examples(
@@ -195,11 +199,7 @@ def main(argv: list[str] | None = None) -> int:
         adapter_path=(Path(resolved["adapter_path"]) if resolved.get("adapter_path") else None),
     )
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-    if tokenizer.pad_token_id is None:
-        if tokenizer.eos_token is not None:
-            tokenizer.pad_token = tokenizer.eos_token
-        else:
-            tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+    synthesized_pad_token = ensure_tokenizer_has_pad_token(tokenizer)
 
     dtype = _resolve_dtype(str(resolved["dtype"]), torch)
     model_load_kwargs: dict[str, Any] = {
@@ -213,6 +213,8 @@ def main(argv: list[str] | None = None) -> int:
         model_load_kwargs["torch_dtype"] = dtype
 
     backbone = AutoModelForCausalLM.from_pretrained(str(resolved["model_path"]), **model_load_kwargs)
+    if synthesized_pad_token:
+        maybe_resize_embeddings_for_tokenizer(backbone=backbone, tokenizer=tokenizer)
     adapter_path = resolved.get("adapter_path")
     if adapter_path:
         backbone = _attach_peft_adapter_for_inference(backbone, Path(adapter_path))
@@ -306,6 +308,7 @@ def main(argv: list[str] | None = None) -> int:
         scores_tensor = outputs["scores"]
         logits_tensor = outputs["logits"]
         scores = [float(x) for x in scores_tensor.detach().cpu().tolist()]
+        logits = [float(x) for x in logits_tensor.detach().cpu().tolist()]
 
     targets = [float(example.target_success_rate) for example in eval_examples]
     calibration_raw = compute_calibration_summary(scores, targets, reference_mean=float(train_target_mean))
@@ -347,14 +350,15 @@ def main(argv: list[str] | None = None) -> int:
     out_manifest_path = run_dir / "manifest.json"
 
     rows = []
-    for idx, (example, score) in enumerate(zip(eval_examples, scores, strict=True)):
+    for idx, (example, score, logit) in enumerate(zip(eval_examples, scores, logits, strict=True)):
         row = {
             "sample_id": example.sample_id,
             "dataset": example.dataset,
             "split": example.split,
             "question": example.question,
             "predicted_value": float(score),
-            "predicted_value_raw": float(score),
+            "predicted_value_raw": float(logit),
+            "predicted_logit": float(logit),
             "target_success_rate": float(example.target_success_rate),
             "target_parseable_rate": float(example.target_parseable_rate),
             "target_k_rollouts": int(example.target_k_rollouts),
@@ -370,6 +374,7 @@ def main(argv: list[str] | None = None) -> int:
         "value_run_dir": str(args.value_run_dir),
         "eval_dir": str(args.eval_dir),
         "checkpoint_path": str(checkpoint_path),
+        "checkpoint_fallback": bool(checkpoint_fallback),
         "feature_cache": feature_cache_stats,
         "calibration": calibration_raw,
         "calibration_posthoc": calibration_posthoc,
@@ -413,6 +418,7 @@ def main(argv: list[str] | None = None) -> int:
                     "eval_dir": str(args.eval_dir),
                     "checkpoint_name": args.checkpoint_name,
                     "checkpoint_path": str(checkpoint_path),
+                    "checkpoint_fallback": bool(checkpoint_fallback),
                 },
                 "feature_cache_mode": str(args.feature_cache_mode),
                 "feature_cache_root": str(args.feature_cache_root),

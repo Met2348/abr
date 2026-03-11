@@ -101,32 +101,42 @@ PY
 append_group_result() {
   local group_id="$1"
   local summary_path="$2"
-  python - "$group_id" "$summary_path" "$GROUP_RESULTS_JSONL" <<'PY'
+  local seed_results_path="$3"
+  python - "$group_id" "$summary_path" "$seed_results_path" "$GROUP_RESULTS_JSONL" <<'PY'
 import json
-import re
+import statistics
 import sys
 from pathlib import Path
 
 group_id = sys.argv[1]
 summary_path = Path(sys.argv[2])
-out_path = Path(sys.argv[3])
-text = summary_path.read_text(encoding="utf-8")
+seed_results_path = Path(sys.argv[3])
+out_path = Path(sys.argv[4])
 
-def grab(name: str) -> float | None:
-    m = re.search(rf"- {re.escape(name)}: `([^`]+)`", text)
-    if not m:
-        return None
-    return float(m.group(1))
+rows = []
+for raw in seed_results_path.read_text(encoding="utf-8").splitlines():
+    raw = raw.strip()
+    if raw:
+        rows.append(json.loads(raw))
+if not rows:
+    raise ValueError(f"No seed rows found in {seed_results_path}")
+
+def mean(values):
+    return float(statistics.mean(values)) if values else None
+
+def std(values):
+    return float(statistics.pstdev(values)) if len(values) > 1 else None
 
 row = {
     "group_id": group_id,
     "summary_path": str(summary_path),
-    "mean_heldout_pair_acc": grab("mean_heldout_pair_acc"),
-    "mean_heldout_auc": grab("mean_heldout_auc"),
-    "mean_heldout_ranking_score": grab("mean_heldout_ranking_score"),
-    "std_heldout_pair_acc": grab("std_heldout_pair_acc"),
-    "std_heldout_auc": grab("std_heldout_auc"),
-    "std_heldout_ranking_score": grab("std_heldout_ranking_score"),
+    "seed_results_path": str(seed_results_path),
+    "mean_heldout_pair_acc": mean([float(item["heldout_pair_acc"]) for item in rows]),
+    "mean_heldout_auc": mean([float(item["heldout_auc"]) for item in rows]),
+    "mean_heldout_ranking_score": mean([float(item.get("heldout_ranking_score", 0.0)) for item in rows]),
+    "std_heldout_pair_acc": std([float(item["heldout_pair_acc"]) for item in rows]),
+    "std_heldout_auc": std([float(item["heldout_auc"]) for item in rows]),
+    "std_heldout_ranking_score": std([float(item.get("heldout_ranking_score", 0.0)) for item in rows]),
 }
 with out_path.open("a", encoding="utf-8") as f:
     f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -227,11 +237,16 @@ for group_id in "${MATRIX_GROUPS[@]}"; do
   log_line "Launching sub-suite ${group_id} with RUN_PREFIX=${sub_prefix}" | tee -a "$SUITE_LOG_FILE"
   ACTIVE_PHASE_E_GROUP="$group_id" RUN_PREFIX="$sub_prefix" bash scripts/run_phase_e_suite.sh | tee -a "$SUITE_LOG_FILE"
   sub_summary="assets/artifacts/phase_e_logs/${sub_prefix}/final_summary.md"
+  sub_seed_results="assets/artifacts/phase_e_logs/${sub_prefix}/seed_results.jsonl"
   if [[ ! -f "$sub_summary" ]]; then
     echo "ERROR: Missing sub-suite summary: $sub_summary" >&2
     exit 1
   fi
-  append_group_result "$group_id" "$sub_summary"
+  if [[ ! -f "$sub_seed_results" ]]; then
+    echo "ERROR: Missing sub-suite seed results: $sub_seed_results" >&2
+    exit 1
+  fi
+  append_group_result "$group_id" "$sub_summary" "$sub_seed_results"
 done
 
 render_final_summary

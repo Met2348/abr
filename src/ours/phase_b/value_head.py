@@ -79,6 +79,7 @@ class ValueHeadConfig:
     architecture: str = "linear"
     mlp_hidden_size: int = 1024
     activation: str = "gelu"
+    inference_alpha: float = 0.5
 
     def validate(self) -> None:
         """Validate configuration values before constructing the head.
@@ -96,12 +97,14 @@ class ValueHeadConfig:
             raise ValueError("`init_std` must be > 0")
         if self.pooling != "last_token":
             raise ValueError("Only `last_token` pooling is currently supported")
-        if self.architecture not in {"linear", "mlp"}:
-            raise ValueError("`architecture` must be one of {'linear', 'mlp'}")
+        if self.architecture not in {"linear", "mlp", "gated_mlp", "dual_head"}:
+            raise ValueError("`architecture` must be one of {'linear', 'mlp', 'gated_mlp', 'dual_head'}")
         if not isinstance(self.mlp_hidden_size, int) or self.mlp_hidden_size <= 0:
             raise ValueError("`mlp_hidden_size` must be a positive int")
         if self.activation not in {"gelu", "relu", "tanh"}:
             raise ValueError("`activation` must be one of {'gelu', 'relu', 'tanh'}")
+        if not isinstance(self.inference_alpha, (int, float)) or not (0.0 <= float(self.inference_alpha) <= 1.0):
+            raise ValueError("`inference_alpha` must be in [0, 1]")
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable configuration payload."""
@@ -147,6 +150,12 @@ class SigmoidValueHead:  # runtime subclass resolved lazily to avoid top-level t
        - 两层 MLP：dropout + Linear + 激活 + dropout + Linear
        - 当我们只关心“同一数据集内部能不能判定准确”时，允许它提供更强的非线性判别能力
        - 这不会改变 backbone 特征提取方式，只是增强 head 的表达能力
+    3. `dual_head`
+       - 一个 shared trunk，后接 `local_head` 和 `terminal_head`
+       - 训练时可以让 local 类 pair 主要更新 `local_head`，terminal 类 pair
+         主要更新 `terminal_head`
+       - 推理时再用 `inference_alpha` 把两头的 logit 混成一个最终分数
+       - 这是对文献里“分解验证子任务”的一个低成本近似
     """
 
     def __new__(cls, config: ValueHeadConfig):
@@ -166,12 +175,14 @@ class SigmoidValueHead:  # runtime subclass resolved lazily to avoid top-level t
                 else:
                     activation_layer = nn.Tanh()
 
+                self._proj_alias_name = ""
                 if cfg.architecture == "linear":
                     self.net = nn.Sequential(
                         self.dropout,
                         nn.Linear(int(cfg.hidden_size), 1),
                     )
-                else:
+                    self._proj_alias_name = "net.1"
+                elif cfg.architecture == "mlp":
                     # 当同源 learnability 的目标提高到 90%+ 时，单线性头可能不够。
                     # 这里提供一个受控的两层 MLP：容量更强，但仍远小于 backbone。
                     self.net = nn.Sequential(
@@ -181,10 +192,85 @@ class SigmoidValueHead:  # runtime subclass resolved lazily to avoid top-level t
                         nn.Dropout(float(cfg.dropout_prob)),
                         nn.Linear(int(cfg.mlp_hidden_size), 1),
                     )
+                    self._proj_alias_name = "net.4"
+                elif cfg.architecture == "gated_mlp":
+                    # `gated_mlp` tries to capture two regimes inside the same
+                    # frozen-feature scorer:
+                    # 1. one expert can stay closer to local margin ranking
+                    # 2. another expert can specialize more on harder/global
+                    #    calibration patterns such as terminal completion
+                    #
+                    # The gate is still feature-only, so this remains usable at
+                    # inference time without benchmark-only metadata.
+                    self.shared = nn.Sequential(
+                        self.dropout,
+                        nn.Linear(int(cfg.hidden_size), int(cfg.mlp_hidden_size)),
+                        activation_layer,
+                        nn.Dropout(float(cfg.dropout_prob)),
+                    )
+                    self.local_expert = nn.Linear(int(cfg.mlp_hidden_size), int(cfg.mlp_hidden_size))
+                    self.global_expert = nn.Linear(int(cfg.mlp_hidden_size), int(cfg.mlp_hidden_size))
+                    self.gate = nn.Sequential(
+                        nn.Linear(int(cfg.mlp_hidden_size), int(cfg.mlp_hidden_size)),
+                        activation_layer,
+                        nn.Linear(int(cfg.mlp_hidden_size), 1),
+                    )
+                    self.final_proj = nn.Linear(int(cfg.mlp_hidden_size), 1)
+                    self._proj_alias_name = "final_proj"
+                else:
+                    # `dual_head` is different from `gated_mlp`:
+                    # it keeps two explicit scalar heads instead of blending two
+                    # hidden experts into one scalar.  The training loop can then
+                    # route local-vs-terminal supervision to different heads.
+                    #
+                    # 中文：
+                    # `gated_mlp` 仍然只产出一个“隐式混合”的标量；`dual_head`
+                    # 则明确保留两个头，便于训练侧按 pair 语义分别督导。
+                    self.shared = nn.Sequential(
+                        self.dropout,
+                        nn.Linear(int(cfg.hidden_size), int(cfg.mlp_hidden_size)),
+                        activation_layer,
+                        nn.Dropout(float(cfg.dropout_prob)),
+                    )
+                    self.local_proj = nn.Linear(int(cfg.mlp_hidden_size), 1)
+                    self.terminal_proj = nn.Linear(int(cfg.mlp_hidden_size), 1)
+                    self._proj_alias_name = "local_proj"
                 self._init_linear_layers(std=float(cfg.init_std))
 
+            @property
+            def proj(self):
+                """Backward-compatible alias for the final linear projection.
+
+                English
+                -------
+                Older Phase B/C utilities, notebooks, and tests accessed
+                `value_head.proj` directly when the head was a single linear
+                layer.  The newer implementation stores layers under `self.net`,
+                but keeping a read-only alias here avoids silent API breakage in
+                warm-start/debug paths.
+
+                中文
+                ----
+                较早的 Phase B/C 工具、notebook 和测试会直接访问
+                `value_head.proj`。现在实现改成了 `self.net`，但这里保留一个只读
+                alias，避免这类调用链在重构后悄悄断掉。
+                """
+                # RISK WARNING:
+                # Removing this compatibility alias broke the existing Phase C
+                # checkpoint-initialization test and can also break downstream
+                # inspection code that expects `.proj.weight/.bias`.
+                if self._proj_alias_name == "final_proj":
+                    return self.final_proj
+                if self._proj_alias_name == "local_proj":
+                    return self.local_proj
+                if self._proj_alias_name == "net.1":
+                    return self.net[1]
+                if self._proj_alias_name == "net.4":
+                    return self.net[4]
+                raise AttributeError("Projection alias is not configured")
+
             def _init_linear_layers(self, *, std: float) -> None:
-                for module in self.net.modules():
+                for module in self.modules():
                     if isinstance(module, nn.Linear):
                         nn.init.normal_(module.weight, mean=0.0, std=float(std))
                         nn.init.zeros_(module.bias)
@@ -196,11 +282,101 @@ class SigmoidValueHead:  # runtime subclass resolved lazily to avoid top-level t
                     raise ValueError(
                         f"Expected feature tensor of shape [batch, hidden], got {tuple(features.shape)!r}"
                     )
-                logits = self.net(features).squeeze(-1)
-                scores = torch.sigmoid(logits)
-                return {"logits": logits, "scores": scores}
+                if self.config.architecture in {"linear", "mlp"}:
+                    logits = self.net(features).squeeze(-1)
+                    scores = torch.sigmoid(logits)
+                    return {"logits": logits, "scores": scores}
+                if self.config.architecture == "gated_mlp":
+                    hidden = self.shared(features)
+                    local_hidden = self.local_expert(hidden)
+                    global_hidden = self.global_expert(hidden)
+                    gate_value = torch.sigmoid(self.gate(hidden))
+                    mixed_hidden = gate_value * local_hidden + (1.0 - gate_value) * global_hidden
+                    logits = self.final_proj(mixed_hidden).squeeze(-1)
+                    scores = torch.sigmoid(logits)
+                    return {"logits": logits, "scores": scores}
+                hidden = self.shared(features)
+                local_logits = self.local_proj(hidden).squeeze(-1)
+                terminal_logits = self.terminal_proj(hidden).squeeze(-1)
+                alpha = float(self.config.inference_alpha)
+                logits = alpha * local_logits + (1.0 - alpha) * terminal_logits
+                return {
+                    "logits": logits,
+                    "scores": torch.sigmoid(logits),
+                    "local_logits": local_logits,
+                    "local_scores": torch.sigmoid(local_logits),
+                    "terminal_logits": terminal_logits,
+                    "terminal_scores": torch.sigmoid(terminal_logits),
+                }
 
         return _Impl(config)
+
+
+def ensure_tokenizer_has_pad_token(tokenizer: Any) -> bool:
+    """Ensure one tokenizer exposes a usable pad token for batched scoring.
+
+    Returns
+    -------
+    bool
+        `True` when this helper had to synthesize a brand-new pad token and
+        therefore the caller must consider resizing model embeddings.
+
+    English
+    -------
+    Many research checkpoints omit `pad_token`, which is fine for single-sample
+    generation but unsafe for batched encoding/scoring.  If `eos_token` exists,
+    reusing it as padding is the least invasive option.  Only when both are
+    absent do we grow the tokenizer vocabulary.
+
+    中文
+    ----
+    很多研究 checkpoint 没有显式 `pad_token`，单样本生成通常没事，但批量编码/
+    打分就不安全了。若存在 `eos_token`，优先直接复用；只有两者都不存在时，
+    才真正向 tokenizer 词表里新增一个 pad token。
+    """
+    if tokenizer.pad_token_id is not None:
+        return False
+    if tokenizer.eos_token is not None:
+        tokenizer.pad_token = tokenizer.eos_token
+        return False
+    tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+    return True
+
+
+def maybe_resize_embeddings_for_tokenizer(*, backbone: Any, tokenizer: Any) -> bool:
+    """Resize model embeddings when tokenizer growth introduced new token ids.
+
+    English
+    -------
+    This is a small but important safety valve.  If we synthesized a new pad
+    token, the tokenizer length grows by one.  Without resizing the backbone
+    embedding table, later batched forward passes may feed an out-of-range token
+    id and fail only at runtime.
+
+    中文
+    ----
+    这是一个很小但很关键的安全阀。如果我们真的给 tokenizer 新增了 pad token，
+    它的词表长度就会增长。若不同步扩展 backbone 的 embedding table，后续批量
+    前向时就可能喂入越界 token id，只在运行时才爆炸。
+    """
+    get_input_embeddings = getattr(backbone, "get_input_embeddings", None)
+    if not callable(get_input_embeddings):
+        return False
+    embeddings = get_input_embeddings()
+    if embeddings is None or not hasattr(embeddings, "num_embeddings"):
+        return False
+    current_vocab_size = int(getattr(embeddings, "num_embeddings"))
+    target_vocab_size = int(len(tokenizer))
+    if target_vocab_size <= current_vocab_size:
+        return False
+    resize_token_embeddings = getattr(backbone, "resize_token_embeddings", None)
+    if not callable(resize_token_embeddings):
+        raise RuntimeError(
+            "Tokenizer vocabulary grew beyond the model embedding table, "
+            "but the backbone does not expose `resize_token_embeddings`."
+        )
+    resize_token_embeddings(target_vocab_size)
+    return True
 
 
 def freeze_backbone(backbone: Any) -> None:
@@ -269,9 +445,11 @@ def encode_text_features(
     """
     if not texts:
         raise ValueError("`texts` must contain at least one item")
+    # 通过 `attention_mask` 定位最后一个有效 token，必须恢复“最后一个被 attend
+    # 的位置”，而不能把它偷换成 `sum(mask) - 1`，否则 left padding 会出错。
     # We locate the last valid token through `attention_mask`, which works for
-    # both left-padding and right-padding.
-    # 通过 `attention_mask` 定位最后一个有效 token，才能同时兼容左/右 padding。
+    # both left-padding and right-padding as long as we recover the last
+    # attended position instead of assuming `sum(mask) - 1`.
     model_device = resolve_model_input_device(backbone)
     inputs = tokenizer(
         texts,
@@ -289,7 +467,15 @@ def encode_text_features(
             return_dict=True,
         )
         last_hidden = outputs.hidden_states[-1]
-        pooled = pool_last_token(last_hidden, inputs["attention_mask"], torch_module=torch_module)
+        # device_map="auto" 跨多卡时，最后一层 hidden states 可能在 cuda:1，
+        # 而 attention_mask 仍在 cuda:0（输入设备）。
+        # pool_last_token 内部的 torch.where 跨设备操作会静默产生全零结果。
+        # 这里显式对齐，确保两者在同一设备上。
+        # When device_map="auto" splits across GPUs, outputs.hidden_states[-1] may
+        # land on cuda:1 while attention_mask is still on cuda:0 (the input device).
+        # A cross-device torch.where silently produces all-zeros.  Align explicitly.
+        attn_mask = inputs["attention_mask"].to(last_hidden.device)
+        pooled = pool_last_token(last_hidden, attn_mask, torch_module=torch_module)
     return pooled.detach()
 
 
@@ -315,8 +501,21 @@ def pool_last_token(hidden_states: Any, attention_mask: Any, *, torch_module: An
     if hidden_states.shape[:2] != attention_mask.shape:
         raise ValueError("Hidden states and attention mask batch/seq dims must match")
 
-    lengths = attention_mask.sum(dim=1) - 1
-    lengths = torch_module.clamp(lengths, min=0)
+    # `sum(mask) - 1` 只对 right padding 成立；这里改成找“mask > 0 的最大位置”，
+    # 才能同时兼容 left/right padding。若整行都被 mask，则回退到 index 0。
+    # `sum(mask) - 1` only works for right padding.  Here we compute the maximum
+    # position whose mask value is positive, which is correct for both left and
+    # right padding.  Fully-masked rows fall back to index 0.
+    seq_positions = torch_module.arange(
+        attention_mask.shape[1],
+        device=hidden_states.device,
+    ).unsqueeze(0)
+    masked_positions = torch_module.where(
+        attention_mask > 0,
+        seq_positions,
+        torch_module.zeros_like(seq_positions),
+    )
+    lengths = masked_positions.max(dim=1).values
     batch_indices = torch_module.arange(hidden_states.shape[0], device=hidden_states.device)
     return hidden_states[batch_indices, lengths]
 

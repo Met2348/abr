@@ -84,6 +84,10 @@ class PairBuildConfig:
     max_token_overlap: float = 0.995
     max_pairs_per_sample: int = 2
     step_label_pair_mode: str = "first_bad_edge_strict"
+    step_label_terminal_anchor_mode: str = "none"
+    step_label_terminal_anchor_fraction: float = 0.5
+    r_prm_pair_mode: str = "direct_pair_legacy"
+    prmbench_error_step_index_base: str = "auto"
 
     def validate(self) -> None:
         if self.min_chars <= 0:
@@ -94,10 +98,36 @@ class PairBuildConfig:
             raise ValueError("`max_token_overlap` must be in [0, 1]")
         if self.max_pairs_per_sample <= 0:
             raise ValueError("`max_pairs_per_sample` must be > 0")
-        if self.step_label_pair_mode not in {"first_bad_edge_strict", "legacy_nearest"}:
+        if self.step_label_pair_mode not in {
+            "first_bad_edge_strict",
+            "first_bad_fanout",
+            "all_good_vs_all_bad",
+            "legacy_nearest",
+        }:
             raise ValueError(
                 "`step_label_pair_mode` must be one of "
-                "{'first_bad_edge_strict', 'legacy_nearest'}"
+                "{'first_bad_edge_strict', 'first_bad_fanout', 'all_good_vs_all_bad', 'legacy_nearest'}"
+            )
+        if self.step_label_terminal_anchor_mode not in {
+            "none",
+            "all_positive_fanout",
+        }:
+            raise ValueError(
+                "`step_label_terminal_anchor_mode` must be one of "
+                "{'none', 'all_positive_fanout'}"
+            )
+        if not (0.0 < float(self.step_label_terminal_anchor_fraction) < 1.0):
+            raise ValueError("`step_label_terminal_anchor_fraction` must be in (0, 1)")
+        if self.r_prm_pair_mode not in {"direct_pair_legacy", "compact_verdict", "compact_correctness"}:
+            raise ValueError(
+                "`r_prm_pair_mode` must be one of "
+                "{'direct_pair_legacy', 'compact_verdict', 'compact_correctness'}"
+            )
+        normalized_prmbench_base = str(self.prmbench_error_step_index_base).strip().lower()
+        if normalized_prmbench_base not in {"auto", "0", "1", "zero_based", "one_based"}:
+            raise ValueError(
+                "`prmbench_error_step_index_base` must be one of "
+                "{'auto', '0', '1', 'zero_based', 'one_based'}"
             )
 
 
@@ -108,7 +138,49 @@ def load_r_prm_dpo_pairs(
     config: PairBuildConfig,
     max_pairs: int | None = None,
 ) -> list[ExternalPairRecord]:
-    """Load direct chosen/rejected pairs from R-PRM DPO split."""
+    """Load canonical pairs from the R-PRM DPO split.
+
+    English
+    -------
+    Two modes are supported intentionally:
+
+    1. `direct_pair_legacy`
+       - preserve the old behavior exactly
+       - use the full chosen/rejected verifier analyses as the pair texts
+    2. `compact_verdict`
+       - rewrite the sample into a much shorter same-prompt verdict pair
+       - keep `Question / Previous Steps / Now Step` in the prompt
+       - reduce chosen/rejected to short opposite verdict texts
+    3. `compact_correctness`
+       - same compact prompt as `compact_verdict`
+       - but render answers directly in `Correct/Incorrect` space
+       - useful when `Yes/No` phrasing itself introduces polarity bias
+
+    The compact mode exists because the current Phase E value head is a frozen
+    feature scorer, not a generative verifier. Feeding multi-thousand-token
+    verifier essays into that head was destroying R-PRM's usable signal before
+    optimization even started.
+
+    中文
+    ----
+    这里故意保留两种模式：
+
+    1. `direct_pair_legacy`
+       - 完整保留旧行为
+       - 直接把长篇 chosen/rejected verifier analysis 当作 pair 文本
+    2. `compact_verdict`
+       - 把样本改写成更短的“同 prompt 下的相反 verdict pair”
+       - prompt 保留 `Question / Previous Steps / Now Step`
+       - chosen/rejected 只保留简短 verdict 文本
+    3. `compact_correctness`
+       - 与 `compact_verdict` 使用同一个紧凑 prompt
+       - 但答案直接写成 `Correct/Incorrect`
+       - 当 `Yes/No` 这个表达本身带来 polarity bias 时更有用
+
+    `compact_verdict` 的存在原因很明确：当前 Phase E 的 value head 是
+    frozen-feature scorer，不是 generative verifier。把几千 token 的分析长文
+    直接喂进去，会在优化开始前就把 R-PRM 的有效监督信号破坏掉。
+    """
     config.validate()
     split = str(split).strip()
     if split not in {"train", "validation"}:
@@ -125,22 +197,66 @@ def load_r_prm_dpo_pairs(
             columns=("instruction", "chosen", "rejected"),
         )
     ):
-        prompt_text = str(payload.get("instruction", ""))
-        chosen_text = str(payload.get("chosen", ""))
-        rejected_text = str(payload.get("rejected", ""))
+        raw_instruction = str(payload.get("instruction", ""))
+        raw_chosen = str(payload.get("chosen", ""))
+        raw_rejected = str(payload.get("rejected", ""))
+        pair_build_mode = "r_prm_direct_pair"
+        pair_semantics = "direct_preference_pair"
+        pair_confidence = 0.78
+        prompt_text = raw_instruction
+        chosen_text = raw_chosen
+        rejected_text = raw_rejected
+        metadata: dict[str, Any] = {
+            "source_split": split,
+            "source_row_index": int(shard_idx),
+            "source_root": str(root),
+            "r_prm_pair_mode": str(config.r_prm_pair_mode),
+            "raw_instruction_chars": int(len(raw_instruction)),
+            "raw_chosen_chars": int(len(raw_chosen)),
+            "raw_rejected_chars": int(len(raw_rejected)),
+        }
+        if config.r_prm_pair_mode in {"compact_verdict", "compact_correctness"}:
+            compact_prompt = _extract_r_prm_compact_prompt(raw_instruction)
+            chosen_verdict = _extract_r_prm_verdict(raw_chosen)
+            rejected_verdict = _extract_r_prm_verdict(raw_rejected)
+            # Skip rows whose final supervision signal cannot be reconstructed
+            # cleanly into the shorter same-prompt verdict contract.
+            # 如果一条样本的最终监督信号无法被干净重建成更短的 same-prompt verdict
+            # 形式，就直接跳过，不再退回有问题的长文本契约。
+            if compact_prompt is None or chosen_verdict is None or rejected_verdict is None:
+                continue
+            if chosen_verdict == rejected_verdict:
+                continue
+            prompt_text = compact_prompt
+            if config.r_prm_pair_mode == "compact_verdict":
+                chosen_text = _render_r_prm_verdict_text(chosen_verdict)
+                rejected_text = _render_r_prm_verdict_text(rejected_verdict)
+                pair_build_mode = "r_prm_compact_verdict_pair"
+                pair_semantics = "same_prompt_binary_verdict"
+            else:
+                chosen_text = _render_r_prm_correctness_text(chosen_verdict)
+                rejected_text = _render_r_prm_correctness_text(rejected_verdict)
+                pair_build_mode = "r_prm_compact_correctness_pair"
+                pair_semantics = "same_prompt_binary_correctness"
+            pair_confidence = 0.86
+            metadata.update(
+                {
+                    "chosen_verdict": chosen_verdict,
+                    "rejected_verdict": rejected_verdict,
+                    "compact_prompt_chars": int(len(prompt_text)),
+                }
+            )
         record = _build_record(
             source_tag="r_prm",
             domain_tag="general_math",
             prompt_text=prompt_text,
             chosen_text=chosen_text,
             rejected_text=rejected_text,
-            pair_confidence=0.78,
+            pair_confidence=pair_confidence,
             metadata={
-                "source_split": split,
-                "source_row_index": int(shard_idx),
-                "source_root": str(root),
-                "pair_build_mode": "r_prm_direct_pair",
-                "pair_semantics": "direct_preference_pair",
+                **metadata,
+                "pair_build_mode": pair_build_mode,
+                "pair_semantics": pair_semantics,
             },
             config=config,
         )
@@ -152,70 +268,257 @@ def load_r_prm_dpo_pairs(
     return rows
 
 
+_R_PRM_VERDICT_RE = re.compile(
+    r"Verification:\s*Is the step correct \(Yes/No\)\?\s*(Yes|No)",
+    flags=re.IGNORECASE,
+)
+_R_PRM_CASE_RE = re.compile(
+    r"Question:\s*(.*?)\nPrevious Steps:\s*(.*?)\nNow Step:\s*(.*?)\n"
+    r"Please carefully analyze the correctness of the Now Step\.\s*Reply:\s*$",
+    flags=re.DOTALL,
+)
+
+
+def _extract_r_prm_verdict(text: str) -> str | None:
+    """Extract the final Yes/No verifier verdict from one R-PRM analysis."""
+    matches = list(_R_PRM_VERDICT_RE.finditer(str(text)))
+    if not matches:
+        return None
+    verdict = matches[-1].group(1).strip().lower()
+    if verdict not in {"yes", "no"}:
+        return None
+    return verdict
+
+
+def _extract_r_prm_compact_prompt(instruction: str) -> str | None:
+    """Rewrite one verbose R-PRM instruction into a compact verifier prompt.
+
+    English
+    -------
+    The original instruction contains a long rubric explaining how to analyze
+    the step.  That rubric is useful for generation, but it is mostly noise for
+    the current frozen-feature scalar scorer.  We keep only the supervised case
+    itself:
+
+    1. question
+    2. previous steps
+    3. now step
+    4. one short verification task line
+
+    中文
+    ----
+    原始 instruction 里有一大段分析 rubric，对生成 verifier 很有用，但对当前
+    frozen-feature scalar scorer 来说大多是噪声。这里保留真正受监督的 case：
+
+    1. question
+    2. previous steps
+    3. now step
+    4. 一行简短的 verification task
+    """
+    normalized = str(instruction).replace("\r", "\n").strip()
+    match = _R_PRM_CASE_RE.search(normalized)
+    if match is None:
+        return None
+    question = match.group(1).strip()
+    previous_steps = match.group(2).strip()
+    now_step = match.group(3).strip()
+    if not question or not previous_steps or not now_step:
+        return None
+    return (
+        f"Question: {question}\n\n"
+        f"Previous Steps:\n{previous_steps}\n\n"
+        f"Now Step:\n{now_step}\n\n"
+        "Task: Decide whether the Now Step is correct.\n"
+        "Verification: "
+    )
+
+
+def _render_r_prm_verdict_text(verdict: str) -> str:
+    """Render a short verdict string used by compact R-PRM pairs."""
+    normalized = str(verdict).strip().lower()
+    if normalized == "yes":
+        return "The Now Step is correct. Final answer: Yes.\n"
+    if normalized == "no":
+        return "The Now Step is incorrect. Final answer: No.\n"
+    raise ValueError(f"Unsupported R-PRM verdict: {verdict!r}")
+
+
+def _render_r_prm_correctness_text(verdict: str) -> str:
+    """Render a shorter correctness-space answer for compact R-PRM pairs.
+
+    English
+    -------
+    The repaired compact R-PRM path already strips away the long verifier essay.
+    This variant also strips away the explicit `Yes/No` token pair, because deep
+    diagnostics showed that the frozen value head can collapse into a global
+    polarity preference ("prefer No") even after length issues are fixed.
+
+    中文
+    ----
+    修复后的 compact R-PRM 已经去掉了长 verifier essay。这个变体进一步去掉
+    显式的 `Yes/No` token 对，因为深度诊断显示：即使长度问题已经缓解，当前
+    frozen value head 仍可能塌成一个全局 polarity 偏好（例如“总偏爱 No”）。
+    """
+    normalized = str(verdict).strip().lower()
+    if normalized == "yes":
+        return "The Now Step is correct.\n"
+    if normalized == "no":
+        return "The Now Step is incorrect.\n"
+    raise ValueError(f"Unsupported R-PRM verdict: {verdict!r}")
+
+
 def load_prmbench_preview_pairs(
     *,
     path: Path,
     config: PairBuildConfig,
     max_pairs: int | None = None,
 ) -> list[ExternalPairRecord]:
-    """Load pair candidates from PRMBench preview JSONL."""
+    """Load step-local process pairs from the PRMBench preview JSONL.
+
+    这份 source 的关键语义不是“完整答案 preference”，而是：
+    在某个显式 error step 位置，原始正确 prefix 应当优于被修改后首次出错的 prefix。
+
+    The important contract here is therefore local and step-indexed:
+    the clean original prefix at one error step should beat the modified prefix
+    that first turns wrong at that same step.
+
+    That local coordinate should be persisted into metadata as
+    `positive_step_index` / `negative_step_index`, otherwise the same-family
+    trust audit cannot tell whether a checkpoint still preserves first-bad
+    discrimination inside PRMBench itself.
+    """
     config.validate()
     if not path.exists():
         raise FileNotFoundError(f"PRMBench preview JSONL not found: {path}")
 
-    rows: list[ExternalPairRecord] = []
+    raw_records: list[tuple[int, dict[str, Any]]] = []
     with path.open("r", encoding="utf-8") as handle:
         for line_no, raw in enumerate(handle, start=1):
             text = raw.strip()
             if not text:
                 continue
             payload = json.loads(text)
-            question = str(payload.get("question") or payload.get("modified_question") or "")
-            original_process = payload.get("original_process")
-            modified_process = payload.get("modified_process")
-            error_steps = payload.get("error_steps")
-            if not isinstance(original_process, list) or not isinstance(modified_process, list):
+            if isinstance(payload, dict):
+                raw_records.append((line_no, payload))
+
+    resolved_index_base = _resolve_prmbench_preview_error_step_index_base(
+        raw_records=raw_records,
+        error_step_index_base=str(config.prmbench_error_step_index_base),
+    )
+
+    rows: list[ExternalPairRecord] = []
+    for line_no, payload in raw_records:
+        question = str(
+            payload.get("question")
+            or payload.get("modified_question")
+            or payload.get("original_question")
+            or ""
+        )
+        original_process = payload.get("original_process")
+        modified_process = payload.get("modified_process")
+        error_steps = payload.get("error_steps")
+        if not isinstance(original_process, list) or not isinstance(modified_process, list):
+            continue
+        if not isinstance(error_steps, list):
+            continue
+        for error_step in error_steps:
+            try:
+                idx = int(error_step)
+            except Exception:  # noqa: BLE001
                 continue
-            if not isinstance(error_steps, list):
+            if resolved_index_base == 1:
+                idx = idx - 1
+            if idx < 0:
                 continue
-            for error_step in error_steps:
-                try:
-                    # PRMBench stores 1-based step indices in most rows.
-                    idx = int(error_step)
-                except Exception:  # noqa: BLE001
-                    continue
-                idx = idx - 1 if idx > 0 else idx
-                if idx < 0:
-                    continue
-                if idx >= len(original_process) or idx >= len(modified_process):
-                    continue
-                chosen_text = _join_steps_as_prefix(original_process, idx)
-                rejected_text = _join_steps_as_prefix(modified_process, idx)
-                confidence = 0.86 if len(error_steps) > 0 else 0.8
-                record = _build_record(
-                    source_tag="prmbench_preview",
-                    domain_tag="general_math",
-                    prompt_text=f"{question}\n\n",
-                    chosen_text=chosen_text,
-                    rejected_text=rejected_text,
-                    pair_confidence=confidence,
-                    metadata={
-                        "source_row_line": int(line_no),
-                        "source_idx": payload.get("idx"),
-                        "classification": payload.get("classification"),
-                        "error_step_index": int(idx),
-                        "num_error_steps": int(len(error_steps)),
-                        "pair_build_mode": "prmbench_explicit_error_step",
-                        "pair_semantics": "local_modified_process_error_step",
-                    },
-                    config=config,
-                )
-                if record is None:
-                    continue
-                rows.append(record)
-                if max_pairs is not None and len(rows) >= int(max_pairs):
-                    return rows
+            if idx >= len(original_process) or idx >= len(modified_process):
+                continue
+            chosen_text = _join_steps_as_prefix(original_process, idx)
+            rejected_text = _join_steps_as_prefix(modified_process, idx)
+            record = _build_record(
+                source_tag="prmbench_preview",
+                domain_tag="general_math",
+                prompt_text=f"{question}\n\n",
+                chosen_text=chosen_text,
+                rejected_text=rejected_text,
+                pair_confidence=0.86,
+                metadata={
+                    "source_row_line": int(line_no),
+                    "source_idx": payload.get("idx"),
+                    "classification": payload.get("classification"),
+                    "error_step_index": int(idx),
+                    "positive_step_index": int(idx),
+                    "negative_step_index": int(idx),
+                    "error_step_index_base": int(resolved_index_base),
+                    "num_error_steps": int(len(error_steps)),
+                    "pair_build_mode": "prmbench_explicit_error_step",
+                    "pair_semantics": "local_modified_process_error_step",
+                },
+                config=config,
+            )
+            if record is None:
+                continue
+            rows.append(record)
+            if max_pairs is not None and len(rows) >= int(max_pairs):
+                return rows
     return rows
+
+
+def _resolve_prmbench_preview_error_step_index_base(
+    *,
+    raw_records: list[tuple[int, dict[str, Any]]],
+    error_step_index_base: str,
+) -> int:
+    """Infer or validate the PRMBench preview step-index convention.
+
+    中文
+    ----
+    训练 pair 构造和 benchmark 评测必须使用同一个下标约定。这里复用与
+    `phase_e.benchmark_eval` 同样的推断逻辑：
+    1. 看见 `0` 说明至少有一行是 0-based；
+    2. 看见 `idx >= len(process)` 说明至少有一行只能解释成 1-based；
+    3. 两种信号同时出现就直接报错，而不是静默猜测。
+    """
+    normalized = str(error_step_index_base).strip().lower()
+    if normalized in {"0", "zero_based"}:
+        return 0
+    if normalized in {"1", "one_based"}:
+        return 1
+    if normalized != "auto":
+        raise ValueError(
+            "`error_step_index_base` must be one of {'auto', '0', '1', 'zero_based', 'one_based'}"
+        )
+
+    saw_zero_based_signal = False
+    saw_one_based_signal = False
+    for _, payload in raw_records:
+        original_process = payload.get("original_process")
+        modified_process = payload.get("modified_process")
+        error_steps = payload.get("error_steps")
+        if not isinstance(original_process, list) or not isinstance(modified_process, list):
+            continue
+        if not isinstance(error_steps, list):
+            continue
+        for raw_error_step in error_steps:
+            try:
+                idx = int(raw_error_step)
+            except Exception:  # noqa: BLE001
+                continue
+            if idx == 0:
+                saw_zero_based_signal = True
+            if idx >= len(original_process) or idx >= len(modified_process):
+                saw_one_based_signal = True
+    if saw_zero_based_signal and saw_one_based_signal:
+        raise RuntimeError(
+            "PRMBench preview error-step indices look mixed between 0-based and 1-based."
+        )
+    if saw_zero_based_signal:
+        return 0
+    if saw_one_based_signal:
+        return 1
+    raise RuntimeError(
+        "PRMBench preview error-step index base is ambiguous. "
+        "Set `PairBuildConfig(prmbench_error_step_index_base=...)` explicitly."
+    )
 
 
 def load_math_shepherd_pairs(
@@ -256,6 +559,11 @@ def load_math_shepherd_pairs(
         raise FileNotFoundError(f"Math-Shepherd JSONL not found: {path}")
 
     rows: list[ExternalPairRecord] = []
+    semantic_quotas = _resolve_math_shepherd_semantic_quotas(
+        config=config,
+        max_pairs=max_pairs,
+    )
+    semantic_counts = {key: 0 for key in semantic_quotas} if semantic_quotas is not None else {}
     with path.open("r", encoding="utf-8") as handle:
         for line_no, raw in enumerate(handle, start=1):
             text = raw.strip()
@@ -280,10 +588,97 @@ def load_math_shepherd_pairs(
                     "task": payload.get("task"),
                 },
             )
-            rows.extend(converted)
-            if max_pairs is not None and len(rows) >= int(max_pairs):
+            if semantic_quotas is None:
+                rows.extend(converted)
+                if max_pairs is not None and len(rows) >= int(max_pairs):
+                    return rows[: int(max_pairs)]
+                continue
+            for row in converted:
+                pair_semantics = str((row.metadata or {}).get("pair_semantics", "unspecified"))
+                quota = semantic_quotas.get(pair_semantics)
+                if quota is None:
+                    continue
+                if semantic_counts[pair_semantics] >= int(quota):
+                    continue
+                rows.append(row)
+                semantic_counts[pair_semantics] += 1
+            if all(int(semantic_counts[key]) >= int(semantic_quotas[key]) for key in semantic_quotas):
                 return rows[: int(max_pairs)]
     return rows
+
+
+def _resolve_math_shepherd_semantic_quotas(
+    *,
+    config: PairBuildConfig,
+    max_pairs: int | None,
+) -> dict[str, int] | None:
+    """Resolve per-semantics source quotas when Math-Shepherd repairs are sparse.
+
+    English
+    -------
+    Math-Shepherd is stored in a file order where all-positive trajectories
+    arrive much later than ordinary first-bad examples. If we apply
+    `max_pairs_per_source` as a naive stream head, terminal-anchor repairs can
+    disappear before they are ever seen.
+
+    When terminal anchors are enabled, we therefore reinterpret the source cap
+    as balanced quotas over the active support semantics. This keeps the source
+    budget bounded while ensuring the repair actually enters the artifact.
+
+    中文
+    ----
+    Math-Shepherd 的文件顺序里，全正轨迹会比普通 first-bad 样本晚很多出现。
+    如果直接把 `max_pairs_per_source` 当成流式截头，terminal-anchor 修复样本会在
+    还没被看到之前就被截没。
+
+    因此，当 terminal anchor 打开时，这里会把 source cap 重新解释成“按当前激活的
+    监督语义做平衡配额”。这样既能控制 source 预算，又能保证修复监督真的进入 artifact。
+    """
+    if max_pairs is None:
+        return None
+    if str(config.step_label_terminal_anchor_mode) == "none":
+        return None
+    terminal_fraction = float(config.step_label_terminal_anchor_fraction)
+    terminal_budget = max(1, int(round(int(max_pairs) * terminal_fraction)))
+    terminal_budget = min(terminal_budget, int(max_pairs) - 1)
+    primary_budget = int(max_pairs) - int(terminal_budget)
+    return {
+        _math_shepherd_primary_pair_semantics(config): int(primary_budget),
+        "terminal_completion_anchor": int(terminal_budget),
+    }
+
+
+def _math_shepherd_primary_pair_semantics(config: PairBuildConfig) -> str:
+    """Return the primary canonical pair semantics emitted by the current mode."""
+    mode = str(config.step_label_pair_mode)
+    if mode == "first_bad_edge_strict":
+        return "local_first_bad_edge"
+    if mode == "first_bad_fanout":
+        return "first_bad_fanout_prefix_ranking"
+    if mode == "all_good_vs_all_bad":
+        return "good_bad_prefix_grid"
+    if mode == "legacy_nearest":
+        return "same_trajectory_depth_mixed"
+    raise ValueError(f"Unsupported step_label_pair_mode: {mode!r}")
+
+
+def _distribute_integer_budget_evenly(
+    *,
+    keys: list[str],
+    total_budget: int,
+) -> dict[str, int]:
+    """Split one integer budget deterministically across ordered keys."""
+    if total_budget <= 0:
+        raise ValueError("`total_budget` must be > 0")
+    unique_keys = sorted({str(key) for key in keys})
+    if not unique_keys:
+        raise ValueError("At least one key is required to distribute a budget")
+    base = int(total_budget) // int(len(unique_keys))
+    remainder = int(total_budget) % int(len(unique_keys))
+    quotas: dict[str, int] = {}
+    for idx, key in enumerate(unique_keys):
+        quotas[key] = int(base + (1 if idx < remainder else 0))
+    return quotas
 
 
 def load_prm800k_pairs(
@@ -347,9 +742,17 @@ def _extract_prm800k_completion_pairs(
     """Build pairs from official PRM800K `label.steps[].completions[]` schema.
 
     Strategy:
-    - For each step, select one positive completion (`rating > 0`) and one
-      non-positive completion (`rating <= 0`).
+    - For each step, select one acceptable completion (`rating >= 0`) and one
+      clearly wrong completion (`rating < 0`).
     - Compose pair texts as prefixes over chosen history + current step variant.
+
+    RISK WARNING
+    ------------
+    PRM800K community mirrors frequently encode step ratings as `1 / 0 / -1`.
+    Treating `0` as a negative class silently flips "neutral/acceptable" steps
+    into hard negatives and can make the whole source look near-random.  We
+    therefore follow the common downstream convention used by newer benchmark
+    baselines: `1` and `0` are non-negative / acceptable, `-1` is negative.
     """
     label_obj = payload.get("label")
     if not isinstance(label_obj, dict):
@@ -368,7 +771,7 @@ def _extract_prm800k_completion_pairs(
             continue
 
         positive: tuple[str, float] | None = None
-        non_positive: tuple[str, float] | None = None
+        negative: tuple[str, float] | None = None
         for item in completions:
             if not isinstance(item, dict):
                 continue
@@ -381,23 +784,23 @@ def _extract_prm800k_completion_pairs(
             rating = _safe_rating_value(item.get("rating"))
             if rating is None:
                 continue
-            if rating > 0.0:
+            if rating >= 0.0:
                 if positive is None or rating > positive[1]:
                     positive = (text, rating)
             else:
-                if non_positive is None or rating < non_positive[1]:
-                    non_positive = (text, rating)
+                if negative is None or rating < negative[1]:
+                    negative = (text, rating)
 
-        if positive is not None and non_positive is not None:
+        if positive is not None and negative is not None:
             chosen_prefix = _join_steps_as_prefix(
                 [*history_steps, positive[0]],
                 len(history_steps),
             )
             rejected_prefix = _join_steps_as_prefix(
-                [*history_steps, non_positive[0]],
+                [*history_steps, negative[0]],
                 len(history_steps),
             )
-            rating_gap = positive[1] - non_positive[1]
+            rating_gap = positive[1] - negative[1]
             if rating_gap >= 2.0:
                 confidence = 0.78
             elif rating_gap >= 1.0:
@@ -417,7 +820,8 @@ def _extract_prm800k_completion_pairs(
                     "positive_step_index": int(step_idx),
                     "negative_step_index": int(step_idx),
                     "rating_positive": float(positive[1]),
-                    "rating_negative": float(non_positive[1]),
+                    "rating_negative": float(negative[1]),
+                    "rating_policy": "non_negative_positive",
                     "pair_build_mode": "prm800k_completion_ratings",
                     "pair_semantics": "same_step_completion_preference",
                 },
@@ -602,6 +1006,88 @@ def _iter_parquet_rows(
                 for col_idx, name in enumerate(names):
                     payload[name] = cols[col_idx][row_idx].as_py()
                 yield payload
+
+
+def load_math_step_dpo_pairs(
+    *,
+    path: Path,
+    config: PairBuildConfig,
+    max_pairs: int | None = None,
+) -> list[ExternalPairRecord]:
+    """Convert Math-Step-DPO-10K parquet rows into sibling-branch pairs.
+
+    English
+    -------
+    Math-Step-DPO-10K (xinlai/Math-Step-DPO-10K) provides explicit fork-point pairs:
+    - `initial_reason_steps`: the shared correct prefix ending at the branch step marker
+    - `chosen`: the correct step continuation (good branch)
+    - `rejected`: the wrong step continuation (bad branch)
+    These combine into `sibling_branch` pairs at a known divergence point.
+    Confidence is set high (0.80) since pairs are human-curated from the paper.
+
+    中文
+    ----
+    Math-Step-DPO-10K 提供显式分叉点 pair：
+    - `initial_reason_steps`：共享前缀（截止分叉点处）
+    - `chosen`：正确后续（好分支）
+    - `rejected`：错误后续（坏分支）
+    三者拼接构成干净的 `sibling_branch` pair。置信度设为 0.80（论文人工精选）。
+    """
+    config.validate()
+    files = sorted(Path(path).rglob("*.parquet"))
+    if not files:
+        raise FileNotFoundError(f"No Math-Step-DPO parquet files found under: {path}")
+
+    rows: list[ExternalPairRecord] = []
+    row_idx = 0
+    columns = ("prompt", "initial_reason_steps", "chosen", "rejected", "dataset")
+    for payload in _iter_parquet_rows(files=files, columns=columns):
+        row_idx += 1
+        prompt = str(payload.get("prompt") or "")
+        prefix = str(payload.get("initial_reason_steps") or "")
+        chosen_step = str(payload.get("chosen") or "")
+        rejected_step = str(payload.get("rejected") or "")
+        dataset_tag = str(payload.get("dataset") or "math_step_dpo")
+
+        if not prefix.strip() or not chosen_step.strip() or not rejected_step.strip():
+            continue
+
+        # 拼接完整文本：shared prefix + branch step / Concatenate: shared prefix + branch step
+        chosen_text = prefix + chosen_step
+        rejected_text = prefix + rejected_step
+
+        flags = _compute_quality_flags(
+            prompt_text=prompt,
+            chosen_text=chosen_text,
+            rejected_text=rejected_text,
+        )
+        if not _passes_quality_filter(flags=flags, config=config):
+            continue
+
+        pair_id = _stable_hash("math_step_dpo", str(row_idx), prompt, chosen_step, rejected_step)
+        rows.append(
+            ExternalPairRecord(
+                pair_id=pair_id,
+                source_tag="math_step_dpo",
+                domain_tag="math",
+                prompt_text=prompt + "\n\n" if prompt else "",
+                chosen_text=chosen_text,
+                rejected_text=rejected_text,
+                pair_confidence=0.80,
+                quality_flags=flags,
+                metadata={
+                    "source_row_index": int(row_idx),
+                    "source_path": str(path),
+                    "source_dataset_tag": dataset_tag,
+                    "pair_semantics": "sibling_branch",
+                    "pair_build_mode": "math_step_dpo_fork_pair",
+                    "split_group_id": _stable_hash("math_step_dpo", prompt, prefix),
+                },
+            )
+        )
+        if max_pairs is not None and len(rows) >= int(max_pairs):
+            break
+    return rows
 
 
 def _collect_prm800k_files(path: Path) -> list[Path]:
@@ -855,8 +1341,22 @@ def _convert_step_labels_to_pairs(
        - compare the last clean prefix against the prefix that includes the
          first bad step.
 
+    Benchmark-alignment variants:
+    2. `first_bad_fanout`
+       - keep the same first-bad negative prefix,
+       - but compare it against multiple earlier good prefixes from the same
+         trajectory.
+       - This is explicitly trying to better match ProcessBench's
+         `any-good vs first-bad` evaluation slice.
+    3. `all_good_vs_all_bad`
+       - compare multiple good prefixes before the first bad step against
+         multiple bad prefixes from the same trajectory.
+       - This is the closest simple approximation to ProcessBench's
+         good-vs-bad pair geometry, but it also mixes local error signal with
+         later-bad severity / trajectory depth.
+
     Legacy mode remains available only for historical forensics:
-    1. `legacy_nearest`
+    4. `legacy_nearest`
        - compare a positive-index prefix with the nearest negative-index prefix
          from the same trajectory.
        - This mixes depth/progress signal with local error signal and should
@@ -867,16 +1367,23 @@ def _convert_step_labels_to_pairs(
     这个分支点本身就有研究含义：
 
     1. `first_bad_edge_strict`
-       - 语义更干净，更接近“局部第一次出错”
-       - 代价是会丢掉一部分难以严格构造的样本
-    2. `legacy_nearest`
+       - 语义最干净，更接近“局部第一次出错”
+       - 代价是监督支持面最窄
+    2. `first_bad_fanout`
+       - 仍然只围绕 first bad 做负样本
+       - 但会把更早的好 prefix 也拉进来，主动靠近 ProcessBench 的
+         `any-good vs first-bad` 评测关系
+    3. `all_good_vs_all_bad`
+       - 最接近 ProcessBench 的全量 good-vs-bad prefix 几何
+       - 但研究语义也最“重”，因为它会把局部错误、坏前缀严重程度、轨迹深度一起编码进 pair
+    4. `legacy_nearest`
        - 样本可能更多
        - 但会把“推理深度/进度”与“局部错误”混在一起
 
     所以后面的实验结果怎么解释，很大程度取决于这里选的是哪条路径。
     """
     if config.step_label_pair_mode == "first_bad_edge_strict":
-        return _convert_step_labels_to_first_bad_edge_pairs(
+        base_rows = _convert_step_labels_to_first_bad_edge_pairs(
             prompt_text=prompt_text,
             step_labels=step_labels,
             source_tag=source_tag,
@@ -884,8 +1391,8 @@ def _convert_step_labels_to_pairs(
             config=config,
             base_metadata=base_metadata,
         )
-    if config.step_label_pair_mode == "legacy_nearest":
-        return _convert_step_labels_to_legacy_pairs(
+    elif config.step_label_pair_mode == "first_bad_fanout":
+        base_rows = _convert_step_labels_to_first_bad_fanout_pairs(
             prompt_text=prompt_text,
             step_labels=step_labels,
             source_tag=source_tag,
@@ -893,7 +1400,124 @@ def _convert_step_labels_to_pairs(
             config=config,
             base_metadata=base_metadata,
         )
-    raise ValueError(f"Unsupported step_label_pair_mode: {config.step_label_pair_mode!r}")
+    elif config.step_label_pair_mode == "all_good_vs_all_bad":
+        base_rows = _convert_step_labels_to_all_good_vs_all_bad_pairs(
+            prompt_text=prompt_text,
+            step_labels=step_labels,
+            source_tag=source_tag,
+            domain_tag=domain_tag,
+            config=config,
+            base_metadata=base_metadata,
+        )
+    elif config.step_label_pair_mode == "legacy_nearest":
+        base_rows = _convert_step_labels_to_legacy_pairs(
+            prompt_text=prompt_text,
+            step_labels=step_labels,
+            source_tag=source_tag,
+            domain_tag=domain_tag,
+            config=config,
+            base_metadata=base_metadata,
+        )
+    else:
+        raise ValueError(f"Unsupported step_label_pair_mode: {config.step_label_pair_mode!r}")
+
+    # Terminal-anchor supervision is intentionally orthogonal to the main
+    # good-vs-bad conversion mode.
+    # terminal-anchor 监督故意设计成与主 good-vs-bad 转换模式正交，
+    # 这样我们才能单独回答“缺 all-correct 终点锚点到底伤了多少迁移”。
+    anchor_rows = _convert_step_labels_to_terminal_anchor_pairs(
+        prompt_text=prompt_text,
+        step_labels=step_labels,
+        source_tag=source_tag,
+        domain_tag=domain_tag,
+        config=config,
+        base_metadata=base_metadata,
+    )
+    return [*base_rows, *anchor_rows]
+
+
+def _convert_step_labels_to_terminal_anchor_pairs(
+    *,
+    prompt_text: str,
+    step_labels: list[tuple[str, str]],
+    source_tag: str,
+    domain_tag: str,
+    config: PairBuildConfig,
+    base_metadata: dict[str, Any],
+) -> list[ExternalPairRecord]:
+    """Build synthetic terminal anchors from all-positive trajectories.
+
+    English
+    -------
+    ProcessBench contains a large `all-correct` slice where the model must rank
+    the *final correct prefix* above earlier safe prefixes.
+
+    Pure first-bad-edge conversion never exposes that relation, because
+    all-positive trajectories yield zero pairs.  This helper closes that gap by
+    turning an all-positive trajectory into:
+    1. chosen = full correct solution,
+    2. rejected = one or more earlier safe prefixes.
+
+    中文
+    ----
+    ProcessBench 有相当大一块 `all-correct` 评测：模型需要把“完整正确终点”
+    排在更早的安全前缀前面。
+
+    纯 first-bad-edge 转换永远看不到这种关系，因为全正轨迹以前会直接产生 0 个 pair。
+    这里就是把全正轨迹补成：
+    1. chosen = 完整正确解答，
+    2. rejected = 若干更早的安全前缀，
+    从而显式补上 terminal-anchor 支持面。
+    """
+    if config.step_label_terminal_anchor_mode == "none":
+        return []
+    if config.step_label_terminal_anchor_mode != "all_positive_fanout":
+        raise ValueError(
+            f"Unsupported step_label_terminal_anchor_mode: {config.step_label_terminal_anchor_mode!r}"
+        )
+    if len(step_labels) < 2:
+        return []
+    if any(label != "+" for _, label in step_labels):
+        return []
+
+    terminal_idx = len(step_labels) - 1
+    candidate_rejected_indices = list(range(int(terminal_idx) - 1, -1, -1))
+    selected_rejected_indices = _select_diverse_candidates(
+        candidates=candidate_rejected_indices,
+        max_items=int(config.max_pairs_per_sample),
+    )
+    rows: list[ExternalPairRecord] = []
+    full_prefix = _join_steps_as_prefix([step for step, _ in step_labels], int(terminal_idx))
+    for rejected_idx in selected_rejected_indices:
+        rejected_prefix = _join_steps_as_prefix([step for step, _ in step_labels], int(rejected_idx))
+        step_gap = int(terminal_idx) - int(rejected_idx)
+        # Keep this confidence slightly below clean local first-bad-edge pairs:
+        # the anchor is useful, but it can still leak length/progress bias.
+        # 这里故意把 confidence 设得略低于局部 first-bad-edge：
+        # 它是有价值的补监督，但仍然可能混入长度/进度偏差。
+        confidence = 0.70 if step_gap <= 1 else 0.66
+        record = _build_record(
+            source_tag=source_tag,
+            domain_tag=domain_tag,
+            prompt_text=prompt_text,
+            chosen_text=full_prefix,
+            rejected_text=rejected_prefix,
+            pair_confidence=confidence,
+            metadata={
+                **base_metadata,
+                "positive_step_index": int(terminal_idx),
+                "negative_step_index": int(rejected_idx),
+                "num_step_labels": int(len(step_labels)),
+                "step_gap": int(step_gap),
+                "terminal_step_index": int(terminal_idx),
+                "pair_build_mode": "step_label_all_positive_terminal_anchor",
+                "pair_semantics": "terminal_completion_anchor",
+            },
+            config=config,
+        )
+        if record is not None:
+            rows.append(record)
+    return rows
 
 
 def _convert_step_labels_to_first_bad_edge_pairs(
@@ -965,6 +1589,290 @@ def _convert_step_labels_to_first_bad_edge_pairs(
         config=config,
     )
     return [record] if record is not None else []
+
+
+def _convert_step_labels_to_first_bad_fanout_pairs(
+    *,
+    prompt_text: str,
+    step_labels: list[tuple[str, str]],
+    source_tag: str,
+    domain_tag: str,
+    config: PairBuildConfig,
+    base_metadata: dict[str, Any],
+) -> list[ExternalPairRecord]:
+    """Build a capped fanout of `good prefix -> first bad prefix` pairs.
+
+    English
+    -------
+    This mode keeps the negative side fixed at the first bad prefix, but lets
+    multiple earlier good prefixes compete against it.  It exists because
+    ProcessBench does not only ask:
+    "is the last safe prefix above the first bad prefix?"
+    It also implicitly asks:
+    "are *other* earlier good prefixes above that first bad prefix too?"
+
+    中文
+    ----
+    这个模式把负样本固定为 first bad prefix，但允许多个更早的好 prefix 去和它比较。
+    它存在的原因是：ProcessBench 并不只测
+    “最后一个安全 prefix 是否高于 first bad prefix”，
+    它还会隐含地测
+    “更早的那些好 prefix，是否也整体高于这个 first bad prefix”。
+    """
+    first_negative_idx = next((idx for idx, (_, label) in enumerate(step_labels) if label == "-"), None)
+    if first_negative_idx is None or int(first_negative_idx) <= 0:
+        return []
+    candidate_positive_indices = list(range(int(first_negative_idx) - 1, -1, -1))
+    selected_positive_indices = _select_diverse_candidates(
+        candidates=candidate_positive_indices,
+        max_items=int(config.max_pairs_per_sample),
+    )
+    rows: list[ExternalPairRecord] = []
+    for chosen_idx in selected_positive_indices:
+        record = _build_step_label_pair_record(
+            prompt_text=prompt_text,
+            step_labels=step_labels,
+            source_tag=source_tag,
+            domain_tag=domain_tag,
+            chosen_idx=int(chosen_idx),
+            rejected_idx=int(first_negative_idx),
+            first_negative_idx=int(first_negative_idx),
+            config=config,
+            base_metadata=base_metadata,
+            pair_build_mode="step_label_first_bad_fanout",
+            pair_semantics="first_bad_fanout_prefix_ranking",
+        )
+        if record is not None:
+            rows.append(record)
+    return rows
+
+
+def _convert_step_labels_to_all_good_vs_all_bad_pairs(
+    *,
+    prompt_text: str,
+    step_labels: list[tuple[str, str]],
+    source_tag: str,
+    domain_tag: str,
+    config: PairBuildConfig,
+    base_metadata: dict[str, Any],
+) -> list[ExternalPairRecord]:
+    """Build a capped grid of `good prefix -> bad prefix` pairs from one trajectory.
+
+    English
+    -------
+    This mode is intentionally more benchmark-aligned and less semantically
+    pure than `first_bad_edge_strict`.
+
+    RISK WARNING:
+    The resulting pairs no longer isolate only the first local failure edge.
+    They also expose later-bad prefixes, which means the model can partially
+    learn:
+    1. cumulative damage after the first error,
+    2. trajectory depth,
+    3. and text-length growth.
+
+    We keep this mode because ProcessBench itself evaluates many such
+    good-vs-bad prefix relations, especially on the math split.
+
+    中文
+    ----
+    这个模式是故意“更贴近 benchmark、但语义更重”的选择。
+
+    RISK WARNING:
+    这里构造出的 pair 已经不再只隔离 first bad 的局部边界。
+    它还把 later bad prefix 暴露给模型，因此模型可能部分学到：
+    1. 第一次出错之后的累积损伤，
+    2. 轨迹走到了多深，
+    3. 以及文本长度增长。
+
+    我们仍然保留它，是因为 ProcessBench 本身就大量评测这种
+    good-vs-bad prefix 关系，尤其在 `math` split 上更明显。
+    """
+    first_negative_idx = next((idx for idx, (_, label) in enumerate(step_labels) if label == "-"), None)
+    if first_negative_idx is None or int(first_negative_idx) <= 0:
+        return []
+    candidate_pairs: list[tuple[int, int]] = []
+    # Priority order:
+    # 1. local edge first,
+    # 2. other good-vs-first-bad comparisons,
+    # 3. last-safe-vs-later-bad comparisons,
+    # 4. remaining grid pairs.
+    # 这样在需要裁剪到 `max_pairs_per_sample` 时，最先保留下来的总是研究语义更核心的那些 pair。
+    candidate_pairs.append((int(first_negative_idx) - 1, int(first_negative_idx)))
+    for chosen_idx in range(int(first_negative_idx) - 2, -1, -1):
+        candidate_pairs.append((int(chosen_idx), int(first_negative_idx)))
+    for rejected_idx in range(int(first_negative_idx) + 1, len(step_labels)):
+        candidate_pairs.append((int(first_negative_idx) - 1, int(rejected_idx)))
+    for rejected_idx in range(int(first_negative_idx) + 1, len(step_labels)):
+        for chosen_idx in range(int(first_negative_idx) - 2, -1, -1):
+            candidate_pairs.append((int(chosen_idx), int(rejected_idx)))
+
+    selected_pairs = _select_diverse_candidates(
+        candidates=candidate_pairs,
+        max_items=int(config.max_pairs_per_sample),
+    )
+    rows: list[ExternalPairRecord] = []
+    for chosen_idx, rejected_idx in selected_pairs:
+        record = _build_step_label_pair_record(
+            prompt_text=prompt_text,
+            step_labels=step_labels,
+            source_tag=source_tag,
+            domain_tag=domain_tag,
+            chosen_idx=int(chosen_idx),
+            rejected_idx=int(rejected_idx),
+            first_negative_idx=int(first_negative_idx),
+            config=config,
+            base_metadata=base_metadata,
+            pair_build_mode="step_label_all_good_vs_all_bad",
+            pair_semantics="good_bad_prefix_grid",
+        )
+        if record is not None:
+            rows.append(record)
+    return rows
+
+
+def _select_diverse_candidates(
+    *,
+    candidates: list[Any],
+    max_items: int,
+) -> list[Any]:
+    """Keep a small, deterministic, coverage-preserving subset of candidates.
+
+    English
+    -------
+    When a trajectory can generate many benchmark-aligned pairs, we still need
+    a cap so pair preparation remains tractable on shared research machines.
+    The strategy here is deliberately simple:
+
+    1. always keep the first candidate,
+    2. then spread the remaining picks across the full candidate list.
+
+    This preserves a strong local anchor while still exposing farther geometric
+    variants.
+
+    中文
+    ----
+    一条轨迹可能生成很多更贴近 benchmark 的 pair，但我们仍然需要上限，避免
+    共享服务器上的 pair 准备阶段膨胀失控。
+
+    这里的策略故意保持简单：
+    1. 永远保留第一个候选，
+    2. 其余名额尽量在整条候选列表上均匀铺开。
+
+    这样既保住最核心的局部边界 pair，又能覆盖更远的几何变体。
+    """
+    if int(max_items) <= 0:
+        raise ValueError("`max_items` must be > 0")
+    if len(candidates) <= int(max_items):
+        return list(candidates)
+    if int(max_items) == 1:
+        return [candidates[0]]
+    selected = [candidates[0]]
+    remaining = candidates[1:]
+    if not remaining:
+        return selected
+    if int(max_items) == 2:
+        selected.append(remaining[-1])
+        return selected
+    used_indices: set[int] = set()
+    denominator = int(max_items) - 2
+    for slot in range(int(max_items) - 1):
+        if denominator <= 0:
+            index = len(remaining) - 1
+        else:
+            index = round(slot * (len(remaining) - 1) / denominator)
+        index = min(max(int(index), 0), len(remaining) - 1)
+        if index in used_indices:
+            continue
+        selected.append(remaining[index])
+        used_indices.add(index)
+        if len(selected) >= int(max_items):
+            return selected
+    for index, item in enumerate(remaining):
+        if index in used_indices:
+            continue
+        selected.append(item)
+        if len(selected) >= int(max_items):
+            break
+    return selected
+
+
+def _build_step_label_pair_record(
+    *,
+    prompt_text: str,
+    step_labels: list[tuple[str, str]],
+    source_tag: str,
+    domain_tag: str,
+    chosen_idx: int,
+    rejected_idx: int,
+    first_negative_idx: int,
+    config: PairBuildConfig,
+    base_metadata: dict[str, Any],
+    pair_build_mode: str,
+    pair_semantics: str,
+) -> ExternalPairRecord | None:
+    """Build one step-label-derived pair with shared metadata and confidence logic.
+
+    中文
+    ----
+    多种 step-label pair mode 最终都落成同一个 canonical pair contract。
+    这个 helper 把公共部分收敛起来，避免不同 mode 因为复制粘贴而慢慢漂移。
+    """
+    chosen_text = _join_steps_as_prefix([step for step, _ in step_labels], int(chosen_idx))
+    rejected_text = _join_steps_as_prefix([step for step, _ in step_labels], int(rejected_idx))
+    record = _build_record(
+        source_tag=source_tag,
+        domain_tag=domain_tag,
+        prompt_text=prompt_text,
+        chosen_text=chosen_text,
+        rejected_text=rejected_text,
+        pair_confidence=_step_label_pair_confidence(
+            chosen_idx=int(chosen_idx),
+            rejected_idx=int(rejected_idx),
+            first_negative_idx=int(first_negative_idx),
+        ),
+        metadata={
+            **base_metadata,
+            "positive_step_index": int(chosen_idx),
+            "negative_step_index": int(rejected_idx),
+            "first_negative_index": int(first_negative_idx),
+            "num_step_labels": int(len(step_labels)),
+            "step_gap": int(rejected_idx) - int(chosen_idx),
+            "chosen_is_last_good": bool(int(chosen_idx) == int(first_negative_idx) - 1),
+            "negative_is_first_bad": bool(int(rejected_idx) == int(first_negative_idx)),
+            "pair_build_mode": str(pair_build_mode),
+            "pair_semantics": str(pair_semantics),
+        },
+        config=config,
+    )
+    return record
+
+
+def _step_label_pair_confidence(
+    *,
+    chosen_idx: int,
+    rejected_idx: int,
+    first_negative_idx: int,
+) -> float:
+    """Heuristically lower confidence as one pair moves away from the local error edge.
+
+    English
+    -------
+    This is not a calibrated probability.  It is only a weak prior encoding:
+    "the farther we move away from the first-bad boundary, the more extra
+    factors besides local error can leak into the pair."
+
+    中文
+    ----
+    这不是校准后的概率，只是一个很弱的先验：
+    “pair 离 first-bad 局部边界越远，越可能混入更多非局部错误因素。”
+    """
+    distance_from_last_good = max((int(first_negative_idx) - 1) - int(chosen_idx), 0)
+    distance_from_first_bad = max(int(rejected_idx) - int(first_negative_idx), 0)
+    confidence = 0.74
+    confidence -= 0.04 * float(min(distance_from_last_good, 4))
+    confidence -= 0.03 * float(min(distance_from_first_bad, 4))
+    return float(max(confidence, 0.55))
 
 
 def _convert_step_labels_to_legacy_pairs(
@@ -1105,6 +2013,15 @@ def _build_record(
     )[:20]
     # Content-hash ids make deduplication and reruns stable even when file order changes.
     # 基于内容哈希的 pair_id 能让去重与复现不受文件顺序变化影响。
+    metadata_payload = dict(metadata)
+    metadata_payload.setdefault(
+        "split_group_id",
+        _derive_split_group_id(
+            source_tag=str(source_tag).strip(),
+            prompt_text=str(prompt_text),
+            metadata=metadata_payload,
+        ),
+    )
     record = ExternalPairRecord(
         pair_id=pair_id,
         source_tag=str(source_tag).strip(),
@@ -1114,10 +2031,53 @@ def _build_record(
         rejected_text=str(rejected_text),
         pair_confidence=float(min(max(pair_confidence, 0.0), 1.0)),
         quality_flags=flags,
-        metadata=dict(metadata),
+        metadata=metadata_payload,
     )
     record.validate()
     return record
+
+
+def _derive_split_group_id(
+    *,
+    source_tag: str,
+    prompt_text: str,
+    metadata: dict[str, Any],
+) -> str:
+    """Derive a stable source-sample grouping key for split hygiene.
+
+    English
+    -------
+    Multiple canonical pairs can originate from one raw source sample.  When we
+    want stricter train/validation hygiene, those derived pairs should move
+    together. This helper normalizes that grouping key once at adapter time.
+
+    中文
+    ----
+    一条原始样本可能衍生出多个 canonical pair。若后面启用更严格的切分卫生，
+    这些 pair 应该整体移动。这里在 adapter 阶段先把分组键标准化出来。
+    """
+    explicit = str(metadata.get("split_group_id", "")).strip()
+    if explicit:
+        return explicit
+    prefix_parts = [str(source_tag).strip()]
+    for key in ("source_split", "task", "source_root", "source_file", "source_path"):
+        value = metadata.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            prefix_parts.append(f"{key}={text}")
+    for key in ("source_idx", "source_row_index", "source_row_line", "source_line"):
+        value = metadata.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            prefix_parts.append(f"{key}={text}")
+            return "|".join(prefix_parts)
+    prompt_fingerprint = _stable_hash(str(source_tag).strip(), _normalize_space(prompt_text))[:16]
+    prefix_parts.append(f"prompt={prompt_fingerprint}")
+    return "|".join(prefix_parts)
 
 
 def _compute_quality_flags(

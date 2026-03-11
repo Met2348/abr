@@ -53,10 +53,12 @@ Changes to this file are user-authorized only.
 26. Future code added by the assistant should follow this documentation style without needing repeated reminders.
 27. When generating future experiment commands for the user:
     - prefer `CUDA_VISIBLE_DEVICES` values other than `0` by default because device `0` is usually crowded in the user's environment; if  a few commands come in a series, prefer to use device id: 1 -> 2 -> 3 -> 0 -> 1 -> 2 -> 3 -> ...
-    - prefer eval batch sizes of `64` or larger when the task is inference/evaluation and there is no known memory-risk reason to stay smaller.
+    - prefer eval batch sizes of `96` or larger when the task is inference/evaluation and there is no known memory-risk reason to stay smaller.
 28. If a command intentionally uses a smaller eval batch size or device `0`, the assistant should explain the reason briefly.
-
+29. All codes delivered through the chat should be run-ready, not missing params or requiring user to manually fill-in some blanks
+30. every time, a modified code block or newly generated code file should be filled with Both English and Chinese comments (Bilingual), Chinese followed by English. you are not allowed to write explicit language indicators like "English:" or "中文:". 
+31. If the assistant is required to search the web for paper consensus or community repo, the assistant should automatically summarize and write all searched results to docs, working as critical directions for the research.
 ## Acknowledgement Metadata
 
-- Last explicit user instruction to refresh this file: `2026-03-04`
-- Source scope: modified the three 'readme-like' file's usage explanation, manually by the user
+- Last explicit user instruction to refresh this file: `2026-03-10`
+- Source scope: modified the comment and doc rules, manually by the user

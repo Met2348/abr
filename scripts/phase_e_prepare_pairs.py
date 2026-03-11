@@ -80,6 +80,25 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--validation-ratio", type=float, default=0.1)
+    parser.add_argument(
+        "--split-granularity",
+        choices=["pair_id", "source_sample"],
+        default="pair_id",
+        help=(
+            "How train/validation splitting should be performed. "
+            "`pair_id` reproduces the legacy behavior; `source_sample` keeps all pairs from one raw sample together."
+        ),
+    )
+    parser.add_argument(
+        "--global-cap-mode",
+        choices=["pair_id_head", "balanced_support_bucket"],
+        default="pair_id_head",
+        help=(
+            "How the final `max_pairs_total` cap should be applied after confidence filtering and dedup. "
+            "`pair_id_head` preserves the legacy deterministic head-of-list behavior; "
+            "`balanced_support_bucket` round-robins over `(source_tag, pair_semantics)` buckets so rare repair semantics survive smoke-time caps."
+        ),
+    )
     parser.add_argument("--max-pairs-total", type=int, default=None)
     parser.add_argument("--max-pairs-per-source", type=int, default=None)
     parser.add_argument("--min-pair-confidence", type=float, default=0.0)
@@ -89,11 +108,45 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-pairs-per-sample", type=int, default=2)
     parser.add_argument(
         "--step-label-pair-mode",
-        choices=["first_bad_edge_strict", "legacy_nearest"],
+        choices=[
+            "first_bad_edge_strict",
+            "first_bad_fanout",
+            "all_good_vs_all_bad",
+            "legacy_nearest",
+        ],
         default="first_bad_edge_strict",
         help=(
             "How to convert single-trajectory +/- step labels into pairs. "
-            "Default is the safe local first-bad-edge mode."
+            "Default is the safe local first-bad-edge mode. "
+            "`first_bad_fanout` and `all_good_vs_all_bad` are explicit benchmark-alignment experiments, not neutral ETL choices."
+        ),
+    )
+    parser.add_argument(
+        "--step-label-terminal-anchor-mode",
+        choices=["none", "all_positive_fanout"],
+        default="none",
+        help=(
+            "Optional terminal-anchor augmentation for all-positive step-labeled trajectories. "
+            "`all_positive_fanout` adds `full correct solution > earlier safe prefix` pairs so ProcessBench all-correct slices are no longer entirely unseen during training."
+        ),
+    )
+    parser.add_argument(
+        "--step-label-terminal-anchor-fraction",
+        type=float,
+        default=0.5,
+        help=(
+            "When terminal anchors are enabled and a source cap is active, reserve this fraction of the Math-Shepherd source budget for terminal anchors. "
+            "Use values below 0.5 to keep terminal supervision auxiliary rather than co-equal."
+        ),
+    )
+    parser.add_argument(
+        "--r-prm-pair-mode",
+        choices=["direct_pair_legacy", "compact_verdict", "compact_correctness"],
+        default="compact_verdict",
+        help=(
+            "How R-PRM DPO rows should be converted into canonical pairs. "
+            "`compact_verdict` is the Phase E default because it removes the long verifier-essay contract. "
+            "`compact_correctness` keeps the same compact prompt but answers in Correct/Incorrect space."
         ),
     )
 
@@ -146,6 +199,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--max-token-overlap must be in [0, 1]")
     if int(args.max_pairs_per_sample) <= 0:
         raise ValueError("--max-pairs-per-sample must be > 0")
+    if not (0.0 < float(args.step_label_terminal_anchor_fraction) < 1.0):
+        raise ValueError("--step-label-terminal-anchor-fraction must be in (0, 1)")
     return args
 
 
@@ -178,6 +233,9 @@ def main(argv: list[str] | None = None) -> int:
         max_token_overlap=float(args.max_token_overlap),
         max_pairs_per_sample=int(args.max_pairs_per_sample),
         step_label_pair_mode=str(args.step_label_pair_mode),
+        step_label_terminal_anchor_mode=str(args.step_label_terminal_anchor_mode),
+        step_label_terminal_anchor_fraction=float(args.step_label_terminal_anchor_fraction),
+        r_prm_pair_mode=str(args.r_prm_pair_mode),
     )
 
     # Step 3: build or reuse the deterministic artifact directory.
@@ -196,6 +254,8 @@ def main(argv: list[str] | None = None) -> int:
             int(args.max_pairs_per_source) if args.max_pairs_per_source is not None else None
         ),
         min_pair_confidence=float(args.min_pair_confidence),
+        split_granularity=str(args.split_granularity),
+        global_cap_mode=str(args.global_cap_mode),
         source_weight_overrides=source_weight_overrides,
         resume=bool(args.resume),
         overwrite=bool(args.overwrite),
@@ -211,8 +271,19 @@ def main(argv: list[str] | None = None) -> int:
     print(f"num_total_pairs   : {artifact.summary['num_rows_after_dedup']}")
     print(f"num_train_pairs   : {artifact.summary['num_train_rows']}")
     print(f"num_val_pairs     : {artifact.summary['num_validation_rows']}")
+    print(f"split_granularity : {artifact.summary['build_config'].get('split_granularity')}")
+    print(f"global_cap_mode   : {artifact.summary['build_config'].get('global_cap_mode')}")
     print(f"source_weights    : {artifact.summary['build_config'].get('source_weight_overrides', {})}")
     print(f"step_label_mode   : {artifact.summary['build_config'].get('step_label_pair_mode')}")
+    print(
+        "step_label_terminal_anchor_mode : "
+        f"{artifact.summary['build_config'].get('step_label_terminal_anchor_mode')}"
+    )
+    print(
+        "step_label_terminal_anchor_fraction : "
+        f"{artifact.summary['build_config'].get('step_label_terminal_anchor_fraction')}"
+    )
+    print(f"r_prm_pair_mode   : {artifact.summary['build_config'].get('r_prm_pair_mode')}")
     print(f"train_pairs_path  : {artifact.train_pairs_path}")
     print(f"val_pairs_path    : {artifact.validation_pairs_path}")
     print(f"summary_path      : {artifact.summary_path}")

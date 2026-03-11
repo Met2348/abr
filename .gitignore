@@ -9,8 +9,8 @@ __pycache__/
 # running
 *.safetensors
 .gitattributes
-*.pptx
-*.pdf
+# *.pptx
+# *.pdf
 # result/
 # log/
 # kit/
@@ -23,6 +23,9 @@ __pycache__/
 # checkpoints/
 assets/hf_cache/*
 assets/artifacts/*
+tmp/*
+memory/*
+*.lock
 
 
 # Distribution / packaging

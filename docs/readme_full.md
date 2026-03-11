@@ -2,6 +2,2015 @@
 
 This repository is building an in-house reasoning-faithfulness pipeline from scratch.
 
+## 2026-03-11 Pairwise Judge Benchmark And Filter Pilot
+
+Question:
+1. after the negative strict-JSON pointwise judge audit, does a more literature-aligned
+   `pairwise + swap-debias + light contract` judge setup become usable?
+2. can the local judge now act as a conservative label-preserving Phase E pair filter?
+
+Short answer:
+1. partially, but only weakly:
+   - `PRMBench_Preview` shows some limited judge utility,
+   - `Math-Shepherd local_first_bad_edge` does not;
+2. no: the current local judge is still not strong enough to be promoted to a
+   bulk label-preserving filter.
+
+New script:
+1. `scripts/phase_e_pairwise_judge_benchmark.py`
+
+Unified compare artifact:
+1. `assets/artifacts/phase_e_pairwise_judge_compare/judge_pairwise_compare_20260311T084132Z/summary.md`
+
+Commands actually executed:
+
+Held-out `PRMBench_Preview`, `Qwen2.5-Math-7B-Instruct`:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_e_pairwise_judge_benchmark.py \
+  --pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_all_acc90_0310_1915_e44_prmbench_acc90_linear_seed3_e44_prmbench_acc90_linear_seed3_sharedsplit_s42_pairs__66693d3b512f/validation_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-Math-7B-Instruct \
+  --run-name pairjudge_qwen_prmbench_anchor32 \
+  --dataset-label prmbench_preview_val32_anchor \
+  --max-samples 32 \
+  --batch-size 4 \
+  --max-input-length 2048 \
+  --max-new-tokens 48 \
+  --assistant-prefix '[FINAL]\nPREFERRED='
+```
+
+Held-out `PRMBench_Preview`, `DeepSeek-R1-Distill-Qwen-14B`:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 python -u scripts/phase_e_pairwise_judge_benchmark.py \
+  --pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_all_acc90_0310_1915_e44_prmbench_acc90_linear_seed3_e44_prmbench_acc90_linear_seed3_sharedsplit_s42_pairs__66693d3b512f/validation_pairs.jsonl \
+  --model-path assets/models/DeepSeek-R1-Distill-Qwen-14B \
+  --run-name pairjudge_deepseek_prmbench_anchor16 \
+  --dataset-label prmbench_preview_val16_anchor \
+  --max-samples 16 \
+  --batch-size 2 \
+  --max-input-length 2048 \
+  --max-new-tokens 48 \
+  --no-use-system-prompt \
+  --assistant-prefix '[FINAL]\nPREFERRED='
+```
+
+Held-out `Math-Shepherd local_first_bad_edge`, `Qwen2.5-Math-7B-Instruct`:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_e_pairwise_judge_benchmark.py \
+  --pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_all_acc90_0310_1915_e41_ms_acc90_mlp_rank_seed3_e41_ms_acc90_mlp_rank_seed3_sharedsplit_s42_pairs__a642ebf5fab7/validation_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-Math-7B-Instruct \
+  --run-name pairjudge_qwen_ms_val32_anchor \
+  --dataset-label math_shepherd_val32_anchor \
+  --max-samples 32 \
+  --batch-size 4 \
+  --max-input-length 2048 \
+  --max-new-tokens 48 \
+  --assistant-prefix '[FINAL]\nPREFERRED='
+```
+
+Train-slice filter pilot, `PRMBench_Preview`:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_e_pairwise_judge_benchmark.py \
+  --pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_all_acc90_0310_1915_e44_prmbench_acc90_linear_seed3_e44_prmbench_acc90_linear_seed3_sharedsplit_s42_pairs__66693d3b512f/train_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-Math-7B-Instruct \
+  --run-name pairjudge_qwen_prmbench_train64_anchor \
+  --dataset-label prmbench_preview_train64_anchor \
+  --max-samples 64 \
+  --batch-size 4 \
+  --max-input-length 2048 \
+  --max-new-tokens 48 \
+  --assistant-prefix '[FINAL]\nPREFERRED='
+```
+
+Train-slice filter pilot, `Math-Shepherd`:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 python -u scripts/phase_e_pairwise_judge_benchmark.py \
+  --pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_all_acc90_0310_1915_e41_ms_acc90_mlp_rank_seed3_e41_ms_acc90_mlp_rank_seed3_sharedsplit_s42_pairs__a642ebf5fab7/train_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-Math-7B-Instruct \
+  --run-name pairjudge_qwen_ms_train64_anchor \
+  --dataset-label math_shepherd_train64_anchor \
+  --max-samples 64 \
+  --batch-size 4 \
+  --max-input-length 2048 \
+  --max-new-tokens 48 \
+  --assistant-prefix '[FINAL]\nPREFERRED='
+```
+
+Key results:
+1. `Qwen` on `PRMBench_Preview` held-out:
+   - `both_parse_ok_rate = 0.3125`
+   - `pair_acc_majority = 0.3438`
+   - `swap_consistency_rate = 0.6000`
+   - `label_preserving_keep_rate = 0.1250`
+2. `Qwen` on `Math-Shepherd` held-out:
+   - `both_parse_ok_rate = 0.2188`
+   - `pair_acc_majority = 0.0625`
+   - `label_preserving_keep_rate = 0.0312`
+3. `Qwen` as train-slice filter:
+   - `PRMBench_Preview`: `keep_rate = 0.0469`
+   - `Math-Shepherd`: `keep_rate = 0.0000`
+4. `DeepSeek` on `PRMBench_Preview` held-out:
+   - `both_parse_ok_rate = 0.5625`
+   - `pair_acc_majority = 0.0625`
+   - `tie_rate = 0.8125`
+
+Interpretation:
+1. pairwise judging is indeed a better operational direction than the earlier
+   pointwise strict-JSON judge path;
+2. but the current local judge models are still too weak to serve as robust
+   bulk Phase E pair filters;
+3. and `PRMBench_Preview` is much closer to judge-usable semantics than
+   `Math-Shepherd local_first_bad_edge`.
+
+## 2026-03-11 Judge LLM Selection And Local Deployment
+
+Question:
+1. if Phase E moves toward `LLM-as-a-judge`, which local judge models should we
+   actually install and trust on the current server?
+
+Short answer:
+1. `Qwen2.5-Math-7B-Instruct` is the best current bulk local judge candidate,
+2. `DeepSeek-R1-Distill-Qwen-14B` is installed but not yet operationally stable
+   enough for the mainline local judge loop,
+3. `QwQ-32B` remains a later optional upgrade, not the right first local
+   deployment choice.
+
+## 2026-03-11 Backbone Relaxation + Judge Pilot
+
+Question:
+1. if we relax the current frozen-backbone assumption, does a small LoRA pilot
+   already beat the stronger frozen Phase E reference?
+2. can the newly installed local judge already clean Phase E pair artifacts
+   enough to improve value-head learning?
+
+Short answer:
+1. no: the current small-data LoRA pilot underperforms the stronger frozen
+   reference and is not trustworthy enough to promote,
+2. no: the current strict-JSON local judge contract is too brittle to use as a
+   hard Phase E pair filter,
+3. yes, but only in a narrower sense: the judge models are still useful for
+   offline audit / disagreement mining / selective adjudication.
+
+### New detailed note
+
+1. `docs/phase_e_backbone_judge_audit_20260311.md`
+
+### New tooling
+
+1. `scripts/phase_e_train_value_lora.py`
+   - minimal online-encoding LoRA trainer for Phase E pairs
+2. `scripts/phase_e_judge_filter_pairs.py`
+   - conservative prefix-correctness judge filter for auditable semantics
+3. `scripts/run_phase_e_backbone_judge_suite.sh`
+   - pilot wrapper for frozen vs LoRA and raw vs judge-filtered comparisons
+
+### Commands actually executed
+
+Note:
+1. the manual frozen rerun used `CUDA_VISIBLE_DEVICES=0` because at run time it
+   was the only GPU with enough free memory for a no-cache 7B backbone load;
+2. this was a temporary cluster-load constraint, not a new default preference.
+
+Pilot subset curation:
+
+```bash
+PYTHONPATH=src python -u scripts/phase_e_curate_semantic_pairs.py \
+  --slice 'pilot=assets/artifacts/phase_e_pairs/phase_e_processbench_research_v2_pbr2_ms_align_gated_ms_align_v1_pairs__79c6e734325c|*|*|96|127' \
+  --run-name phase_e_backbone_judge_pilot_small_0311_subset \
+  --output-root assets/artifacts/phase_e_pairs \
+  --seed 42
+```
+
+Judge hard filter:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 python -u scripts/phase_e_judge_filter_pairs.py \
+  --train-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_backbone_judge_pilot_small_0311_subset__9b43b747715c/train_pairs.jsonl \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_backbone_judge_pilot_small_0311_subset__9b43b747715c/validation_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-Math-7B-Instruct \
+  --run-name phase_e_backbone_judge_pilot_small_0311_judgefilter \
+  --output-root assets/artifacts/phase_e_pairs \
+  --batch-size 16 \
+  --max-new-tokens 80 \
+  --logging-batches 1 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --min-confidence 0.0
+```
+
+Raw frozen subset:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -u scripts/phase_e_train_value.py \
+  --train-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_backbone_judge_pilot_small_0311_subset__9b43b747715c/train_pairs.jsonl \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_backbone_judge_pilot_small_0311_subset__9b43b747715c/validation_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_e_backbone_judge_manual_base_frozen_nocache_g0 \
+  --output-root assets/artifacts/phase_e_runs \
+  --objective-mode joint \
+  --learning-rate 3e-5 \
+  --num-train-epochs 4 \
+  --per-device-train-batch-size 48 \
+  --per-device-eval-batch-size 48 \
+  --max-length 1024 \
+  --lambda-ranking 1.0 \
+  --lambda-bce 1.0 \
+  --ranking-margin 0.02 \
+  --ranking-target-space logit \
+  --pair-weight-mode confidence_semantic \
+  --source-balance none \
+  --permutation-mode stable_hash \
+  --checkpoint-selection-metric ranking_score \
+  --head-architecture mlp \
+  --head-mlp-hidden-size 1024 \
+  --head-dropout-prob 0.05 \
+  --head-init-std 0.02 \
+  --head-activation gelu \
+  --anti-saturation-weight 5e-4 \
+  --anti-saturation-logit-threshold 3.5 \
+  --feature-cache-mode off \
+  --max-gpu-memory-gib 45
+```
+
+Raw frozen evals:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_e_eval_samefamily_trust.py \
+  --value-run-dir assets/artifacts/phase_e_runs/phase_e_backbone_judge_manual_base_frozen_nocache_g0_20260311T080638Z \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_backbone_judge_pilot_small_0311_subset__9b43b747715c/validation_pairs.jsonl \
+  --run-name phase_e_backbone_judge_manual_base_frozen_samefamily \
+  --output-root assets/artifacts/phase_e_samefamily_eval \
+  --batch-size 48 \
+  --max-length 1024 \
+  --device-map auto
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_e_eval_benchmark.py \
+  --value-run-dir assets/artifacts/phase_e_runs/phase_e_backbone_judge_manual_base_frozen_nocache_g0_20260311T080638Z \
+  --benchmark-id processbench_gsm8k \
+  --run-name phase_e_backbone_judge_manual_base_frozen_pb_gsm8k \
+  --output-root assets/artifacts/phase_e_eval \
+  --max-samples 64 \
+  --batch-size 48 \
+  --max-length 1024 \
+  --device-map auto
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=3 python -u scripts/phase_e_eval_benchmark.py \
+  --value-run-dir assets/artifacts/phase_e_runs/phase_e_backbone_judge_manual_base_frozen_nocache_g0_20260311T080638Z \
+  --benchmark-id processbench_math \
+  --run-name phase_e_backbone_judge_manual_base_frozen_pb_math \
+  --output-root assets/artifacts/phase_e_eval \
+  --max-samples 64 \
+  --batch-size 32 \
+  --max-length 1024 \
+  --device-map auto
+```
+
+Raw LoRA subset:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -u scripts/phase_e_train_value_lora.py \
+  --train-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_backbone_judge_pilot_small_0311_subset__9b43b747715c/train_pairs.jsonl \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_backbone_judge_pilot_small_0311_subset__9b43b747715c/validation_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_e_backbone_judge_manual_base_lora \
+  --output-root assets/artifacts/phase_e_runs \
+  --objective-mode joint \
+  --learning-rate 2e-5 \
+  --num-train-epochs 2 \
+  --per-device-train-batch-size 1 \
+  --per-device-eval-batch-size 8 \
+  --gradient-accumulation-steps 16 \
+  --max-length 768 \
+  --lambda-ranking 1.0 \
+  --lambda-bce 1.0 \
+  --ranking-margin 0.02 \
+  --ranking-target-space logit \
+  --pair-weight-mode confidence_semantic \
+  --source-balance none \
+  --permutation-mode stable_hash \
+  --checkpoint-selection-metric ranking_score \
+  --head-architecture mlp \
+  --head-mlp-hidden-size 1024 \
+  --head-dropout-prob 0.05 \
+  --head-init-std 0.02 \
+  --head-activation gelu \
+  --anti-saturation-weight 5e-4 \
+  --anti-saturation-logit-threshold 3.5 \
+  --lora-rank 4 \
+  --lora-alpha 16 \
+  --lora-dropout 0.05 \
+  --lora-target-modules q_proj,v_proj,gate_proj,up_proj,down_proj \
+  --lora-top-k-layers 4 \
+  --gradient-checkpointing
+```
+
+Raw LoRA evals:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_e_eval_samefamily_trust.py \
+  --value-run-dir assets/artifacts/phase_e_runs/phase_e_backbone_judge_manual_base_lora_20260311T080936Z \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_backbone_judge_pilot_small_0311_subset__9b43b747715c/validation_pairs.jsonl \
+  --run-name phase_e_backbone_judge_manual_base_lora_samefamily \
+  --output-root assets/artifacts/phase_e_samefamily_eval \
+  --batch-size 24 \
+  --max-length 768 \
+  --device-map auto
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_e_eval_benchmark.py \
+  --value-run-dir assets/artifacts/phase_e_runs/phase_e_backbone_judge_manual_base_lora_20260311T080936Z \
+  --benchmark-id processbench_gsm8k \
+  --run-name phase_e_backbone_judge_manual_base_lora_pb_gsm8k \
+  --output-root assets/artifacts/phase_e_eval \
+  --max-samples 64 \
+  --batch-size 24 \
+  --max-length 768 \
+  --device-map auto
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=2 python -u scripts/phase_e_eval_benchmark.py \
+  --value-run-dir assets/artifacts/phase_e_runs/phase_e_backbone_judge_manual_base_lora_20260311T080936Z \
+  --benchmark-id processbench_math \
+  --run-name phase_e_backbone_judge_manual_base_lora_pb_math_1024 \
+  --output-root assets/artifacts/phase_e_eval \
+  --max-samples 64 \
+  --batch-size 12 \
+  --max-length 1024 \
+  --device-map auto
+```
+
+Judge prefix audit:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_e_audit_judge_prefix_pairs.py \
+  --pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_backbone_judge_pilot_small_0311_subset__9b43b747715c/validation_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-Math-7B-Instruct \
+  --run-name phase_e_judge_prefix_audit_rawsubset \
+  --output-root assets/artifacts/phase_e_judge_audit \
+  --max-pairs 32 \
+  --max-new-tokens 96
+```
+
+### Main results
+
+Reference `PBR2` remains ahead:
+
+1. held-out:
+   - `pair_acc=0.8819`, `auc=0.8723`
+2. same-family:
+   - `top1=0.8947`
+   - `local_first_bad=0.9231`
+3. `ProcessBench GSM8K`:
+   - `auc=0.4713`
+   - `first_edge=0.5600`
+4. `ProcessBench Math`:
+   - `auc=0.5055`
+   - `first_edge=0.5357`
+
+Raw frozen subset pilot:
+
+1. held-out:
+   - `pair_acc=0.7874`, `auc=0.7343`
+2. same-family:
+   - `top1=0.6842`
+   - `local_first_bad=0.7253`
+3. `ProcessBench GSM8K`:
+   - `auc=0.4481`
+   - `first_edge=0.3200`
+   - `f1=0.2133`
+4. `ProcessBench Math`:
+   - `auc=0.4479`
+   - `first_edge=0.2500`
+   - `f1=0.2087`
+
+Raw LoRA subset pilot:
+
+1. held-out:
+   - `pair_acc=0.6693`, `auc=0.6859`
+2. same-family:
+   - `top1=0.4947`
+   - `local_first_bad=0.0000`
+3. `ProcessBench GSM8K`:
+   - `auc=0.5390`
+   - `first_edge=0.5200`
+   - but `f1=0.0745`
+4. `ProcessBench Math`:
+   - `auc=0.7903`
+   - `first_edge=0.0357`
+   - `f1=0.0513`
+   - this is not a real win; it signals benchmark-misaligned / unstable scoring
+
+Judge hard-filter result:
+
+1. train pairs:
+   - `96 -> 16`
+2. all 80 auditable pairs were dropped due `parse_failed`
+3. only bypassed terminal-anchor pairs survived
+
+Judge prefix audit result:
+
+1. `pair_json_ok_rate=0.0`
+2. `pair_agreement_rate=0.0`
+3. runtime:
+   - `230.5s` for only 32 audited pairs
+
+### Practical reading
+
+1. current `small-data LoRA` is a negative result, not a promotion candidate
+2. current `strict-JSON judge hard filter` is also a negative result
+3. judge should currently be used as:
+   - disagreement mining
+   - selective relabel
+   - offline audit
+4. current benchmark-facing reference remains:
+   - `PBR2`
+
+### New detailed note
+
+1. `docs/phase_e_judge_llm_selection_20260311.md`
+
+### Installed local judge models
+
+1. `assets/models/Qwen2.5-Math-7B-Instruct`
+2. `assets/models/DeepSeek-R1-Distill-Qwen-14B`
+3. existing fallback:
+   - `assets/models/Qwen2.5-7B-Instruct`
+
+### New tooling
+
+1. `scripts/phase_e_smoke_judge_llm.py`
+   - loads a local instruct model
+   - sends a structured step-judge prompt
+   - checks JSON contract adherence and tiny good/bad reasoning examples
+   - writes artifacts under `assets/artifacts/phase_e_judge_smoke/`
+
+### Smoke verdict
+
+1. `Qwen2.5-7B-Instruct`
+   - cheapest baseline only
+   - bad-example output can degenerate
+2. `Qwen2.5-Math-7B-Instruct`
+   - best current candidate for bulk relabel / disagreement mining
+   - semantic judging is usable, but formatting still needs tolerant parsing
+3. `DeepSeek-R1-Distill-Qwen-14B`
+   - loads successfully
+   - but current local `transformers + strict JSON prompt` path is unstable
+   - should not yet be promoted as the main local judge backend
+
+### Real small-slice benchmark after smoke
+
+The smoke result was not enough, so a second script was added:
+
+1. `scripts/phase_e_benchmark_judge_llm.py`
+
+It benchmarks one local judge on deterministic small `ProcessBench` slices and
+records:
+
+1. `parse_ok_rate`
+2. `overall_acc`
+3. `first_bad_exact_acc`
+4. `first_bad_within_one_acc`
+5. `mean_step_acc`
+
+Commands actually executed:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_e_benchmark_judge_llm.py \
+  --model-path assets/models/Qwen2.5-Math-7B-Instruct \
+  --run-name judge_bench_qwen25_math_7b \
+  --benchmark processbench_math \
+  --benchmark processbench_gsm8k \
+  --max-samples-per-benchmark 6 \
+  --max-new-tokens 256
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=3 python -u scripts/phase_e_benchmark_judge_llm.py \
+  --model-path assets/models/DeepSeek-R1-Distill-Qwen-14B \
+  --run-name judge_bench_deepseek_r1_14b \
+  --benchmark processbench_math \
+  --benchmark processbench_gsm8k \
+  --max-samples-per-benchmark 6 \
+  --max-new-tokens 256 \
+  --no-use-system-prompt \
+  --assistant-prefix '<think>\n'
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -u scripts/phase_e_benchmark_judge_llm.py \
+  --model-path assets/models/Qwen2.5-Math-7B-Instruct \
+  --run-name judge_bench_qwen25_math_7b_fbonly \
+  --benchmark processbench_math \
+  --benchmark processbench_gsm8k \
+  --max-samples-per-benchmark 6 \
+  --max-new-tokens 160 \
+  --contract-mode first_bad_only
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=3 python -u scripts/phase_e_benchmark_judge_llm.py \
+  --model-path assets/models/DeepSeek-R1-Distill-Qwen-14B \
+  --run-name judge_bench_deepseek_r1_14b_fbonly \
+  --benchmark processbench_math \
+  --benchmark processbench_gsm8k \
+  --max-samples-per-benchmark 6 \
+  --max-new-tokens 160 \
+  --contract-mode first_bad_only \
+  --no-use-system-prompt \
+  --assistant-prefix '<think>\n'
+```
+
+Unified compare artifact:
+
+1. `assets/artifacts/phase_e_judge_bench_compare/judge_model_compare_20260311T074514Z/summary.md`
+
+Main conclusions from that compare:
+
+1. `Qwen2.5-Math-7B-Instruct`
+   - is operationally more stable,
+   - but on real `ProcessBench` rows it is strongly biased toward
+     `OVERALL=correct` and `FIRST_BAD=none`,
+   - simplifying the output contract does not fix the main bias.
+2. `DeepSeek-R1-Distill-Qwen-14B`
+   - is still unstable under verbose contracts,
+   - but under `first_bad_only` it shows real signal on `gsm8k`:
+     - `overall_acc=0.6667`
+     - `first_bad_exact=0.3333`
+   - while still remaining weak on `math`.
+3. Practical deployment reading:
+   - use `Qwen2.5-Math-7B-Instruct` first for bulk relabel / disagreement mining,
+   - keep `DeepSeek-R1-Distill-Qwen-14B` only as a second-stage adjudicator for
+     harder, more verbal cases,
+   - do not treat either model as a benchmark-ready standalone ProcessBench
+     judge yet.
+
+## 2026-03-11 ProcessBench State Audit + Community Gap Review
+
+Question:
+1. after the teammate's recent ProcessBench repair work, local PDF uploads, and
+   new dataset downloads, what does the repository *actually* support now?
+
+Short answer:
+1. some ProcessBench slices are indeed improved,
+2. but the newer repair lines still do not replace the older strongest
+   benchmark-facing baselines,
+3. and the main bottleneck has shifted from "can the value head learn?" to
+   "can one training stack jointly preserve local, later-bad, and terminal
+   behavior?"
+
+### New synthesis document
+
+1. `docs/processbench_state_and_community_gap_20260311.md`
+
+### Fresh audit commands
+
+Cross-run `ProcessBench Math` review:
+
+```bash
+python -u scripts/phase_e_compare_processbench_transfer.py \
+  --run-name processbench_state_review_math_0311 \
+  --case 'ms_e43=assets/artifacts/phase_e_runs/phase_e_ms_acc90_full_0310_1914_e43_ms_acc90_mlp_highconf_seed3_e43_ms_acc90_mlp_highconf_seed3_s42_value_20260310T111956Z::assets/artifacts/phase_e_eval/phase_e_rltops_0311_1124_ms_e43_processbench_math_20260311T032646Z' \
+  --case 'prm_e46=assets/artifacts/phase_e_runs/phase_e_prmbench_acc90_full_0310_1914_e46_prmbench_acc90_mlp_joint_seed3_e46_prmbench_acc90_mlp_joint_seed3_s43_value_20260310T113737Z::assets/artifacts/phase_e_eval/phase_e_rl_readiness_0310_2338_prm_e46_processbench_math_20260310T153553Z' \
+  --case 'e79_baseline=assets/artifacts/phase_e_runs/phase_e_pb_transfer_0311_1614_e79_ms_processbench_transfer_baseline_seed42_e79_ms_processbench_transfer_baseline_seed42_s42_value_20260310T160924Z::assets/artifacts/phase_e_eval/phase_e_pb_transfer_0311_1614_e79_ms_processbench_transfer_baseline_seed42_e79_ms_processbench_transfer_baseline_seed42_s42_processbench_math_20260310T164147Z' \
+  --case 'e87_repair=assets/artifacts/phase_e_runs/phase_e_processbench_rlrepair_0311_e87_ms_processbench_transfer_fanout_terminal10_confwt_seed42_e87_ms_processbench_transfer_fanout_terminal10_confwt_seed42_s42_value_20260311T032957Z::assets/artifacts/phase_e_eval/phase_e_processbench_rlrepair_0311_e87_ms_processbench_transfer_fanout_terminal10_confwt_seed42_e87_ms_processbench_transfer_fanout_terminal10_confwt_seed42_s42_processbench_math_20260311T033955Z' \
+  --case 'c3_curated_gated=assets/artifacts/phase_e_runs/phase_e_curated_rlready_0311_retry2_c3_curated_gated_center_value_20260311T045452Z::assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_retry2_c3_curated_gated_center_pb_math_20260311T045635Z' \
+  --case 'c4_dual=assets/artifacts/phase_e_runs/phase_e_curated_rlready_0311_dual_c4_value_20260311T051319Z::assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_dual_c4_pb_math_20260311T051652Z' \
+  --case 'pbr2_align_gated=assets/artifacts/phase_e_runs/phase_e_processbench_research_v2_pbr2_ms_align_gated_value_20260311T043818Z::assets/artifacts/phase_e_eval/phase_e_processbench_research_v2_pbr2_ms_align_gated_processbench_math_20260311T043935Z'
+```
+
+Cross-run `ProcessBench GSM8K` review:
+
+```bash
+python -u scripts/phase_e_compare_processbench_transfer.py \
+  --run-name processbench_state_review_gsm_0311 \
+  --case 'ms_e43=assets/artifacts/phase_e_runs/phase_e_ms_acc90_full_0310_1914_e43_ms_acc90_mlp_highconf_seed3_e43_ms_acc90_mlp_highconf_seed3_s42_value_20260310T111956Z::assets/artifacts/phase_e_eval/phase_e_rltops_0311_1124_ms_e43_processbench_gsm8k_20260311T032638Z' \
+  --case 'prm_e46=assets/artifacts/phase_e_runs/phase_e_prmbench_acc90_full_0310_1914_e46_prmbench_acc90_mlp_joint_seed3_e46_prmbench_acc90_mlp_joint_seed3_s43_value_20260310T113737Z::assets/artifacts/phase_e_eval/phase_e_rl_readiness_0310_2338_prm_e46_processbench_gsm8k_20260310T153544Z' \
+  --case 'e79_baseline=assets/artifacts/phase_e_runs/phase_e_pb_transfer_0311_1614_e79_ms_processbench_transfer_baseline_seed42_e79_ms_processbench_transfer_baseline_seed42_s42_value_20260310T160924Z::assets/artifacts/phase_e_eval/phase_e_pb_transfer_0311_1614_e79_ms_processbench_transfer_baseline_seed42_e79_ms_processbench_transfer_baseline_seed42_s42_processbench_gsm8k_20260310T164130Z' \
+  --case 'e87_repair=assets/artifacts/phase_e_runs/phase_e_processbench_rlrepair_0311_e87_ms_processbench_transfer_fanout_terminal10_confwt_seed42_e87_ms_processbench_transfer_fanout_terminal10_confwt_seed42_s42_value_20260311T032957Z::assets/artifacts/phase_e_eval/phase_e_processbench_rlrepair_0311_e87_ms_processbench_transfer_fanout_terminal10_confwt_seed42_e87_ms_processbench_transfer_fanout_terminal10_confwt_seed42_s42_processbench_gsm8k_20260311T033946Z' \
+  --case 'c3_curated_gated=assets/artifacts/phase_e_runs/phase_e_curated_rlready_0311_retry2_c3_curated_gated_center_value_20260311T045452Z::assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_retry2_c3_curated_gated_center_pb_gsm8k_20260311T045623Z' \
+  --case 'c4_dual=assets/artifacts/phase_e_runs/phase_e_curated_rlready_0311_dual_c4_value_20260311T051319Z::assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_dual_c4_pb_gsm8k_20260311T051637Z' \
+  --case 'pbr2_align_gated=assets/artifacts/phase_e_runs/phase_e_processbench_research_v2_pbr2_ms_align_gated_value_20260311T043818Z::assets/artifacts/phase_e_eval/phase_e_processbench_research_v2_pbr2_ms_align_gated_processbench_gsm8k_20260311T043919Z'
+```
+
+Strict RL-promotion review:
+
+```bash
+python -u scripts/phase_e_diagnose_rl_promotion.py \
+  --run-name rl_promotion_state_review_0311 \
+  --audit-spec 'ms_e43|math_shepherd|assets/artifacts/phase_e_samefamily_eval/phase_e_rltops_0311_1124_ms_e43_samefamily_20260311T032630Z|assets/artifacts/phase_e_eval/phase_e_rltops_0311_1124_ms_e43_processbench_gsm8k_20260311T032638Z|assets/artifacts/phase_e_eval/phase_e_rltops_0311_1124_ms_e43_processbench_math_20260311T032646Z' \
+  --audit-spec 'prm_e46|prmbench_preview|assets/artifacts/phase_e_samefamily_eval/phase_e_rl_readiness_0310_2338_prm_e46_samefamily_20260310T153536Z|assets/artifacts/phase_e_eval/phase_e_rl_readiness_0310_2338_prm_e46_processbench_gsm8k_20260310T153544Z|assets/artifacts/phase_e_eval/phase_e_rl_readiness_0310_2338_prm_e46_processbench_math_20260310T153553Z' \
+  --audit-spec 'e87_repair|math_shepherd|assets/artifacts/phase_e_samefamily_eval/phase_e_rlready_e87_samefamily_0311_20260311T040021Z|assets/artifacts/phase_e_eval/phase_e_processbench_rlrepair_0311_e87_ms_processbench_transfer_fanout_terminal10_confwt_seed42_e87_ms_processbench_transfer_fanout_terminal10_confwt_seed42_s42_processbench_gsm8k_20260311T033946Z|assets/artifacts/phase_e_eval/phase_e_processbench_rlrepair_0311_e87_ms_processbench_transfer_fanout_terminal10_confwt_seed42_e87_ms_processbench_transfer_fanout_terminal10_confwt_seed42_s42_processbench_math_20260311T033955Z' \
+  --audit-spec 'c3_curated_gated|mixed_curated|assets/artifacts/phase_e_samefamily_eval/phase_e_curated_rlready_0311_retry2_c3_curated_gated_center_samefamily_20260311T045608Z|assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_retry2_c3_curated_gated_center_pb_gsm8k_20260311T045623Z|assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_retry2_c3_curated_gated_center_pb_math_20260311T045635Z' \
+  --audit-spec 'c4_dual|mixed_curated|assets/artifacts/phase_e_samefamily_eval/phase_e_curated_rlready_0311_dual_c4_samefamily_20260311T051616Z|assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_dual_c4_pb_gsm8k_20260311T051637Z|assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_dual_c4_pb_math_20260311T051652Z' \
+  --audit-spec 'pbr2_align_gated|math_shepherd|assets/artifacts/phase_e_samefamily_eval/phase_e_processbench_research_v2_pbr2_ms_align_gated_samefamily_20260311T043905Z|assets/artifacts/phase_e_eval/phase_e_processbench_research_v2_pbr2_ms_align_gated_processbench_gsm8k_20260311T043919Z|assets/artifacts/phase_e_eval/phase_e_processbench_research_v2_pbr2_ms_align_gated_processbench_math_20260311T043935Z'
+```
+
+### Fresh artifacts
+
+1. `assets/artifacts/phase_e_transfer_compare/processbench_state_review_math_0311_20260311T070248Z/summary.md`
+2. `assets/artifacts/phase_e_transfer_compare/processbench_state_review_gsm_0311_20260311T070308Z/summary.md`
+3. `assets/artifacts/phase_e_rl_promotion_diag/rl_promotion_state_review_0311_20260311T070332Z/summary.md`
+
+### Key conclusions
+
+1. `ms_e43` remains the strongest local/later-bad candidate:
+   - `ProcessBench Math: auc=0.6341, good_vs_laterbad=0.7515`
+   - RL verdict:
+     - `near_rl_ready_but_terminal_gap`
+2. `prm_e46` remains the strongest more-balanced benchmark-facing candidate:
+   - `ProcessBench GSM8K: auc=0.6264`
+   - `ProcessBench Math: auc=0.6053, good_vs_laterbad=0.5501, terminal_top1=0.1970`
+3. recent repair lines improve some slices, but still fail strict RL gate:
+   - `e87_repair`
+   - `c3_curated_gated`
+   - `c4_dual`
+   - `pbr2_align_gated`
+4. the dominant unresolved conflict is now explicit:
+   - local/later-bad strong candidates do not solve terminal completion
+   - terminal-aware repair candidates often break broader good-vs-bad transfer
+5. next mainline should therefore shift from:
+   - more head-only churn
+   to:
+   - stronger downloaded sources
+   - equal-budget source-only audits
+   - one minimal frozen-vs-LoRA comparison
+   after the best source mix is known
+
+## 2026-03-11 Verified Internet Reading + Dual-Head Semantic Routing
+
+Question:
+1. after the earlier curated `gated_mlp` smoke, can a more explicit
+   local-vs-terminal decomposition do better than "one stronger scalar head"?
+
+Short answer:
+1. not as a new mainline,
+2. but the failure pattern is informative:
+   - `dual_head` improves `first_edge` and terminal slices,
+   - while worsening samefamily fit, overall AUC, and `good_vs_laterbad`.
+
+### Verified external reading folded into this round
+
+These sources were re-checked directly and used as the design basis:
+
+1. `ProcessBench: Identifying Process Errors in Mathematical Reasoning`
+   - <https://aclanthology.org/2025.acl-long.50/>
+2. `Rewarding Progress: Scaling Automated Process Verifiers for LLM Reasoning`
+   - <https://arxiv.org/abs/2410.08146>
+3. `Advancing Process Verification for Large Language Models via Tree-Based Preference Learning`
+   - <https://arxiv.org/abs/2407.00390>
+4. `PRMBench: Can Reward Models Truly Verify Reasoning Processes?`
+   - <https://arxiv.org/abs/2501.03124>
+5. `The Lessons of Developing Process Reward Models in Mathematical Reasoning`
+   - <https://arxiv.org/abs/2501.07301>
+6. `Stop Summation: Min-Form Credit Assignment Is All Process Reward Model Needs for Reasoning`
+   - <https://arxiv.org/abs/2504.15275>
+7. `R-PRM` official repo
+   - <https://github.com/NJUNLP/R-PRM>
+8. `Open Instruct` RM docs
+   - <https://allenai.github.io/open-instruct/algorithms/reward_modeling/>
+
+What was extracted:
+1. benchmark transfer should be judged by slices, not one scalar
+2. decomposed verifier behavior is more defensible than just adding head capacity
+3. inside the current frozen-feature infra, the lowest-risk approximation is:
+   - explicit `dual_head`
+   - explicit semantic routing
+   - no backbone unfreeze
+
+### Code changes
+
+Updated:
+1. `src/ours/phase_b/value_head.py`
+   - added `architecture='dual_head'`
+   - added `inference_alpha`
+   - forward now returns:
+     - blended `logits/scores`
+     - `local_logits/local_scores`
+     - `terminal_logits/terminal_scores`
+2. `src/ours/phase_e/training.py`
+   - added semantic route resolution and route-weight tensors
+   - `compute_pair_objective()` now supports routed dual-head optimization
+3. `scripts/phase_e_train_value.py`
+   - added `--head-architecture dual_head`
+   - added `--head-inference-alpha`
+   - routed branch weights into epoch training
+
+### Validation commands
+
+```bash
+python -m py_compile \
+  src/ours/phase_b/value_head.py \
+  src/ours/phase_e/training.py \
+  scripts/phase_e_train_value.py
+
+pytest -q \
+  tests/unit/test_value_head.py \
+  tests/unit/test_phase_e_training.py \
+  tests/unit/test_phase_e_train_script.py
+```
+
+Result:
+1. `23 passed`
+
+### Exact experiment commands
+
+Train `dual_head` on the same curated artifact used by the earlier `C1/C2/C3`
+comparison:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python -u scripts/phase_e_train_value.py \
+  --train-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_curated_rlready_0311_retry2_curated_pairs__03ac5eebc8fd/train_pairs.jsonl \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_curated_rlready_0311_retry2_curated_pairs__03ac5eebc8fd/validation_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_e_curated_rlready_0311_dual_c4_value \
+  --output-root assets/artifacts/phase_e_runs \
+  --objective-mode joint \
+  --ranking-target-space logit \
+  --lambda-ranking 1.0 \
+  --lambda-bce 1.0 \
+  --ranking-margin 0.02 \
+  --learning-rate 3e-5 \
+  --num-train-epochs 4 \
+  --per-device-train-batch-size 96 \
+  --per-device-eval-batch-size 12 \
+  --pair-weight-mode confidence_group_balance \
+  --source-balance uniform \
+  --permutation-mode stable_hash \
+  --head-architecture dual_head \
+  --head-mlp-hidden-size 1024 \
+  --head-dropout-prob 0.05 \
+  --head-init-std 0.02 \
+  --head-activation gelu \
+  --head-inference-alpha 0.5 \
+  --anti-saturation-weight 0.0005 \
+  --anti-saturation-logit-threshold 3.5 \
+  --reward-centering-weight 0.01 \
+  --checkpoint-selection-metric ranking_score \
+  --feature-cache-root assets/artifacts/phase_e_feature_cache \
+  --feature-cache-mode read \
+  --max-gpu-memory-gib 40 \
+  --max-cpu-memory-gib 96
+```
+
+Evaluate samefamily:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python -u scripts/phase_e_eval_samefamily_trust.py \
+  --value-run-dir assets/artifacts/phase_e_runs/phase_e_curated_rlready_0311_dual_c4_value_20260311T051319Z \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_curated_rlready_0311_retry2_curated_pairs__03ac5eebc8fd/validation_pairs.jsonl \
+  --run-name phase_e_curated_rlready_0311_dual_c4_samefamily \
+  --output-root assets/artifacts/phase_e_samefamily_eval \
+  --batch-size 12 \
+  --feature-cache-root assets/artifacts/phase_e_feature_cache \
+  --feature-cache-mode read \
+  --max-gpu-memory-gib 40 \
+  --max-cpu-memory-gib 96
+```
+
+Evaluate `ProcessBench`:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+python -u scripts/phase_e_eval_benchmark.py \
+  --value-run-dir assets/artifacts/phase_e_runs/phase_e_curated_rlready_0311_dual_c4_value_20260311T051319Z \
+  --benchmark-id processbench_gsm8k \
+  --run-name phase_e_curated_rlready_0311_dual_c4_pb_gsm8k \
+  --output-root assets/artifacts/phase_e_eval \
+  --batch-size 12 \
+  --feature-cache-root assets/artifacts/phase_e_feature_cache \
+  --feature-cache-mode read \
+  --max-gpu-memory-gib 40 \
+  --max-cpu-memory-gib 96 \
+  --max-samples 128
+
+CUDA_VISIBLE_DEVICES=1 \
+python -u scripts/phase_e_eval_benchmark.py \
+  --value-run-dir assets/artifacts/phase_e_runs/phase_e_curated_rlready_0311_dual_c4_value_20260311T051319Z \
+  --benchmark-id processbench_math \
+  --run-name phase_e_curated_rlready_0311_dual_c4_pb_math \
+  --output-root assets/artifacts/phase_e_eval \
+  --batch-size 12 \
+  --feature-cache-root assets/artifacts/phase_e_feature_cache \
+  --feature-cache-mode read \
+  --max-gpu-memory-gib 40 \
+  --max-cpu-memory-gib 96 \
+  --max-samples 128
+```
+
+Compare against earlier curated baselines:
+
+```bash
+python -u scripts/phase_e_compare_processbench_transfer.py \
+  --run-name processbench_curated_arch_compare_0311_dual_math \
+  --case 'c1_mlp=assets/artifacts/phase_e_runs/phase_e_curated_rlready_0311_retry2_c1_curated_mlp_base_value_20260311T044610Z::assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_retry2_c1_curated_mlp_base_pb_math_20260311T045301Z' \
+  --case 'c3_gated=assets/artifacts/phase_e_runs/phase_e_curated_rlready_0311_retry2_c3_curated_gated_center_value_20260311T045452Z::assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_retry2_c3_curated_gated_center_pb_math_20260311T045635Z' \
+  --case 'c4_dual=assets/artifacts/phase_e_runs/phase_e_curated_rlready_0311_dual_c4_value_20260311T051319Z::assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_dual_c4_pb_math_20260311T051652Z'
+
+python -u scripts/phase_e_compare_processbench_transfer.py \
+  --run-name processbench_curated_arch_compare_0311_dual_gsm \
+  --case 'c1_mlp=assets/artifacts/phase_e_runs/phase_e_curated_rlready_0311_retry2_c1_curated_mlp_base_value_20260311T044610Z::assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_retry2_c1_curated_mlp_base_pb_gsm8k_20260311T045245Z' \
+  --case 'c3_gated=assets/artifacts/phase_e_runs/phase_e_curated_rlready_0311_retry2_c3_curated_gated_center_value_20260311T045452Z::assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_retry2_c3_curated_gated_center_pb_gsm8k_20260311T045623Z' \
+  --case 'c4_dual=assets/artifacts/phase_e_runs/phase_e_curated_rlready_0311_dual_c4_value_20260311T051319Z::assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_dual_c4_pb_gsm8k_20260311T051637Z'
+
+python -u scripts/phase_e_diagnose_rl_promotion.py \
+  --run-name phase_e_curated_rlpromo_compare_0311_dual \
+  --audit-spec 'c3_gated|curated_multisource|assets/artifacts/phase_e_samefamily_eval/phase_e_curated_rlready_0311_retry2_c3_curated_gated_center_samefamily_20260311T045608Z|assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_retry2_c3_curated_gated_center_pb_gsm8k_20260311T045623Z|assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_retry2_c3_curated_gated_center_pb_math_20260311T045635Z' \
+  --audit-spec 'c4_dual|curated_multisource|assets/artifacts/phase_e_samefamily_eval/phase_e_curated_rlready_0311_dual_c4_samefamily_20260311T051616Z|assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_dual_c4_pb_gsm8k_20260311T051637Z|assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_dual_c4_pb_math_20260311T051652Z'
+```
+
+### Key artifacts
+
+1. train:
+   - `assets/artifacts/phase_e_runs/phase_e_curated_rlready_0311_dual_c4_value_20260311T051319Z`
+2. samefamily:
+   - `assets/artifacts/phase_e_samefamily_eval/phase_e_curated_rlready_0311_dual_c4_samefamily_20260311T051616Z`
+3. `ProcessBench`:
+   - GSM8K:
+     - `assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_dual_c4_pb_gsm8k_20260311T051637Z`
+   - Math:
+     - `assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_dual_c4_pb_math_20260311T051652Z`
+4. compare summaries:
+   - `assets/artifacts/phase_e_transfer_compare/processbench_curated_arch_compare_0311_dual_math_20260311T051707Z/summary.md`
+   - `assets/artifacts/phase_e_transfer_compare/processbench_curated_arch_compare_0311_dual_gsm_20260311T051726Z/summary.md`
+5. RL-promotion compare:
+   - `assets/artifacts/phase_e_rl_promotion_diag/phase_e_curated_rlpromo_compare_0311_dual_20260311T051742Z/summary.md`
+
+### Main findings
+
+`C4 dual_head`:
+1. held-out:
+   - `pair_acc=0.8608`
+   - `auc=0.7390`
+2. samefamily:
+   - `top1=0.8787`
+   - `local_first_bad=0.9408`
+3. `ProcessBench GSM8K`:
+   - `auc=0.4730`
+   - `first_edge=0.5660`
+   - `terminal_top1=0.8548`
+   - `good_vs_laterbad=0.2756`
+4. `ProcessBench Math`:
+   - `auc=0.4789`
+   - `first_edge=0.5714`
+   - `terminal_top1=0.9038`
+   - `good_vs_laterbad=0.3672`
+
+Interpretation:
+1. `dual_head` is not a pure dead end
+   - it moves the expected slices:
+     - `first_edge`
+     - terminal ranking
+2. but the current hard routing is too coarse
+   - samefamily top1 drops from `0.9443 -> 0.8787`
+   - `good_vs_laterbad` drops badly on both benchmarks
+3. so it should not replace `C3 gated_mlp` as the current mainline
+4. the most defensible next experiment is:
+   - `dual_head` soft routing / alpha sweep / staged repair
+   - not more one-shot hard-routed training
+
+## 2026-03-11 Internet-Guided Semantic Curation + Reward Centering Smoke
+
+Question:
+1. can a literature-guided semantic curation layer plus reward centering repair
+   the current Phase E transfer gap enough to approach RL-ready behavior?
+
+Short answer:
+1. no current candidate became RL-ready,
+2. reward centering alone did almost nothing,
+3. `gated_mlp` improved `ProcessBench Math` somewhat but still failed the strict
+   local-transfer gate.
+
+### New code
+
+Added / updated:
+1. `docs/phase_e_internet_research_20260311.md`
+2. `src/ours/phase_b/value_losses.py`
+   - `reward_centering_penalty()`
+3. `src/ours/phase_e/training.py`
+   - `reward_centering_weight`
+4. `scripts/phase_e_train_value.py`
+   - `--reward-centering-weight`
+5. `scripts/phase_e_curate_semantic_pairs.py`
+6. `scripts/run_phase_e_curated_rlready_suite.sh`
+
+### Commands used
+
+Targeted tests:
+
+```bash
+PYTHONPATH=src pytest -q \
+  tests/unit/test_phase_e_training.py \
+  tests/unit/test_phase_e_train_script.py \
+  tests/unit/test_phase_e_curate_semantic_pairs.py
+
+bash -n scripts/run_phase_e_curated_rlready_suite.sh
+```
+
+First suite attempt that exposed the wrapper/runtime bottleneck:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_e_curated_rlready_suite.sh
+```
+
+What happened:
+1. the first full-size run exposed two wrapper bugs:
+   - shell backtick substitution inside metadata text
+   - env override clobbering for `EVAL_BATCH_SIZE`
+2. the first fixed retry also showed that `per-device-eval-batch-size=96`
+   wastes time in repeated OOM backoff during frozen-feature encoding.
+
+Final successful suite run:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+RUN_PREFIX=phase_e_curated_rlready_0311_retry2 \
+EVAL_BATCH_SIZE=12 \
+bash scripts/run_phase_e_curated_rlready_suite.sh
+```
+
+Strict transfer diagnosis on the three curated candidates:
+
+```bash
+python -u scripts/phase_e_diagnose_transfer.py \
+  --run-name phase_e_curated_rlready_0311_retry2_diag \
+  --output-root assets/artifacts/phase_e_transfer_diag \
+  --audit-spec 'c1_curated|curated_multisource|assets/artifacts/phase_e_samefamily_eval/phase_e_curated_rlready_0311_retry2_c1_curated_mlp_base_samefamily_20260311T045230Z|assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_retry2_c1_curated_mlp_base_pb_gsm8k_20260311T045245Z|assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_retry2_c1_curated_mlp_base_pb_math_20260311T045301Z' \
+  --audit-spec 'c2_curated|curated_multisource|assets/artifacts/phase_e_samefamily_eval/phase_e_curated_rlready_0311_retry2_c2_curated_mlp_center_samefamily_20260311T045419Z|assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_retry2_c2_curated_mlp_center_pb_gsm8k_20260311T045433Z|assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_retry2_c2_curated_mlp_center_pb_math_20260311T045446Z' \
+  --audit-spec 'c3_curated|curated_multisource|assets/artifacts/phase_e_samefamily_eval/phase_e_curated_rlready_0311_retry2_c3_curated_gated_center_samefamily_20260311T045608Z|assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_retry2_c3_curated_gated_center_pb_gsm8k_20260311T045623Z|assets/artifacts/phase_e_eval/phase_e_curated_rlready_0311_retry2_c3_curated_gated_center_pb_math_20260311T045635Z'
+```
+
+### Key artifacts
+
+Curated semantic artifact:
+1. `assets/artifacts/phase_e_pairs/phase_e_curated_rlready_0311_retry2_curated_pairs__03ac5eebc8fd`
+
+Suite summary:
+1. `assets/artifacts/phase_e_logs/phase_e_curated_rlready_0311_retry2/final_summary.md`
+
+Strict transfer diagnosis:
+1. `assets/artifacts/phase_e_transfer_diag/phase_e_curated_rlready_0311_retry2_diag_00/summary.md`
+
+### Main findings
+
+Curated pool:
+1. `first_bad_fanout_prefix_ranking=1600`
+2. `local_modified_process_error_step=1600`
+3. `terminal_completion_anchor=320`
+
+Results:
+1. `C1_CURATED_MLP_BASE`
+   - held-out:
+     - `pair_acc=0.9034`
+     - `auc=0.8574`
+   - samefamily:
+     - `top1=0.9541`
+     - `local_first_bad=0.9737`
+   - ProcessBench:
+     - `gsm_auc=0.4892`
+     - `math_auc=0.4553`
+     - `math_first_edge=0.5079`
+2. `C2_CURATED_MLP_CENTER`
+   - held-out:
+     - `pair_acc=0.8977`
+     - `auc=0.8643`
+   - samefamily:
+     - `top1=0.9508`
+     - `local_first_bad=0.9737`
+   - ProcessBench:
+     - `gsm_auc=0.4928`
+     - `math_auc=0.4545`
+     - `math_first_edge=0.5079`
+3. `C3_CURATED_GATED_CENTER`
+   - held-out:
+     - `pair_acc=0.9290`
+     - `auc=0.8706`
+   - samefamily:
+     - `top1=0.9443`
+     - `local_first_bad=0.9934`
+   - ProcessBench:
+     - `gsm_auc=0.4861`
+     - `math_auc=0.5152`
+     - `math_first_edge=0.5397`
+
+Strict diagnosis:
+1. all three candidates:
+   - `strict_rl_ready=0`
+   - `assessment=not_rl_ready_local_transfer_weak`
+2. recurring failure tags:
+   - `benchmark_local_error_weak`
+   - `margin_collapse`
+   - `support_length_drift`
+
+Operational reading:
+1. reward centering is worth keeping as a stable option, but it is not the main fix
+2. semantic curation alone is not enough
+3. `gated_mlp` improves the math-side tradeoff a little, but does not solve the
+   cross-benchmark local-transfer problem
+4. the next repair should target local benchmark transfer explicitly rather than
+   adding even more terminal pressure
+
+## 2026-03-11 RL Promotion Infrastructure Hardening
+
+Question:
+1. can the current Phase E stack support a defensible RL-promotion decision?
+
+Short answer:
+1. infrastructure is materially better after this round,
+2. but no audited candidate became RL-ready,
+3. and a hidden non-finite pooled-feature bug turned out to be real.
+
+### New code
+
+Added / updated:
+1. `scripts/phase_e_diagnose_rl_promotion.py`
+2. `scripts/phase_e_prepare_prmbench_terminal_anchor_pairs.py`
+   - new `--terminal-anchor-ratio`
+3. `scripts/phase_e_train_value.py`
+   - fail fast on non-finite loss
+   - new `--nonfinite-feature-policy {error,drop}`
+4. `src/ours/phase_e/training.py`
+   - explicit non-finite pooled-feature validation / filtering
+
+### Commands used
+
+Baseline RL-promotion audit:
+
+```bash
+python -u scripts/phase_e_diagnose_rl_promotion.py \
+  --run-name phase_e_rlpromo_diag_baselines_0311 \
+  --audit-spec 'e80_fanout|math_shepherd|assets/artifacts/phase_e_samefamily_eval/phase_e_rlpromo_0311_e80_samefamily_20260311T033647Z|assets/artifacts/phase_e_eval/phase_e_pb_transfer_repairs_0311_1655_e80_ms_processbench_transfer_fanout_seed42_e80_ms_processbench_transfer_fanout_seed42_s42_processbench_gsm8k_20260310T170319Z|assets/artifacts/phase_e_eval/phase_e_pb_transfer_repairs_0311_1655_e80_ms_processbench_transfer_fanout_seed42_e80_ms_processbench_transfer_fanout_seed42_s42_processbench_math_20260310T170333Z' \
+  --audit-spec 'e84_fanout_terminal_heavy|math_shepherd|assets/artifacts/phase_e_samefamily_eval/phase_e_rlpromo_0311_e84_samefamily_20260311T033833Z|assets/artifacts/phase_e_eval/phase_e_processbench_terminal_focus_0311_e84_ms_processbench_transfer_fanout_terminal_seed42_e84_ms_processbench_transfer_fanout_terminal_seed42_s42_processbench_gsm8k_20260311T022312Z|assets/artifacts/phase_e_eval/phase_e_processbench_terminal_focus_0311_e84_ms_processbench_transfer_fanout_terminal_seed42_e84_ms_processbench_transfer_fanout_terminal_seed42_s42_processbench_math_20260311T022320Z' \
+  --audit-spec 'e46_prm_local|prmbench_preview|assets/artifacts/phase_e_samefamily_eval/phase_e_rltops_0311_1124_prm_e46_samefamily_20260311T032656Z|assets/artifacts/phase_e_eval/phase_e_rltops_0311_1124_prm_e46_processbench_gsm8k_20260311T032704Z|assets/artifacts/phase_e_eval/phase_e_rltops_0311_1124_prm_e46_processbench_math_20260311T032713Z'
+```
+
+Missing same-family audits for the two Math-Shepherd transfer repairs:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 \
+python -u scripts/phase_e_eval_samefamily_trust.py \
+  --value-run-dir assets/artifacts/phase_e_runs/phase_e_pb_transfer_repairs_0311_1655_e80_ms_processbench_transfer_fanout_seed42_e80_ms_processbench_transfer_fanout_seed42_s42_value_20260310T165030Z \
+  --run-name phase_e_rlpromo_0311_e80_samefamily \
+  --output-root assets/artifacts/phase_e_samefamily_eval \
+  --batch-size 96 \
+  --edge-weight-mode confidence \
+  --rejection-coverages 1.0,0.8,0.6,0.4,0.2 \
+  --pressure-sizes 2,4,8 \
+  --pressure-repeats 6 \
+  --require-cuda
+
+CUDA_VISIBLE_DEVICES=3 \
+python -u scripts/phase_e_eval_samefamily_trust.py \
+  --value-run-dir assets/artifacts/phase_e_runs/phase_e_processbench_terminal_focus_0311_e84_ms_processbench_transfer_fanout_terminal_seed42_e84_ms_processbench_transfer_fanout_terminal_seed42_s42_value_20260311T021431Z \
+  --run-name phase_e_rlpromo_0311_e84_samefamily \
+  --output-root assets/artifacts/phase_e_samefamily_eval \
+  --batch-size 96 \
+  --edge-weight-mode confidence \
+  --rejection-coverages 1.0,0.8,0.6,0.4,0.2 \
+  --pressure-sizes 2,4,8 \
+  --pressure-repeats 6 \
+  --require-cuda
+```
+
+Prepare light-anchor repair artifacts:
+
+```bash
+python -u scripts/phase_e_prepare_mathshepherd_terminal_anchor_pairs.py \
+  --run-name phase_e_rlpromo_0311_ms_fanout_ta015 \
+  --max-local-pairs 12000 \
+  --terminal-anchor-ratio 0.15 \
+  --terminal-anchor-prefix-mode penultimate \
+  --step-label-pair-mode first_bad_fanout
+
+python -u scripts/phase_e_prepare_prmbench_terminal_anchor_pairs.py \
+  --run-name phase_e_rlpromo_0311_prm_ta010 \
+  --terminal-anchor-ratio 0.10
+```
+
+Math-side diagnostic failures that exposed the hidden bug:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 \
+python -u scripts/phase_e_train_value.py \
+  --train-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_rlpromo_0311_ms_fanout_ta015__16a79535c2e6/train_pairs.jsonl \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_rlpromo_0311_ms_fanout_ta015__16a79535c2e6/validation_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_e_rlpromo_0311_ms_fanout_ta015_rankonly_warm_e80 \
+  --output-root assets/artifacts/phase_e_runs \
+  --objective-mode ranking_only \
+  --learning-rate 2e-6 \
+  --num-train-epochs 2 \
+  --per-device-train-batch-size 64 \
+  --per-device-eval-batch-size 64 \
+  --max-length 1024 \
+  --max-gpu-memory-gib 48 \
+  --max-cpu-memory-gib 96 \
+  --lambda-ranking 1.0 \
+  --ranking-margin 0.02 \
+  --ranking-target-space logit \
+  --pair-weight-mode none \
+  --checkpoint-selection-metric ranking_score \
+  --seed 42 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --require-cuda \
+  --head-architecture mlp \
+  --head-dropout-prob 0.05 \
+  --head-mlp-hidden-size 1024 \
+  --anti-saturation-weight 5e-4 \
+  --anti-saturation-logit-threshold 3.5 \
+  --feature-cache-mode read \
+  --init-value-head-path assets/artifacts/phase_e_runs/phase_e_pb_transfer_repairs_0311_1655_e80_ms_processbench_transfer_fanout_seed42_e80_ms_processbench_transfer_fanout_seed42_s42_value_20260310T165030Z/best_value_head.pt
+```
+
+Direct cache audit that confirmed non-finite pooled features:
+
+```bash
+python - <<'PY'
+from pathlib import Path
+import torch
+
+for key in [
+    'phase_e_pair_features_5b618641826324449fd5fb12',
+    'phase_e_pair_features_4b73d7ae477b24ca7b10c5db',
+    'phase_e_pair_features_7d90df2f63220370f27ed7f3',
+    'phase_e_pair_features_37a30ddecbf706815a14a2a8',
+]:
+    payload = torch.load(
+        Path('assets/artifacts/phase_e_feature_cache') / key[:2] / key / 'payload.pt',
+        map_location='cpu',
+        weights_only=True,
+    )
+    features = payload['features']
+    print(key, bool(torch.isnan(features).any()), bool(torch.isinf(features).any()))
+PY
+```
+
+Stable sanitized retry:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 \
+python -u scripts/phase_e_train_value.py \
+  --train-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_rlpromo_0311_ms_fanout_ta015__16a79535c2e6/train_pairs.jsonl \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_rlpromo_0311_ms_fanout_ta015__16a79535c2e6/validation_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_e_rlpromo_0311_ms_fanout_ta015_rankonly_warm_e80_dropnf_fix \
+  --output-root assets/artifacts/phase_e_runs \
+  --objective-mode ranking_only \
+  --learning-rate 2e-6 \
+  --num-train-epochs 2 \
+  --per-device-train-batch-size 64 \
+  --per-device-eval-batch-size 64 \
+  --max-length 1024 \
+  --max-gpu-memory-gib 48 \
+  --max-cpu-memory-gib 96 \
+  --lambda-ranking 1.0 \
+  --ranking-margin 0.02 \
+  --ranking-target-space logit \
+  --pair-weight-mode none \
+  --checkpoint-selection-metric ranking_score \
+  --seed 42 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --require-cuda \
+  --head-architecture mlp \
+  --head-dropout-prob 0.05 \
+  --head-mlp-hidden-size 1024 \
+  --anti-saturation-weight 5e-4 \
+  --anti-saturation-logit-threshold 3.5 \
+  --feature-cache-mode read \
+  --nonfinite-feature-policy drop \
+  --init-value-head-path assets/artifacts/phase_e_runs/phase_e_pb_transfer_repairs_0311_1655_e80_ms_processbench_transfer_fanout_seed42_e80_ms_processbench_transfer_fanout_seed42_s42_value_20260310T165030Z/best_value_head.pt
+```
+
+Same-family + ProcessBench re-eval for the sanitized retry:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 \
+python -u scripts/phase_e_eval_samefamily_trust.py \
+  --value-run-dir assets/artifacts/phase_e_runs/phase_e_rlpromo_0311_ms_fanout_ta015_rankonly_warm_e80_dropnf_fix_20260311T044122Z \
+  --run-name phase_e_rlpromo_0311_ms_fanout_ta015_dropnf_samefamily \
+  --output-root assets/artifacts/phase_e_samefamily_eval \
+  --batch-size 96 \
+  --edge-weight-mode confidence \
+  --rejection-coverages 1.0,0.8,0.6,0.4,0.2 \
+  --pressure-sizes 2,4,8 \
+  --pressure-repeats 6 \
+  --require-cuda
+
+CUDA_VISIBLE_DEVICES=3 \
+python -u scripts/phase_e_eval_benchmark.py \
+  --value-run-dir assets/artifacts/phase_e_runs/phase_e_rlpromo_0311_ms_fanout_ta015_rankonly_warm_e80_dropnf_fix_20260311T044122Z \
+  --benchmark-id processbench_gsm8k \
+  --run-name phase_e_rlpromo_0311_ms_fanout_ta015_dropnf_pb_gsm \
+  --output-root assets/artifacts/phase_e_eval \
+  --checkpoint-name best \
+  --batch-size 96 \
+  --require-cuda
+
+CUDA_VISIBLE_DEVICES=0 \
+python -u scripts/phase_e_eval_benchmark.py \
+  --value-run-dir assets/artifacts/phase_e_runs/phase_e_rlpromo_0311_ms_fanout_ta015_rankonly_warm_e80_dropnf_fix_20260311T044122Z \
+  --benchmark-id processbench_math \
+  --run-name phase_e_rlpromo_0311_ms_fanout_ta015_dropnf_pb_math \
+  --output-root assets/artifacts/phase_e_eval \
+  --checkpoint-name best \
+  --batch-size 96 \
+  --require-cuda
+
+python -u scripts/phase_e_diagnose_rl_promotion.py \
+  --run-name phase_e_rlpromo_diag_math_dropnf_0311 \
+  --audit-spec 'e80_fanout|math_shepherd|assets/artifacts/phase_e_samefamily_eval/phase_e_rlpromo_0311_e80_samefamily_20260311T033647Z|assets/artifacts/phase_e_eval/phase_e_pb_transfer_repairs_0311_1655_e80_ms_processbench_transfer_fanout_seed42_e80_ms_processbench_transfer_fanout_seed42_s42_processbench_gsm8k_20260310T170319Z|assets/artifacts/phase_e_eval/phase_e_pb_transfer_repairs_0311_1655_e80_ms_processbench_transfer_fanout_seed42_e80_ms_processbench_transfer_fanout_seed42_s42_processbench_math_20260310T170333Z' \
+  --audit-spec 'e84_fanout_terminal_heavy|math_shepherd|assets/artifacts/phase_e_samefamily_eval/phase_e_rlpromo_0311_e84_samefamily_20260311T033833Z|assets/artifacts/phase_e_eval/phase_e_processbench_terminal_focus_0311_e84_ms_processbench_transfer_fanout_terminal_seed42_e84_ms_processbench_transfer_fanout_terminal_seed42_s42_processbench_gsm8k_20260311T022312Z|assets/artifacts/phase_e_eval/phase_e_processbench_terminal_focus_0311_e84_ms_processbench_transfer_fanout_terminal_seed42_e84_ms_processbench_transfer_fanout_terminal_seed42_s42_processbench_math_20260311T022320Z' \
+  --audit-spec 'e80_dropnf_rankrepair|math_shepherd|assets/artifacts/phase_e_samefamily_eval/phase_e_rlpromo_0311_ms_fanout_ta015_dropnf_samefamily_20260311T044612Z|assets/artifacts/phase_e_eval/phase_e_rlpromo_0311_ms_fanout_ta015_dropnf_pb_gsm_20260311T044635Z|assets/artifacts/phase_e_eval/phase_e_rlpromo_0311_ms_fanout_ta015_dropnf_pb_math_20260311T044656Z'
+```
+
+PRMBench light continuation attempted but not completed this round:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python -u scripts/phase_e_train_value.py \
+  --train-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_rlpromo_0311_prm_ta010__b2281c74f155/train_pairs.jsonl \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_rlpromo_0311_prm_ta010__b2281c74f155/validation_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_e_rlpromo_0311_prm_ta010_warm_e46_nocache \
+  --output-root assets/artifacts/phase_e_runs \
+  --objective-mode joint \
+  --learning-rate 5e-6 \
+  --num-train-epochs 2 \
+  --per-device-train-batch-size 64 \
+  --per-device-eval-batch-size 64 \
+  --max-length 1024 \
+  --max-gpu-memory-gib 48 \
+  --max-cpu-memory-gib 96 \
+  --lambda-ranking 1.0 \
+  --lambda-bce 1.0 \
+  --ranking-margin 0.02 \
+  --ranking-target-space logit \
+  --pair-weight-mode none \
+  --checkpoint-selection-metric pair_acc \
+  --seed 42 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --require-cuda \
+  --head-architecture mlp \
+  --head-dropout-prob 0.05 \
+  --head-mlp-hidden-size 1024 \
+  --anti-saturation-weight 5e-4 \
+  --anti-saturation-logit-threshold 3.5 \
+  --feature-cache-mode off \
+  --init-value-head-path assets/artifacts/phase_e_runs/phase_e_prmbench_acc90_full_0310_1914_e46_prmbench_acc90_mlp_joint_seed3_e46_prmbench_acc90_mlp_joint_seed3_s42_value_20260310T113722Z/best_value_head.pt
+```
+
+### Main result
+
+The current best reading is:
+1. no audited candidate clears the strict RL-promotion gate,
+2. the repository is stronger in *infrastructure integrity* than before,
+3. but candidate quality is still not at RL-ready level.
+
+## 2026-03-11 Low-terminal mixed repair retry update
+
+This round added a more targeted RL-facing repair attempt instead of another
+generic same-source sweep.
+
+Code / config changes:
+1. `src/ours/phase_d/external_pairs_adapters.py`
+   - `load_prmbench_preview_pairs()` now records
+     - `positive_step_index`
+     - `negative_step_index`
+   - this fixes the missing local-step metadata contract for PRMBench pairs.
+2. `scripts/run_phase_e_suite.sh`
+   - added:
+     - `E89_MS_PRMBENCH_TRANSFER_MIX_TERMINAL10_CONFWT_WARM_E82_SEED42`
+     - `E90_MS_PRMBENCH_TRANSFER_MIX_TERMINAL05_CONFWT_WARM_E82_SEED42`
+   - both warm-start from `E82` and probe low terminal-anchor budgets.
+3. `tests/unit/test_phase_d_external_pairs.py`
+   - added a PRMBench loader contract test covering:
+     - step-index normalization
+     - `positive_step_index`
+     - `negative_step_index`
+
+Key experiment state:
+1. rebuilt PRMBench local-diagnostic pair artifact:
+   - `assets/artifacts/phase_e_pairs/phase_e_prmbench_localdiag_0311_e46_rebuild_sharedsplit_s42_pairs__f5778317f28b`
+2. refreshed `E46` PRMBench same-family eval:
+   - `assets/artifacts/phase_e_samefamily_eval/phase_e_prmbench_localdiag_0311_e46_samefamily_20260311T033803Z`
+   - `prompt_pool_top1_accuracy = 0.9659`
+3. refreshed `E82` same-family eval:
+   - `assets/artifacts/phase_e_samefamily_eval/phase_e_rlpush_lowterm_0311_e82_samefamily_20260311T034620Z`
+   - `prompt_pool_top1_accuracy = 0.9633`
+   - `local_first_bad_edge_accuracy = 0.9841`
+4. new repair pair artifacts:
+   - `assets/artifacts/phase_e_pairs/phase_e_rlpush_lowterm_0311_e89_e89_ms_prmbench_transfer_mix_terminal10_confwt_warm_e82_seed42_sharedsplit_s42_pairs__9e47a4b941d8`
+   - `assets/artifacts/phase_e_pairs/phase_e_rlpush_lowterm_0311_e90_e90_ms_prmbench_transfer_mix_terminal05_confwt_warm_e82_seed42_sharedsplit_s42_pairs__e9ecdd65f92b`
+
+Runtime outcome:
+1. `E89` failed during frozen-backbone encoding with:
+   - `RuntimeError: CUDA error: unspecified launch failure`
+2. the first parallel `E90` attempt was stopped after showing the same unstable
+   large-run path.
+3. a safer retry was launched with:
+   - `feature_cache_mode=off`
+   - `max_gpu_memory_gib=48`
+   - `max_cpu_memory_gib=96`
+   - `per_device_eval_batch_size=48`
+   - but it did not finish within this turn, so no benchmark result should be
+     promoted from it yet.
+
+Important diagnosis:
+1. `PRMBench` local auditing is still incomplete even after metadata repair.
+2. reason:
+   - current same-family local metrics assume
+     `last_safe_prefix vs first_bad_prefix`,
+   - PRMBench supervision is
+     `same-step correct sibling vs wrong sibling`.
+3. so the remaining gap is now clearly a metric-definition issue, not a missing
+   metadata issue anymore.
+
+Commands run:
+```bash
+PYTHONPATH=src pytest -q tests/unit/test_phase_d_external_pairs.py
+bash -n scripts/run_phase_e_suite.sh
+python -u scripts/phase_e_prepare_pairs.py --source-bundle prmbench_preview --run-name phase_e_prmbench_localdiag_0311_e46_rebuild_sharedsplit_s42_pairs --output-root assets/artifacts/phase_e_pairs --seed 42 --validation-ratio 0.1 --split-granularity pair_id --max-pairs-total 6000 --max-pairs-per-source 6000 --min-pair-confidence 0.8 --step-label-pair-mode first_bad_edge_strict
+CUDA_VISIBLE_DEVICES=0 python -u scripts/phase_e_eval_samefamily_trust.py --value-run-dir assets/artifacts/phase_e_runs/phase_e_prmbench_acc90_full_0310_1914_e46_prmbench_acc90_mlp_joint_seed3_e46_prmbench_acc90_mlp_joint_seed3_s43_value_20260310T113737Z --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_prmbench_localdiag_0311_e46_rebuild_sharedsplit_s42_pairs__f5778317f28b/validation_pairs.jsonl --run-name phase_e_prmbench_localdiag_0311_e46_samefamily --output-root assets/artifacts/phase_e_samefamily_eval --checkpoint-name best --batch-size 96 --feature-cache-root assets/artifacts/phase_e_feature_cache --feature-cache-mode read_write --feature-cache-lock-timeout-sec 600 --edge-weight-mode confidence --require-cuda
+CUDA_VISIBLE_DEVICES=0 python -u scripts/phase_e_eval_samefamily_trust.py --value-run-dir assets/artifacts/phase_e_runs/phase_e_pb_transfer_mix_0311_1722_e82_ms_prmbench_transfer_mix_seed42_e82_ms_prmbench_transfer_mix_seed42_s42_value_20260310T171945Z --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_pb_transfer_mix_0311_1722_e82_ms_prmbench_transfer_mix_seed42_e82_ms_prmbench_transfer_mix_seed42_sharedsplit_s42_pairs__ae568fa2f36e/validation_pairs.jsonl --run-name phase_e_rlpush_lowterm_0311_e82_samefamily --output-root assets/artifacts/phase_e_samefamily_eval --checkpoint-name best --batch-size 96 --feature-cache-root assets/artifacts/phase_e_feature_cache --feature-cache-mode read_write --feature-cache-lock-timeout-sec 600 --edge-weight-mode confidence --require-cuda
+CUDA_VISIBLE_DEVICES=2 ACTIVE_PHASE_E_GROUP=E89_MS_PRMBENCH_TRANSFER_MIX_TERMINAL10_CONFWT_WARM_E82_SEED42 RUN_PREFIX=phase_e_rlpush_lowterm_0311_e89 bash scripts/run_phase_e_suite.sh
+CUDA_VISIBLE_DEVICES=1 ACTIVE_PHASE_E_GROUP=E90_MS_PRMBENCH_TRANSFER_MIX_TERMINAL05_CONFWT_WARM_E82_SEED42 RUN_PREFIX=phase_e_rlpush_lowterm_0311_e90 bash scripts/run_phase_e_suite.sh
+CUDA_VISIBLE_DEVICES=2 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python -u scripts/phase_e_train_value.py --train-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_rlpush_lowterm_0311_e90_e90_ms_prmbench_transfer_mix_terminal05_confwt_warm_e82_seed42_sharedsplit_s42_pairs__e9ecdd65f92b/train_pairs.jsonl --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_rlpush_lowterm_0311_e90_e90_ms_prmbench_transfer_mix_terminal05_confwt_warm_e82_seed42_sharedsplit_s42_pairs__e9ecdd65f92b/validation_pairs.jsonl --model-path assets/models/Qwen2.5-7B-Instruct --run-name phase_e_rlpush_lowterm_0311_e90_retry_nocache --output-root assets/artifacts/phase_e_runs --objective-mode joint --learning-rate 2e-5 --num-train-epochs 4 --per-device-train-batch-size 64 --per-device-eval-batch-size 48 --pair-weight-mode confidence --source-balance uniform --permutation-mode stable_hash --checkpoint-selection-metric pair_acc --seed 42 --dtype bfloat16 --device-map auto --max-gpu-memory-gib 48 --max-cpu-memory-gib 96 --feature-cache-root assets/artifacts/phase_e_feature_cache --feature-cache-mode off --feature-cache-lock-timeout-sec 600 --ranking-target-space logit --lambda-ranking 1.0 --lambda-bce 1.0 --ranking-margin 0.02 --anti-saturation-weight 5e-4 --anti-saturation-logit-threshold 3.5 --init-value-head-path assets/artifacts/phase_e_runs/phase_e_pb_transfer_mix_0311_1722_e82_ms_prmbench_transfer_mix_seed42_e82_ms_prmbench_transfer_mix_seed42_s42_value_20260310T171945Z/best_value_head.pt --head-architecture mlp --head-dropout-prob 0.05 --head-init-std 0.02 --head-mlp-hidden-size 1024 --head-activation gelu --require-cuda --strict-determinism
+```
+
+## 2026-03-11 RL-Readiness Candidate Refresh
+
+Latest RL-readiness summaries:
+- top candidates:
+  - `assets/artifacts/phase_e_logs/phase_e_rltops_0311_1124/final_summary.md`
+- repair pilots:
+  - `assets/artifacts/phase_e_logs/phase_e_rlrepairs_0311_1124/final_summary.md`
+
+Current bounded-support RL candidates:
+1. `ms_e43`
+   - source:
+     - `Math-Shepherd`
+   - same-family:
+     - `pool_top1 = 0.9648`
+     - `local_first_bad = 0.9702`
+     - `rej40_gain = 0.0352`
+   - benchmark:
+     - `gsm8k_auc = 0.6245`
+     - `math_auc = 0.6341`
+   - assessment:
+     - `provisionally_rl_ready`
+2. `prm_e46`
+   - source:
+     - `PRMBench_Preview`
+   - same-family:
+     - `pool_top1 = 0.9659`
+     - `rej40_gain = 0.0341`
+   - benchmark:
+     - `gsm8k_auc = 0.6264`
+     - `math_auc = 0.6053`
+   - assessment:
+     - `provisionally_rl_ready`
+
+Most important caution:
+1. `prm_e78` still looks very strong on same-family metrics,
+2. but falls to:
+   - `gsm8k_auc = 0.5398`
+   - `math_auc = 0.5117`
+3. interpretation:
+   - stronger same-source fitting does not automatically produce a safer RL prior.
+
+Best repair direction to scale:
+1. `ms_grid_micro`
+   - `pool_top1 = 0.9982`
+   - `local_first_bad = 0.9914`
+   - `gsm8k_auc = 0.5891`
+   - `math_auc = 0.5559`
+   - weakness:
+     - `rej40_gain = 0.0018`
+   - interpretation:
+     - this is the best current local-geometry repair direction, but it still
+       needs an explicit rejection-utility improvement pass.
+
+Direct rerun commands:
+
+```bash
+cd /home/zling/y/bcr/ref
+
+ACTIVE_PHASE_E_RL_GROUP=RR5_COMPARE_INTRADATASET_TOPS \
+RUN_PREFIX=phase_e_rltops_$(date +%m%d_%H%M) \
+RL_AUDIT_BATCH_SIZE=96 \
+CUDA_VISIBLE_DEVICES=1 \
+bash scripts/run_phase_e_rl_readiness_suite.sh
+```
+
+```bash
+cd /home/zling/y/bcr/ref
+
+ACTIVE_PHASE_E_RL_GROUP=RR6_COMPARE_REPAIR_PILOTS \
+RUN_PREFIX=phase_e_rlrepairs_$(date +%m%d_%H%M) \
+RL_AUDIT_BATCH_SIZE=96 \
+CUDA_VISIBLE_DEVICES=2 \
+bash scripts/run_phase_e_rl_readiness_suite.sh
+```
+
+## 2026-03-11 R-PRM Compact Train-Fit vs Held-Out Gap Update
+
+This is the newest `R-PRM` conclusion and should now be treated as the
+repository baseline reading for this source.
+
+Representative artifacts:
+- full compact pair artifact:
+  - `assets/artifacts/phase_e_pairs/phase_e_rprm_full_compact_fix__8d69afd6dba5`
+- train-distribution fit probe:
+  - `assets/artifacts/phase_e_runs/phase_e_rprm_trainfit_probe_0310_s4k_20260310T160730Z/summary.json`
+- held-out repair probe:
+  - `assets/artifacts/phase_e_runs/phase_e_rprm_heldout_repair_0310_s4k_20260310T164443Z/summary.json`
+
+What changed:
+1. a real truncation-gate bug in `src/ours/phase_e/training.py` was fixed;
+2. the repaired compact contract was then tested on a larger and cleaner
+   same-source setup.
+
+New evidence:
+1. train-distribution fit probe:
+   - `pair_acc = 0.9090`
+   - `auc = 0.9131`
+2. matching true held-out probe:
+   - `pair_acc = 0.6280`
+   - `auc = 0.6508`
+
+Interpretation:
+1. current `R-PRM compact_verdict` is not unlearnable;
+2. the current head/objective family can fit the train distribution strongly;
+3. the remaining blocker is held-out generalization under the present compact
+   supervision contract.
+
+Why this matters:
+1. this rules out the overly simple explanation:
+   - "the head is just too weak"
+2. and it also sharpens the previous diagnosis:
+   - the main remaining problem is not length,
+   - and not just verdict-polarity imbalance,
+   - but supervision-contract mismatch.
+
+## 2026-03-11 Phase E Source-Specific Conclusion Update
+
+This repository now has enough same-source evidence to stop treating all
+external pair datasets as one generic supervision family.
+
+Three separate conclusions are now supported:
+
+1. `Math-Shepherd` is a strong same-source training source.
+2. `PRMBench_Preview` is also a strong same-source training source.
+3. `R-PRM` is not failing mainly because of legacy truncation anymore; it is
+   now mainly limited by supervision-contract mismatch under the current frozen
+   feature scorer.
+
+### `Math-Shepherd`
+
+Representative artifacts:
+- `assets/artifacts/phase_e_logs/phase_e_ms_acc90_full_0310_1914_e41_ms_acc90_mlp_rank_seed3/final_summary.md`
+- `assets/artifacts/phase_e_logs/phase_e_ms_acc95_push_0310_2146/final_summary.md`
+
+Key reading:
+- `E41`
+  - `pair_acc=0.9850`
+  - `auc=0.9034`
+- `E68`
+  - `pair_acc=0.9725`
+  - `auc=0.9415`
+
+Interpretation:
+- same-source `Math-Shepherd` fitting is already solved under the current Phase E stack.
+- Remaining errors concentrate on later `first_bad_edge` positions and longer
+  step chains, not on generic learnability.
+
+### `PRMBench_Preview`
+
+Representative artifacts:
+- `assets/artifacts/phase_e_logs/phase_e_prmbench_acc90_full_0310_1914/final_summary.md`
+- `assets/artifacts/phase_e_logs/phase_e_prmbench_acc95_push_0310_2359/final_summary.md`
+
+Key reading:
+- `E46`
+  - `pair_acc=0.9309`
+  - `auc=0.9057`
+- `E78`
+  - `pair_acc=0.9521`
+  - `auc=0.9071`
+
+Interpretation:
+- `PRMBench_Preview` can now clear the `95%` same-source pair-accuracy target.
+- This matters because it proves the current trainer is not generally weak.
+- It is source-sensitive.
+
+### `R-PRM`
+
+Representative artifacts:
+- root-cause audit:
+  - `assets/artifacts/phase_e_logs/phase_e_rprm_deep_diag_0310_2359/final_summary.md`
+- compact length diagnosis:
+  - `assets/artifacts/phase_e_logs/phase_e_rprm_diag_0310_2019/final_summary.md`
+- polarity-repair runs:
+  - `assets/artifacts/phase_e_runs/phase_e_rprm_correctness_diag_0310_2341_bce2048_20260310T154119Z/summary.json`
+  - `assets/artifacts/phase_e_runs/phase_e_rprm_correctness_diag_0310_2341_bce2048_vbal_20260310T154500Z/summary.json`
+  - `assets/artifacts/phase_e_runs/phase_e_rprm_correctness_diag_0310_2341_joint2048_vbal_logit_20260310T154937Z/summary.json`
+
+Current best compact-contract baseline:
+- `C9_MLP_BCE_2048`
+  - `pair_acc=0.6694`
+  - `auc=0.6571`
+
+What the new polarity-repair runs show:
+- `compact_correctness + BCE + 2048`
+  - `pair_acc=0.6481`
+  - `auc=0.6519`
+- `compact_correctness + BCE + verdict_balance`
+  - `pair_acc=0.5926`
+  - `auc=0.5765`
+- `compact_correctness + joint + logit + verdict_balance`
+  - `pair_acc=0.5926`
+  - `auc=0.6306`
+
+Key interpretation:
+- old `compact_verdict` runs had a strong `chosen=no` vs `chosen=yes` asymmetry.
+- the new `compact_correctness + joint + verdict_balance` run almost removes
+  that asymmetry:
+  - chosen=`no`: `0.5968`
+  - chosen=`yes`: `0.5870`
+- but overall accuracy still stays far below `ACC90`.
+
+This is the critical diagnosis:
+- `R-PRM` no longer mainly fails because of truncation.
+- `R-PRM` no longer mainly fails because of a simple verdict-polarity bias.
+- `R-PRM` now mainly fails because the compact supervision contract is too weak
+  for the current frozen feature head.
+
+Therefore:
+- `R-PRM` should not currently be treated as a primary same-source
+  high-accuracy training source.
+- It should be treated as a verifier-style source that likely needs a different
+  model contract, not just more tuning.
+
+## 2026-03-11 R-PRM Large-Artifact Verification Commands
+
+These are the exact commands used to tighten the current `R-PRM` diagnosis
+without relying on old smoke-scale artifacts.
+
+Prepare the repaired full compact artifact:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+python -u scripts/phase_e_prepare_pairs.py \
+  --source-bundle r_prm_train \
+  --run-name phase_e_rprm_full_compact_fix \
+  --output-root assets/artifacts/phase_e_pairs \
+  --seed 42 \
+  --validation-ratio 0.1 \
+  --split-granularity source_sample \
+  --min-pair-confidence 0.75 \
+  --r-prm-pair-mode compact_verdict \
+  --r-prm-root assets/external_datasets/kevinpro_r_prm
+```
+
+Train-distribution fit ceiling probe:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+python -u scripts/phase_e_train_value.py \
+  --train-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_rprm_full_compact_fix__8d69afd6dba5/train_pairs.jsonl \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_rprm_full_compact_fix__8d69afd6dba5/train_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_e_rprm_trainfit_probe_0310_s4k \
+  --output-root assets/artifacts/phase_e_runs \
+  --max-train-samples 4000 \
+  --max-eval-samples 1000 \
+  --objective-mode joint \
+  --learning-rate 2e-5 \
+  --weight-decay 0.0 \
+  --num-train-epochs 16 \
+  --per-device-train-batch-size 8 \
+  --per-device-eval-batch-size 12 \
+  --gradient-accumulation-steps 1 \
+  --warmup-ratio 0.05 \
+  --max-grad-norm 1.0 \
+  --max-length 2048 \
+  --lambda-ranking 1.0 \
+  --lambda-bce 1.0 \
+  --ranking-margin 0.02 \
+  --ranking-target-space logit \
+  --pair-weight-mode none \
+  --source-balance none \
+  --permutation-mode stable_hash \
+  --anti-saturation-weight 1e-4 \
+  --anti-saturation-logit-threshold 3.0 \
+  --checkpoint-selection-metric pair_acc \
+  --seed 42 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --strict-determinism \
+  --head-architecture mlp \
+  --head-dropout-prob 0.0 \
+  --head-init-std 0.02 \
+  --head-mlp-hidden-size 2048 \
+  --head-activation gelu \
+  --feature-cache-root assets/artifacts/phase_e_feature_cache \
+  --feature-cache-mode read_write \
+  --max-truncation-over-limit-fraction 0.01 \
+  --require-cuda
+```
+
+Matching true held-out probe:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+python -u scripts/phase_e_train_value.py \
+  --train-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_rprm_full_compact_fix__8d69afd6dba5/train_pairs.jsonl \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_rprm_full_compact_fix__8d69afd6dba5/validation_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_e_rprm_heldout_repair_0310_s4k \
+  --output-root assets/artifacts/phase_e_runs \
+  --max-train-samples 4000 \
+  --max-eval-samples 1000 \
+  --objective-mode joint \
+  --learning-rate 2e-5 \
+  --weight-decay 0.0 \
+  --num-train-epochs 16 \
+  --per-device-train-batch-size 8 \
+  --per-device-eval-batch-size 12 \
+  --gradient-accumulation-steps 1 \
+  --warmup-ratio 0.05 \
+  --max-grad-norm 1.0 \
+  --max-length 2048 \
+  --lambda-ranking 1.0 \
+  --lambda-bce 1.0 \
+  --ranking-margin 0.02 \
+  --ranking-target-space logit \
+  --pair-weight-mode none \
+  --source-balance none \
+  --permutation-mode stable_hash \
+  --anti-saturation-weight 1e-4 \
+  --anti-saturation-logit-threshold 3.0 \
+  --checkpoint-selection-metric pair_acc \
+  --seed 42 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --strict-determinism \
+  --head-architecture mlp \
+  --head-dropout-prob 0.0 \
+  --head-init-std 0.02 \
+  --head-mlp-hidden-size 2048 \
+  --head-activation gelu \
+  --feature-cache-root assets/artifacts/phase_e_feature_cache \
+  --feature-cache-mode read_write \
+  --max-truncation-over-limit-fraction 0.01 \
+  --require-cuda
+```
+
+## 2026-03-10 RL-Readiness Audit Of Current Value-Head Candidates
+
+Why this block exists:
+- The repository had already shown strong same-source held-out fitting on some
+  sources.
+- But that still did not answer the more practical question:
+  - is any current value head good enough for *conservative RL-style use*?
+- So this round audited the strongest current checkpoints under:
+  - same-family reranking,
+  - rejection / abstention,
+  - stronger best-of-N pressure,
+  - and ProcessBench re-evaluation.
+
+New wrapper added:
+- `scripts/run_phase_e_rl_readiness_suite.sh`
+
+Main audit command used:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 \
+ACTIVE_PHASE_E_RL_GROUP=RR4_COMPARE_CURRENT_TOPS \
+RUN_PREFIX=phase_e_rl_readiness_0310_2338 \
+bash scripts/run_phase_e_rl_readiness_suite.sh
+```
+
+Why `CUDA_VISIBLE_DEVICES=2`:
+- `GPU 2` was idle at launch,
+- `GPU 1` and `GPU 3` were already busy,
+- and this kept the main audit sequential and predictable on the shared server.
+
+Main artifact:
+- `assets/artifacts/phase_e_logs/phase_e_rl_readiness_0310_2338/final_summary.md`
+
+Audit targets:
+- `ms_e68`
+  - strongest current same-source Math-Shepherd winner
+- `ms_e14`
+  - benchmark-aware Math-Shepherd trust candidate
+- `prm_e46`
+  - strongest current PRMBench same-source winner
+
+Main results:
+- `ms_e68`
+  - same-family:
+    - `prompt_pool_top1=0.9793`
+    - `local_first_bad_acc=0.9779`
+  - ProcessBench:
+    - `gsm8k_auc=0.5885`
+    - `math_auc=0.5547`
+  - reading:
+    - excellent same-family reranker
+    - benchmark behavior is positive but not the cleanest overall RL candidate
+- `ms_e14`
+  - same-family:
+    - `prompt_pool_top1=0.8584`
+    - `local_first_bad_acc=0.8664`
+  - ProcessBench:
+    - `gsm8k_auc=0.5026`
+    - `math_auc=0.5138`
+  - reading:
+    - useful signal
+    - not benchmark-safe enough to promote
+- `prm_e46`
+  - same-family:
+    - `prompt_pool_top1=0.9659`
+    - `rejection@0.4=1.0000`
+    - `pressure@8=0.9375`
+  - ProcessBench:
+    - `gsm8k_auc=0.6264`
+    - `math_auc=0.6053`
+  - reading:
+    - first current checkpoint that survives both same-family and benchmark-native audit strongly enough to count as a bounded-support RL candidate
+
+Important bug found during this audit:
+- the first wrapper summary incorrectly read benchmark AUC from a generic
+  `auc` key
+- `ProcessBench` actually reports:
+  - `pair_auc_good_vs_bad`
+- the wrapper was fixed and the final summary was regenerated from the
+  completed artifacts without rerunning the full audit
+
+Extra pressure-stress checks:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 \
+python -u scripts/phase_e_eval_samefamily_trust.py \
+  --value-run-dir assets/artifacts/phase_e_runs/phase_e_ms_acc95_push_0310_2146_e68_ms_acc95_joint_logit_seed42_e68_ms_acc95_joint_logit_seed42_s42_value_20260310T151651Z \
+  --run-name phase_e_rl_pressure_stress_0310_2340_ms_e68 \
+  --output-root assets/artifacts/phase_e_samefamily_eval \
+  --batch-size 96 \
+  --edge-weight-mode confidence \
+  --rejection-coverages 1.0,0.8,0.6,0.4,0.2,0.1 \
+  --pressure-sizes 2,4,8,12,16 \
+  --pressure-repeats 8
+
+CUDA_VISIBLE_DEVICES=0 \
+python -u scripts/phase_e_eval_samefamily_trust.py \
+  --value-run-dir assets/artifacts/phase_e_runs/phase_e_prmbench_acc90_full_0310_1914_e46_prmbench_acc90_mlp_joint_seed3_e46_prmbench_acc90_mlp_joint_seed3_s43_value_20260310T113737Z \
+  --run-name phase_e_rl_pressure_stress_0310_2340_prm_e46 \
+  --output-root assets/artifacts/phase_e_samefamily_eval \
+  --batch-size 96 \
+  --edge-weight-mode confidence \
+  --rejection-coverages 1.0,0.8,0.6,0.4,0.2,0.1 \
+  --pressure-sizes 2,4,8,12,16 \
+  --pressure-repeats 8
+```
+
+Why `CUDA_VISIBLE_DEVICES=0` was acceptable in the second stress command:
+- at that moment `GPU 0` and `GPU 2` were both idle,
+- the jobs were eval-only and reused cached features,
+- parallelizing them shortened total occupancy time instead of extending it.
+
+Stress artifacts:
+- `assets/artifacts/phase_e_samefamily_eval/phase_e_rl_pressure_stress_0310_2340_ms_e68_20260310T153847Z/summary.md`
+- `assets/artifacts/phase_e_samefamily_eval/phase_e_rl_pressure_stress_0310_2340_prm_e46_20260310T153848Z/summary.md`
+
+Stress takeaways:
+- `E68`
+  - `rejection@0.1=1.0000`
+  - `pressure@12=1.0000`
+  - same-family decision pressure is not the bottleneck
+- `E46`
+  - `rejection@0.1=1.0000`
+  - `pressure@4=0.9411`
+  - `pressure@8=0.9375`
+  - still robust under stronger selection pressure
+
+Bottom-line reading:
+- the repository now has one checkpoint family that is usable for:
+  - conservative reranking
+  - rejection / abstention
+  - low-weight reward prior
+  - math-family process filtering
+- the best current candidate is:
+  - `prm_e46`
+- but this is still **not** the same as proving:
+  - unrestricted high-weight RL reward-model readiness
+- missing evidence still includes:
+  - true closed-loop RL improvement
+  - reward-hacking / exploitation resistance
+  - broader cross-domain robustness
+
+## 2026-03-10 Math-Shepherd ACC95 Verification And Push Matrix
+
+Why this block exists:
+- The request for this round was to independently verify current
+  `Math-Shepherd` performance, try low-risk fixes if necessary, and make sure
+  the source reaches `95%` held-out ACC without triggering avoidable OOM on a
+  shared server.
+- But older repository artifacts already suggested the target had been crossed,
+  so the real job here was:
+  - verify that the current code state still reproduces `>95%`,
+  - test a few focused fixes,
+  - and identify the most effective one instead of blindly pushing capacity.
+
+Resource hygiene:
+- `nvidia-smi` was checked before launch.
+- All four `A100 80GB` devices were idle at the start.
+- The run still used only `CUDA_VISIBLE_DEVICES=1` to stay conservative and
+  avoid unnecessary multi-GPU memory/cache pressure on a shared machine.
+
+New one-click groups added:
+- `E67_MS_ACC95_JOINT_VERIFY_SEED42`
+- `E68_MS_ACC95_JOINT_LOGIT_SEED42`
+- `E69_MS_ACC95_JOINT_OVERFIT_SEED42`
+- wrapper:
+  - `I6_MS_ACC95_PUSH_MATRIX`
+
+Command used:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+ACTIVE_PHASE_E_INTRADATASET_GROUP=I6_MS_ACC95_PUSH_MATRIX \
+RUN_PREFIX=phase_e_ms_acc95_push_0310_2146 \
+bash scripts/run_phase_e_intradataset_suite.sh
+```
+
+Main artifacts:
+- suite summary:
+  - `assets/artifacts/phase_e_logs/phase_e_ms_acc95_push_0310_2146/final_summary.md`
+- candidate report:
+  - `assets/artifacts/phase_e_candidates/phase_e_ms_acc95_push_0310_2146_candidate/candidate_report.md`
+
+Results:
+- `E67_MS_ACC95_JOINT_VERIFY_SEED42`
+  - `pair_acc=0.963267`
+  - `auc=0.942383`
+  - `ranking_score=0.952825`
+- `E68_MS_ACC95_JOINT_LOGIT_SEED42`
+  - `pair_acc=0.972450`
+  - `auc=0.941545`
+  - `ranking_score=0.956998`
+- `E69_MS_ACC95_JOINT_OVERFIT_SEED42`
+  - `pair_acc=0.966167`
+  - `auc=0.945630`
+  - `ranking_score=0.955898`
+
+Candidate selection:
+- selected group:
+  - `E68_MS_ACC95_JOINT_LOGIT_SEED42`
+- `trust_score=0.968689`
+- checkpoint:
+  - `assets/artifacts/phase_e_runs/phase_e_ms_acc95_push_0310_2146_e68_ms_acc95_joint_logit_seed42_e68_ms_acc95_joint_logit_seed42_s42_value_20260310T151651Z/best_value_head.pt`
+
+Interpretation:
+- `Math-Shepherd` was already above `95%` before this round.
+- This new run confirms the current code state still reproduces that regime.
+- The best low-risk improvement is:
+  - `joint + ranking_target_space=logit`
+- More aggressive "overfit push" changes did not beat the logit-space tweak.
+- So on this source, the current best explanation is:
+  - the stack already learns the source well,
+  - and geometry choice matters more than simply turning down regularization.
+
+## 2026-03-10 R-PRM Root-Cause Diagnosis
+
+Why this block exists:
+- `R-PRM` had contradictory signals across old Phase E runs.
+- We therefore separated three questions:
+  - legacy vs compact pair-contract truncation risk,
+  - repaired-contract learnability,
+  - and whether invalid legacy settings now fail fast before model load.
+
+Key commands used:
+
+```bash
+python -u scripts/phase_e_prepare_pairs.py \
+  --source-bundle r_prm_train \
+  --run-name phase_e_rprm_contractcmp_0310_2055_legacy_pairs \
+  --output-root assets/artifacts/phase_e_pairs \
+  --seed 42 \
+  --split-granularity pair_id \
+  --max-pairs-total 2500 \
+  --max-pairs-per-source 2500 \
+  --min-pair-confidence 0.75 \
+  --r-prm-pair-mode direct_pair_legacy
+
+python -u scripts/phase_e_prepare_pairs.py \
+  --source-bundle r_prm_train \
+  --run-name phase_e_rprm_contractcmp_0310_2055_compact_pairs \
+  --output-root assets/artifacts/phase_e_pairs \
+  --seed 42 \
+  --split-granularity pair_id \
+  --max-pairs-total 2500 \
+  --max-pairs-per-source 2500 \
+  --min-pair-confidence 0.75 \
+  --r-prm-pair-mode compact_verdict
+
+python -u scripts/phase_e_diagnose_truncation.py \
+  --pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_rprm_contractcmp_0310_2055_legacy_pairs__efc9444c97f8/train_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_e_rprm_contractcmp_0310_2055_legacy_train_diag \
+  --output-root assets/artifacts/phase_e_truncation_diagnostics \
+  --batch-size 64 \
+  --max-lengths 768 1024 1536 2048
+
+python -u scripts/phase_e_diagnose_truncation.py \
+  --pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_rprm_contractcmp_0310_2055_compact_pairs__ca03cf0c9aa1/train_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_e_rprm_contractcmp_0310_2055_compact_train_diag \
+  --output-root assets/artifacts/phase_e_truncation_diagnostics \
+  --batch-size 64 \
+  --max-lengths 768 1024 1536 2048
+
+python -u scripts/phase_e_audit_rprm_contract.py \
+  --r-prm-root assets/external_datasets/kevinpro_r_prm \
+  --split train \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_e_rprm_contractaudit_0310_2100 \
+  --output-root assets/artifacts/phase_e_rprm_audit \
+  --max-rows 4000 \
+  --max-lengths 1024 1536 2048
+
+CUDA_VISIBLE_DEVICES=3 \
+ACTIVE_PHASE_E_RPRM_DIAG_GROUP=RD2_RPRM_RECIPE_MATRIX_SMOKE \
+RUN_PREFIX=phase_e_rprm_recipe_smoke_0310_2105 \
+bash scripts/run_phase_e_rprm_diagnostic_suite.sh
+
+python -u scripts/phase_e_train_value.py \
+  --train-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_rprm_contractcmp_0310_2055_legacy_pairs__efc9444c97f8/train_pairs.jsonl \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_rprm_contractcmp_0310_2055_legacy_pairs__efc9444c97f8/validation_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_e_rprm_legacy_failfast_0310_2100 \
+  --output-root assets/artifacts/phase_e_runs \
+  --objective-mode ranking_only \
+  --learning-rate 5e-5 \
+  --num-train-epochs 4 \
+  --per-device-train-batch-size 128 \
+  --per-device-eval-batch-size 128 \
+  --pair-weight-mode none \
+  --source-balance none \
+  --permutation-mode stable_hash \
+  --checkpoint-selection-metric pair_acc \
+  --seed 42 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --feature-cache-root assets/artifacts/phase_e_feature_cache \
+  --feature-cache-mode read_write \
+  --feature-cache-lock-timeout-sec 600 \
+  --max-length 1024 \
+  --lambda-ranking 1.0 \
+  --lambda-bce 0.25 \
+  --ranking-margin 0.05 \
+  --head-architecture mlp \
+  --head-dropout-prob 0.05 \
+  --head-init-std 0.02 \
+  --head-mlp-hidden-size 1024 \
+  --head-activation gelu \
+  --truncation-diagnostics-batch-size 64 \
+  --max-truncation-over-limit-fraction 0.10
+```
+
+Operator notes:
+- `CUDA_VISIBLE_DEVICES=3` was used because devices `0-2` were already busy during this diagnosis window.
+- `same-family trust` inside the recipe suite keeps `batch-size=16` on `2048`-token runs because the evaluation path scores candidate pools at full context length; using the larger default eval batch would be unnecessarily risky.
+- The dedicated wrapper currently writes correct row artifacts (`artifact_paths.json`, `recipe_rows.jsonl`) even when its final Markdown render step fails; treat `recipe_rows.jsonl` as the source of truth until the wrapper render bug is fully cleaned up.
+
+Main findings from this block:
+- `direct_pair_legacy` first becomes fully clean only at `2048`.
+- `compact_verdict` first becomes fully clean already at `1536`.
+- `legacy@1024` now fails immediately at the truncation gate, before backbone load.
+- On repaired compact `R-PRM`, the best smoke recipe was:
+  - `mlp + joint @2048`
+  - `heldout_pair_acc=0.6694`
+  - `heldout_auc=0.6611`
+  - `samefamily_top1=0.6829`
+- This means repaired `R-PRM` is learnable, but still far from `ACC90`; current interpretation is “usable medium-strength source”, not “anchor-quality source”.
+
 Current milestone status (2026-03-10, Phase E transition):
 - Phase A is concluded and stable (full-dataset benchmark contracts are reproducible).
 - Phase B core diagnosis is concluded:
@@ -131,6 +2140,20 @@ Current milestone status (2026-03-10, Phase E transition):
     - stale cache lock files are reclaimed after timeout
     - `Phase B` and `Phase C P(IK)` head-training loops now keep cache tensors
       on CPU and move only the current mini-batch to GPU
+  - left-padding pooling fix (2026-03-10):
+    - `src/ours/phase_b/value_head.py` no longer assumes right padding when
+      pooling the last token from frozen backbone hidden states
+    - the pooled feature now comes from the last attended token position in
+      `attention_mask`, so left-padded and right-padded batches share the same
+      semantics
+    - `src/ours/phase_b/feature_cache.py` now uses
+      `phase_feature_cache_v3` so pre-fix pooled features are treated as stale
+      instead of being silently reused
+    - verification command:
+
+      ```bash
+      PYTHONPATH=src pytest -q tests/unit/test_value_head_pooling.py tests/unit/test_feature_cache.py tests/unit/test_phase_e_benchmark_eval.py
+      ```
   - new Phase E multi-source entrypoint:
     - `scripts/run_phase_e_multisource_math_suite.sh`
     - this wrapper now covers:
@@ -139,6 +2162,75 @@ Current milestone status (2026-03-10, Phase E transition):
       - Stage C tri-source main mixture,
       - Stage D weak-source PRM800K ablations,
       - Stage E staged curricula.
+  - R-PRM data-contract repair (2026-03-10):
+    - the old `R-PRM` Phase E path used full chosen/rejected verifier essays
+      directly as pair texts
+    - this was retained as:
+      - `direct_pair_legacy`
+    - a new Phase E repair path is now implemented:
+      - `compact_verdict`
+    - `compact_verdict` rewrites each `R-PRM` DPO row into:
+      - compact `Question / Previous Steps / Now Step` prompt
+      - short opposite-verdict pair
+    - why:
+      - the current Phase E learner is a frozen backbone plus tiny scalar head,
+        not a generative verifier
+      - feeding multi-thousand-token verifier essays into that learner was a
+        bad data contract and caused severe truncation
+    - real truncation diagnosis on repository artifacts:
+      - legacy:
+        - `assets/artifacts/phase_e_truncation_diagnostics/rprm_legacy_diag_20260310T122121Z/summary.json`
+        - `frac_pairs_over_limit = 1.0`
+      - compact:
+        - `assets/artifacts/phase_e_truncation_diagnostics/rprm_compact_diag_20260310T122126Z/summary.json`
+        - `frac_pairs_over_limit = 0.0`
+    - new groups for this repair:
+      - `E12_RPRM_COMPACT_VERDICT_SEED3`
+      - `E65_STAGEB_MS_RPRM_COMPACT_REPAIRED_LINEAR_SEED3`
+      - `E66_STAGEB_MS_RPRM_COMPACT_REPAIRED_MLP_SEED3`
+    - new wrapper groups for diagnosis:
+      - `R3_RPRM_DATAFIX_SMOKE`
+      - `R4_RPRM_DATAFIX_SEED3`
+    - same-source compact smoke already ran end-to-end:
+      - `assets/artifacts/phase_e_logs/phase_e_rprm_compact_smoke_0310_2038/final_summary.md`
+      - tiny seed-42 smoke:
+        - `pair_accuracy = 0.666667`
+        - `auc = 0.555556`
+    - latest dedicated recheck with the repaired contract:
+      - `assets/artifacts/phase_e_logs/phase_e_rprm_diag_0310_2019/final_summary.md`
+    - important correction:
+      - the old statement
+        - "`R-PRM` mainly fails because `1024` truncates almost everything"
+        is only true for the **legacy verifier-essay contract**
+      - under the current `compact_verdict` contract:
+        - `1024` is still slightly unsafe,
+        - `1536` is the first fully clean cutoff,
+        - `2048` is not needed for safety
+    - repaired-contract truncation facts:
+      - train:
+        - `1024`: `over_limit=0.0155`, `collapse=0.0155`
+        - `1536`: all truncation-risk metrics `0.0000`
+      - validation:
+        - `1024`: `over_limit=0.0242`, `collapse=0.0242`
+        - `1536`: all truncation-risk metrics `0.0000`
+    - repaired-contract same-source fit:
+      - `1536`:
+        - `pair_acc=0.6129`
+        - `auc=0.6031`
+      - `2048`:
+        - `pair_acc=0.7016`
+        - `auc=0.6735`
+    - interpretation:
+      - removing truncation damage does improve `R-PRM`,
+      - but the source still remains far below `ACC90`,
+      - so the remaining bottleneck is no longer plain sequence length alone
+      - it is now more likely about supervision semantics / head-contract fit
+    - config hardening applied after this recheck:
+      - `E12_RPRM_COMPACT_VERDICT_SEED3`
+      - `E65_STAGEB_MS_RPRM_COMPACT_REPAIRED_LINEAR_SEED3`
+      - `E66_STAGEB_MS_RPRM_COMPACT_REPAIRED_MLP_SEED3`
+      now default to:
+      - `MAX_LENGTH=1536`
   - Phase E source-of-truth:
     - `docs/phase_E_plan.md`
   - Latest strict diagnosis (2026-03-07):
@@ -157,6 +2249,348 @@ Primary roadmap:
 - `TODO_ours.md`
 - `phase_D_plan.md`
 - `phase_E_plan.md`
+
+## 2026-03-11 ProcessBench Alignment Audit + Micro Repair Pilots
+
+This round focused on one narrower question:
+
+1. why do strong same-source Phase E heads still transfer weakly to
+   `ProcessBench`?
+2. can we separate:
+   - terminal-completion weakness,
+   - local error discrimination weakness,
+   - broader prefix-coverage weakness?
+
+### New diagnostic command
+
+```bash
+python -u scripts/phase_e_analyze_processbench_failures.py \
+  --value-run-dir <PHASE_E_RUN_DIR> \
+  --benchmark-eval-dir <PHASE_E_PROCESSBENCH_EVAL_DIR> \
+  --run-name <DIAG_NAME>
+```
+
+Representative baseline diagnostics:
+1. `assets/artifacts/phase_e_processbench_analysis/ms_e68_pb_math_v2_0311_20260310T160909Z/summary.md`
+2. `assets/artifacts/phase_e_processbench_analysis/prm_e46_pb_math_v2_0311_20260310T160909Z/summary.md`
+
+Key diagnosis:
+1. `ProcessBench` is not only a local first-bad benchmark.
+2. It contains a large all-correct block:
+   - GSM8K: `0.4825`
+   - Math: `0.4060`
+3. Both strong baselines had effectively zero terminal-anchor supervision:
+   - `E68`: pure `local_first_bad_edge`
+   - `E46`: pure `local_modified_process_error_step`
+
+### New repair artifacts
+
+`PRMBench + terminal anchors`:
+
+```bash
+python -u scripts/phase_e_prepare_prmbench_terminal_anchor_pairs.py \
+  --run-name phase_e_prmbench_terminal_anchor_full_0311 \
+  --terminal-anchor-confidence 0.86
+```
+
+Artifact:
+1. `assets/artifacts/phase_e_pairs/phase_e_prmbench_terminal_anchor_full_0311__192ca71fd301`
+
+`Math-Shepherd + terminal anchors` (capped):
+
+```bash
+python -u scripts/phase_e_prepare_mathshepherd_terminal_anchor_pairs.py \
+  --run-name phase_e_ms_terminal_anchor_cap20k_diag_0311 \
+  --max-local-pairs 20000 \
+  --terminal-anchor-ratio 0.50 \
+  --terminal-anchor-prefix-mode penultimate \
+  --step-label-pair-mode first_bad_edge_strict
+```
+
+Artifact:
+1. `assets/artifacts/phase_e_pairs/phase_e_ms_terminal_anchor_cap20k_diag_0311__6d57b0d4b490`
+
+`Math-Shepherd grid`:
+
+```bash
+python -u scripts/phase_e_prepare_pairs.py \
+  --source-bundle math_shepherd \
+  --run-name phase_e_ms_grid_cap40k_diag_0311 \
+  --split-granularity source_sample \
+  --step-label-pair-mode all_good_vs_all_bad \
+  --max-pairs-per-sample 4 \
+  --max-pairs-total 40000 \
+  --max-pairs-per-source 40000 \
+  --math-shepherd-path assets/external_datasets/peiyi_math_shepherd/math-shepherd.jsonl \
+  --overwrite
+```
+
+Artifact:
+1. `assets/artifacts/phase_e_pairs/phase_e_ms_grid_cap40k_diag_0311__4f87d4f4cea6`
+
+### Micro repair pilots
+
+These were intentionally run as server-safe warm-start pilots.
+
+`PRMBench + terminal anchors` from `E46`:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -u scripts/phase_e_train_value.py \
+  --train-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_prmbench_terminal_anchor_full_0311__192ca71fd301/train_pairs.jsonl \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_prmbench_terminal_anchor_full_0311__192ca71fd301/validation_pairs.jsonl \
+  --max-train-samples 512 \
+  --max-eval-samples 128 \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_e_pbta_warm_e46_micro_0311 \
+  --objective-mode joint \
+  --learning-rate 1e-5 \
+  --num-train-epochs 2 \
+  --per-device-train-batch-size 32 \
+  --per-device-eval-batch-size 32 \
+  --max-length 1024 \
+  --lambda-ranking 1.0 \
+  --lambda-bce 1.0 \
+  --ranking-margin 0.02 \
+  --ranking-target-space score \
+  --pair-weight-mode none \
+  --checkpoint-selection-metric pair_acc \
+  --seed 42 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --require-cuda \
+  --head-architecture mlp \
+  --head-dropout-prob 0.05 \
+  --head-mlp-hidden-size 1024 \
+  --init-value-head-path assets/artifacts/phase_e_runs/phase_e_prmbench_acc90_full_0310_1914_e46_prmbench_acc90_mlp_joint_seed3_e46_prmbench_acc90_mlp_joint_seed3_s43_value_20260310T113737Z/best_value_head.pt
+```
+
+ProcessBench results:
+1. GSM8K:
+   - baseline `E46`: `pair_acc=0.6701`, `auc=0.6264`, `first_edge=0.6706`, `all_correct_last=0.2924`
+   - repair pilot: `pair_acc=0.5840`, `auc=0.6014`, `first_edge=0.6471`, `all_correct_last=0.4196`
+2. Math:
+   - baseline `E46`: `pair_acc=0.5653`, `auc=0.6053`, `first_edge=0.6096`, `all_correct_last=0.2452`
+   - repair pilot: `pair_acc=0.5177`, `auc=0.5906`, `first_edge=0.6013`, `all_correct_last=0.3492`
+
+Reading:
+1. terminal anchors do raise completion preference,
+2. but they soften local ranking when used alone.
+
+`Math-Shepherd + terminal anchors` from `E68`:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -u scripts/phase_e_train_value.py \
+  --train-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_ms_terminal_anchor_cap20k_diag_0311__6d57b0d4b490/train_pairs.jsonl \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_ms_terminal_anchor_cap20k_diag_0311__6d57b0d4b490/validation_pairs.jsonl \
+  --max-train-samples 512 \
+  --max-eval-samples 128 \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_e_msta_warm_e68_micro_0311 \
+  --objective-mode joint \
+  --learning-rate 1e-5 \
+  --num-train-epochs 2 \
+  --per-device-train-batch-size 32 \
+  --per-device-eval-batch-size 32 \
+  --max-length 1024 \
+  --lambda-ranking 1.0 \
+  --lambda-bce 1.0 \
+  --ranking-margin 0.02 \
+  --ranking-target-space logit \
+  --pair-weight-mode none \
+  --anti-saturation-weight 0.0005 \
+  --anti-saturation-logit-threshold 4.0 \
+  --checkpoint-selection-metric pair_acc \
+  --seed 42 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --require-cuda \
+  --head-architecture mlp \
+  --head-dropout-prob 0.05 \
+  --head-mlp-hidden-size 1024 \
+  --init-value-head-path assets/artifacts/phase_e_runs/phase_e_ms_acc95_push_0310_2146_e68_ms_acc95_joint_logit_seed42_e68_ms_acc95_joint_logit_seed42_s42_value_20260310T151651Z/best_value_head.pt
+```
+
+ProcessBench results:
+1. GSM8K:
+   - baseline `E68`: `pair_acc=0.6385`, `auc=0.5885`, `first_edge=0.6294`, `all_correct_last=0.5626`
+   - repair pilot: `pair_acc=0.5396`, `auc=0.5527`, `first_edge=0.6059`, `all_correct_last=0.7590`
+2. Math:
+   - baseline `E68`: `pair_acc=0.5809`, `auc=0.5547`, `first_edge=0.5553`, `all_correct_last=0.5895`
+   - repair pilot: `pair_acc=0.5252`, `auc=0.5350`, `first_edge=0.5324`, `all_correct_last=0.7663`
+
+Reading:
+1. pure terminal-anchor pressure strongly over-corrects toward completion preference.
+
+`Math-Shepherd grid` from `E68`:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -u scripts/phase_e_train_value.py \
+  --train-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_ms_grid_cap40k_diag_0311__4f87d4f4cea6/train_pairs.jsonl \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_ms_grid_cap40k_diag_0311__4f87d4f4cea6/validation_pairs.jsonl \
+  --max-train-samples 512 \
+  --max-eval-samples 128 \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_e_msgrid_warm_e68_micro_0311 \
+  --objective-mode joint \
+  --learning-rate 1e-5 \
+  --num-train-epochs 2 \
+  --per-device-train-batch-size 32 \
+  --per-device-eval-batch-size 32 \
+  --max-length 1024 \
+  --lambda-ranking 1.0 \
+  --lambda-bce 1.0 \
+  --ranking-margin 0.02 \
+  --ranking-target-space logit \
+  --pair-weight-mode none \
+  --anti-saturation-weight 0.0005 \
+  --anti-saturation-logit-threshold 4.0 \
+  --checkpoint-selection-metric pair_acc \
+  --seed 42 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --require-cuda \
+  --head-architecture mlp \
+  --head-dropout-prob 0.05 \
+  --head-mlp-hidden-size 1024 \
+  --init-value-head-path assets/artifacts/phase_e_runs/phase_e_ms_acc95_push_0310_2146_e68_ms_acc95_joint_logit_seed42_e68_ms_acc95_joint_logit_seed42_s42_value_20260310T151651Z/best_value_head.pt
+```
+
+ProcessBench results:
+1. GSM8K:
+   - baseline `E68`: `pair_acc=0.6385`, `auc=0.5885`, `first_edge=0.6294`, `all_correct_last=0.5626`
+   - repair pilot: `pair_acc=0.6436`, `auc=0.5891`, `first_edge=0.6235`, `all_correct_last=0.5768`
+2. Math:
+   - baseline `E68`: `pair_acc=0.5809`, `auc=0.5547`, `first_edge=0.5553`, `all_correct_last=0.5895`
+   - repair pilot: `pair_acc=0.5839`, `auc=0.5559`, `first_edge=0.5595`, `all_correct_last=0.6011`
+
+Reading:
+1. grid supervision helps the broader good-vs-bad side,
+2. but it does not solve the terminal-completion gap.
+
+### Current synthesis
+
+The current ProcessBench transfer problem is now much better localized:
+1. terminal anchors and grid-style pairs move different parts of the benchmark,
+2. neither alone is sufficient,
+3. the next non-generic repair should be:
+   - local pairs
+   - plus limited terminal anchors
+   - plus optionally low-weight grid coverage
+   in one mixed or staged curriculum.
+
+## 2026-03-11 MCTS Literature Check For The Current Phase E Bottleneck
+
+Question:
+1. can `MCTS` directly solve the current `ProcessBench` transfer problem?
+
+Short answer:
+1. not as the next mainline fix,
+2. but it is still relevant as a later branch for:
+   - offline pair/tree construction,
+   - or test-time judge/search.
+
+Why this is the correct reading:
+1. our current measured bottleneck is a supervision mismatch:
+   - local-only supervision under-teaches terminal completion,
+   - terminal-anchor supervision over-corrects,
+   - grid supervision helps a different benchmark slice.
+2. `MCTS` does not remove that mismatch by itself.
+3. if the verifier target is already misaligned, search usually amplifies that
+   target rather than correcting it.
+
+What the literature supports:
+1. `ReST-MCTS*`
+   - supports tree search as an offline data-harvesting / self-training method:
+     - https://arxiv.org/abs/2406.03816
+     - https://github.com/THUDM/ReST-MCTS
+2. `Tree-PLV`
+   - supports tree-based preference construction for better step-level ranking:
+     - https://arxiv.org/abs/2407.00390
+     - https://aclanthology.org/2024.emnlp-main.125/
+3. `Rewarding Progress`
+   - supports search when the target is progress/advantage aware:
+     - https://arxiv.org/abs/2410.08146
+4. `MCTS-Judge`
+   - supports MCTS as test-time judge scaling:
+     - https://arxiv.org/abs/2502.12468
+
+What the literature warns against:
+1. `The Lessons of Developing Process Reward Models in Mathematical Reasoning`
+   suggests that naive MC-style synthetic PRM labels often generalize poorly:
+   - https://arxiv.org/abs/2501.07301
+2. therefore a naive "replace the current pipeline with tree search rollouts"
+   move would likely create a new noisy-label problem.
+
+Repository-specific conclusion:
+1. `MCTS` should not replace the current `local + terminal + optional grid`
+   repair path.
+2. If later introduced, the defensible forms are:
+   - tree-harvested higher-margin local / terminal pairs,
+   - or a separate test-time judge/search baseline.
+3. So the next mainline work remains supervision-alignment repair, not search
+   escalation.
+
+## 2026-03-10 R-PRM Repair Commands
+
+The commands below are the new source-of-truth reruns for the repaired
+`R-PRM` Phase E path.
+
+Same-source compact R-PRM seed-3:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 \
+ACTIVE_PHASE_E_GROUP=E12_RPRM_COMPACT_VERDICT_SEED3 \
+RUN_PREFIX=phase_e_rprm_compact_seed3_$(date +%m%d_%H%M) \
+bash scripts/run_phase_e_suite.sh
+```
+
+R-PRM data-fix smoke comparison:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 \
+ACTIVE_PHASE_E_REPAIR_GROUP=R3_RPRM_DATAFIX_SMOKE \
+RUN_PREFIX=phase_e_rprm_datafix_smoke_$(date +%m%d_%H%M) \
+bash scripts/run_phase_e_repair_diagnostics_suite.sh
+```
+
+This official smoke now runs only executable fixed groups by default.  It no
+longer includes legacy long-analysis `R-PRM` groups that fail the truncation
+gate by design.
+
+R-PRM data-fix official seed-3 matrix:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 \
+ACTIVE_PHASE_E_REPAIR_GROUP=R4_RPRM_DATAFIX_SEED3 \
+RUN_PREFIX=phase_e_rprm_datafix_seed3_$(date +%m%d_%H%M) \
+bash scripts/run_phase_e_repair_diagnostics_suite.sh
+```
+
+This official seed-3 matrix also excludes the legacy long-analysis `R-PRM`
+groups.  Use historical artifacts or explicit overrides only when you
+intentionally want to rerun the known-bad contract.
+
+Direct truncation comparison for legacy vs compact `R-PRM` contracts:
+
+```bash
+python scripts/phase_e_prepare_pairs.py \
+  --source-bundle r_prm_train \
+  --run-name rprm_compact_diag \
+  --max-pairs-total 128 \
+  --max-pairs-per-source 128 \
+  --min-pair-confidence 0.75 \
+  --r-prm-pair-mode compact_verdict
+```
+
+Then run:
+
+```bash
+python scripts/phase_e_diagnose_truncation.py \
+  --pairs-jsonl <TRAIN_PAIRS_JSONL> \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --max-samples 64 \
+  --max-lengths 1024
+```
 
 ## 2026-03-10 Strategic Pivot (Authoritative)
 
@@ -369,6 +2803,78 @@ Project-level reading:
    - "which source combination and training order best preserves the
      `Math-Shepherd` anchor while adding `PRMBench`-style robustness?"
 
+## 2026-03-10 Literature Boundary Update (Small-Scale Value Head)
+
+This is the current literature-backed reading of the Phase E question:
+1. the community does **not** strongly support:
+   - small-scale
+   - noisy-label
+   - scalar-regression
+   - benchmark-robust process value heads
+2. the community **does** support narrower success cases:
+   - large-scale dense process supervision (`PRM800K`, `Math-Shepherd`,
+     `OmegaPRM`, `Rewarding Progress`)
+   - or smaller but stronger ranking / verifier formulations
+     (`ThinkPRM`, `R-PRM`)
+   - or coarse uncertainty/value heads at the question level
+     (`LMs Mostly Know What They Know`,
+     `LLMs Must Be Taught to Know What They Don't Know`)
+
+What this means for our repository:
+1. the old hope:
+   - "small scratch scalar value head should become a robust benchmark-facing
+     PRM"
+   is not literature-backed.
+2. the narrower hope:
+   - "small-to-medium scale same-family ranking verifier / first-bad-edge head
+     can learn useful local process discrimination"
+   is literature-backed enough to remain worth pursuing.
+3. our newest results match that boundary:
+   - `MS2` / `E20` show local learnability,
+   - `E21` shows preview-aligned preference signal,
+   - `E24` still does not show that easy mixture fixes benchmark transfer.
+
+Immediate framing correction:
+1. We should describe current Phase E work as:
+   - ranking-first same-family verifier learning
+2. We should **not** describe it as:
+   - already having evidence for a general-purpose small PRM/value model.
+
+## 2026-03-10 Intradataset ACC90 Smoke Diagnostic
+
+First smoke:
+1. `assets/artifacts/phase_e_logs/phase_e_top3_acc90_0310_1808/final_summary.md`
+   - `E41_MS_ACC90_MLP_RANK_SEED3`
+     - `heldout_pair_acc=0.9610`
+     - `heldout_auc=0.8908`
+   - `E45_PRMBENCH_ACC90_MLP_RANK_SEED3`
+     - `heldout_pair_acc=0.9483`
+     - `heldout_auc=0.8333`
+   - `E48_RPRM_ACC90_MLP_RANK_SEED3`
+     - `heldout_pair_acc=0.4379`
+     - `heldout_auc=0.4666`
+
+Interpretation:
+1. The current same-source ACC90 branch is strongly positive for:
+   - `Math-Shepherd`
+   - `PRMBench_Preview`
+2. It is clearly negative for:
+   - `R-PRM` under the current adapter/objective recipe.
+3. Therefore same-source fit quality is now clearly source-dependent, not just
+   a question of head capacity.
+
+Critical caveat:
+1. The smoke intentionally used only `seed=42`.
+2. So these numbers are direction checks, not stability evidence.
+
+Important bug discovered during interpretation:
+1. the smoke candidate selector currently mis-selects the final group because
+   the suite passes repeated `--suite-log-dirs` flags while the selector parser
+   consumes only the last repeated occurrence under its current contract.
+2. result:
+   - the candidate report from this smoke should be treated as invalid,
+   - the top-level summary remains usable.
+
 ## 2026-03-11 Cache/OOM Reliability Repair
 
 Why this matters:
@@ -462,6 +2968,188 @@ Operational consequence:
    - exact same-step branch preference learning.
 3. Detailed audit record:
    - `docs/data_semantics_risk_audit_20260310.md`
+
+## 2026-03-10 Intradataset ACC90 Structural Diagnosis
+
+The newest same-source ACC90 runs answer a narrower but important question:
+
+> Are current weak results mainly caused by an over-simple head, by
+> under-training, or by something else?
+
+What the repository now supports:
+1. `Math-Shepherd`
+   - linear robust recipe `E40` already reaches:
+     - `mean_heldout_pair_acc = 0.9172`
+     - `mean_heldout_auc = 0.8623`
+   - therefore the old weak `Math-Shepherd` results cannot be blamed only on
+     "the head is too simple".
+2. `Math-Shepherd` MLP recipes still help:
+   - `E41`
+     - `mean_heldout_pair_acc = 0.9863`
+     - `mean_heldout_auc = 0.9056`
+   - `E42`
+     - `mean_heldout_pair_acc = 0.9641`
+     - `mean_heldout_auc = 0.9408`
+   - `E43`
+     - `mean_heldout_pair_acc = 0.9619`
+     - `mean_heldout_auc = 0.9425`
+   - so higher capacity is a real lever, but here it is an upgrade over a
+     working baseline rather than a rescue from total underfitting.
+3. `PRMBench_Preview`
+   - linear recipe `E44` remains clearly weak:
+     - `mean_heldout_pair_acc = 0.7380`
+     - `mean_heldout_auc = 0.6782`
+   - MLP recipes cross the intended target:
+     - `E45`
+       - `mean_heldout_pair_acc = 0.9315`
+       - `mean_heldout_auc = 0.8711`
+     - `E46`
+       - `mean_heldout_pair_acc = 0.9309`
+       - `mean_heldout_auc = 0.9057`
+   - therefore `PRMBench_Preview` is now the clearest evidence that the
+     linear head can be too simple on some sources.
+4. Weak runs are not explained by under-training alone:
+   - `E12_MS_TRUST_LOWLR_SEED3`
+     - `mean_heldout_pair_acc = 0.5853`
+     - `mean_heldout_auc = 0.5856`
+   - so "smaller LR + longer training" is not a universal explanation.
+
+Updated interpretation:
+1. head capacity is a source-specific issue:
+   - `Math-Shepherd`: linear already works, MLP improves further
+   - `PRMBench_Preview`: MLP is required
+2. current failures cannot be summarized by one global slogan like:
+   - "the head is too simple"
+   - or:
+   - "the runs were just under-trained"
+3. same-source `>90%` held-out accuracy still does **not** prove:
+   - benchmark transfer,
+   - cross-task trustworthiness,
+   - or RL-readiness
+4. it proves a narrower claim:
+   - the frozen-feature value-head stack is learnable on that dataset under
+     the current supervision semantics.
+
+## 2026-03-10 RL Trustworthiness Threshold Reading
+
+Question:
+
+> If cross-dataset transfer is ignored for now, how good does a value utility
+> need to be before it is trustworthy enough for RL-style reasoning
+> faithfulness experiments?
+
+The literature does **not** support one universal threshold like:
+1. `pair_acc > 0.90 => RL-ready`
+2. or `auc > 0.90 => safe to optimize`
+
+The stronger consensus is:
+1. high same-source held-out discrimination is necessary;
+2. it is not sufficient;
+3. usefulness under optimization pressure must also be demonstrated.
+
+Why:
+1. `ProcessBench` shows that many PRMs which look acceptable on easier data
+   still fail explicit process-error identification.
+2. `PRMBench` shows that process verification remains multi-dimensional and is
+   not captured by one comfortable pair metric.
+3. `The Lessons of Developing PRMs` argues that reward-model reliability
+   depends heavily on label quality, evaluation design, and optimization
+   behavior.
+4. `PRM800K` and later PRM work justify process supervision, but they do not
+   justify trusting a value head from one held-out metric alone.
+
+Practical rule for this repository:
+1. same-source held-out discrimination must be strong:
+   - `mean_pair_acc >= 0.90`
+   - `mean_auc >= 0.90`
+   - low seed variance
+2. the head must remain stable:
+   - worst seed cannot collapse,
+   - margins should not vanish,
+   - small recipe changes should not flip the direction completely
+3. same-family policy-level benefit must be shown:
+   - reranking / rejection / conservative search should improve answer/process
+     quality on the same dataset family
+4. same-family local-faithfulness checks should also be positive
+5. even then, the correct narration is still:
+   - bounded-support utility,
+   - not universal verifier.
+
+What we already have:
+1. `Math-Shepherd`
+   - same-source held-out metrics are strong under the best current recipes
+2. `PRMBench_Preview`
+   - same-source held-out metrics are also strong under `MLP`
+
+What is still missing:
+1. same-family policy-improvement evidence
+2. stronger same-family local-faithfulness gates
+3. optimization-pressure evidence
+
+Current scientific reading:
+1. same-source learnability is supported;
+2. RL-level trustworthiness is **not yet** established, even after transfer is
+   ignored.
+
+Evidence:
+1. `assets/artifacts/phase_e_logs/phase_e_all_acc90_0310_1808_e40_ms_acc90_linear_robust_seed3/final_summary.md`
+2. `assets/artifacts/phase_e_logs/phase_e_all_acc90_0310_1808_e41_ms_acc90_mlp_rank_seed3/final_summary.md`
+3. `assets/artifacts/phase_e_logs/phase_e_all_acc90_0310_1652_e42_ms_acc90_mlp_joint_seed3/final_summary.md`
+4. `assets/artifacts/phase_e_logs/phase_e_all_acc90_0310_1808_e43_ms_acc90_mlp_highconf_seed3/final_summary.md`
+5. `assets/artifacts/phase_e_logs/phase_e_all_acc90_0310_1652_e44_prmbench_acc90_linear_seed3/final_summary.md`
+6. `assets/artifacts/phase_e_logs/phase_e_all_acc90_0310_1652_e45_prmbench_acc90_mlp_rank_seed3/final_summary.md`
+7. `assets/artifacts/phase_e_logs/phase_e_all_acc90_0310_1652_e46_prmbench_acc90_mlp_joint_seed3/final_summary.md`
+8. `assets/artifacts/phase_e_logs/phase_e_ms_trust_seed3_fix_0310_1659_e12_math_shepherd_trust_lowlr_seed3/final_summary.md`
+
+## 2026-03-10 I4 Full-Matrix Result + Phase E Aggregation Hardening
+
+The first fully completed intradataset full-matrix run is now:
+1. `assets/artifacts/phase_e_logs/phase_e_rprm_acc90_full_0310_1914/final_summary.md`
+2. group:
+   - `I4_RPRM_ACC90_MATRIX`
+
+What it says:
+1. `R-PRM` remains weak under the current `ACC90` branch even after expanding
+   from:
+   - linear
+   - to MLP ranking
+   - to MLP joint
+2. actual group means:
+   - `E47_RPRM_ACC90_LINEAR_SEED3`
+     - `mean_pair_acc = 0.4374`
+     - `mean_auc = 0.5016`
+   - `E48_RPRM_ACC90_MLP_RANK_SEED3`
+     - `mean_pair_acc = 0.5197`
+     - `mean_auc = 0.5123`
+   - `E49_RPRM_ACC90_MLP_JOINT_SEED3`
+     - `mean_pair_acc = 0.6002`
+     - `mean_auc = 0.5885`
+3. therefore:
+   - `E49 > E48 > E47`
+   - so objective/head changes help,
+   - but they do not rescue the source under the current repository contract
+4. seed std stays small:
+   - `E49 std_pair_acc = 0.0098`
+   - `E49 std_auc = 0.0106`
+5. so this is a systematic weakness, not a seed-collapse story.
+
+Engineering hardening completed in the same pass:
+1. `scripts/phase_e_select_candidate.py`
+   - now supports repeated `--suite-log-dirs` occurrences, matching the
+     already-fixed intradataset selector
+2. these wrapper scripts no longer regex-parse `final_summary.md` to build
+   top-level comparisons:
+   - `scripts/run_phase_e_intradataset_suite.sh`
+   - `scripts/run_phase_e_single_source_suite.sh`
+   - `scripts/run_phase_e_multisource_math_suite.sh`
+3. all now aggregate directly from:
+   - `seed_results.jsonl`
+
+Why this matters:
+1. `final_summary.md` is a human-readable rendering,
+2. `seed_results.jsonl` is the real structured source-of-truth artifact,
+3. so Phase E top-level summaries are now less sensitive to Markdown format
+   drift.
 
 ## 2026-03-07 D6-T Strict Diagnosis
 
@@ -4249,36 +6937,747 @@ Per-dataset wrappers:
 
 ```bash
 ACTIVE_PHASE_E_INTRADATASET_GROUP=I2_MS_ACC90_MATRIX \
-RUN_PREFIX=phase_e_ms_acc90_$(date +%m%d_%H%M) \
+RUN_PREFIX=phase_e_ms_acc90_full_$(date +%m%d_%H%M) \
 CUDA_VISIBLE_DEVICES=1 \
 bash scripts/run_phase_e_intradataset_suite.sh
 
 ACTIVE_PHASE_E_INTRADATASET_GROUP=I3_PRMBENCH_ACC90_MATRIX \
-RUN_PREFIX=phase_e_prmbench_acc90_$(date +%m%d_%H%M) \
-CUDA_VISIBLE_DEVICES=1 \
+RUN_PREFIX=phase_e_prmbench_acc90_full_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=2 \
 bash scripts/run_phase_e_intradataset_suite.sh
 
 ACTIVE_PHASE_E_INTRADATASET_GROUP=I4_RPRM_ACC90_MATRIX \
-RUN_PREFIX=phase_e_rprm_acc90_$(date +%m%d_%H%M) \
-CUDA_VISIBLE_DEVICES=1 \
+RUN_PREFIX=phase_e_rprm_acc90_full_$(date +%m%d_%H%M) \
+CUDA_VISIBLE_DEVICES=3 \
 bash scripts/run_phase_e_intradataset_suite.sh
 ```
 
-Recipe families in this branch:
-1. `Math-Shepherd`
-   - `E40`, `E41`, `E42`, `E43`
-2. `PRMBench_Preview`
-   - `E44`, `E45`, `E46`
-3. `R-PRM`
-   - `E47`, `E48`, `E49`
+Comparable full-matrix recommendation:
+1. keep each dataset's default recipe family intact,
+2. do **not** reuse smoke overrides such as:
+   - `SEEDS_OVERRIDE=42`
+   - reduced pair caps
+   - reduced epochs
 
-The new selector is:
-- `scripts/phase_e_select_intradataset_candidate.py`
+Focused Math-Shepherd ACC95 push matrix:
 
-It only uses:
-1. held-out pair accuracy,
-2. held-out AUC,
-3. worst-seed floor,
-4. seed variance.
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+ACTIVE_PHASE_E_INTRADATASET_GROUP=I6_MS_ACC95_PUSH_MATRIX \
+RUN_PREFIX=phase_e_ms_acc95_push_$(date +%m%d_%H%M) \
+bash scripts/run_phase_e_intradataset_suite.sh
+```
 
-It does not mix benchmark metrics into the ACC90 gate.
+Current top-candidate RL-readiness audit:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 \
+ACTIVE_PHASE_E_RL_GROUP=RR4_COMPARE_CURRENT_TOPS \
+RUN_PREFIX=phase_e_rl_readiness_$(date +%m%d_%H%M) \
+bash scripts/run_phase_e_rl_readiness_suite.sh
+```
+
+Important clarification after the stricter transfer diagnosis:
+1. the older `RR4` audit is still useful as a quick coarse screen,
+2. but it is not a sufficient RL gate.
+
+Why:
+1. its heuristic can mark `PRMBench E46` as `provisionally_rl_ready`,
+2. yet the stricter structure-aware diagnosis shows that no current checkpoint
+   satisfies all of:
+   - same-family decision strength,
+   - benchmark local-error discrimination,
+   - and terminal completion safety.
+
+New strict transfer diagnosis script:
+
+```bash
+python -u scripts/phase_e_diagnose_transfer.py \
+  --run-name phase_e_transfer_diag_manual \
+  --audit-spec 'ms_e68|math_shepherd|<samefamily_dir>|<pb_gsm_dir>|<pb_math_dir>' \
+  --audit-spec 'prm_e46|prmbench_preview|<samefamily_dir>|<pb_gsm_dir>|<pb_math_dir>'
+```
+
+What this stricter diagnosis adds:
+1. benchmark margin-collapse ratio vs same-family score gap,
+2. all-correct final-prefix top1 / mean-gap,
+3. local first-bad edge behavior,
+4. length/support drift warnings.
+
+Current strict diagnosis snapshot:
+1. `Math-Shepherd E68`
+   - same-family utility is excellent
+   - but terminal completion is catastrophically under-valued on ProcessBench
+   - and Math-side length drift remains large
+2. `PRMBench E46`
+   - best current benchmark local discrimination baseline
+   - but `all-correct final-prefix top1` is still only:
+     - `0.2332` on `ProcessBench GSM8K`
+     - `0.1970` on `ProcessBench Math`
+3. `PRMBench E78`
+   - fixes terminal completion strongly
+   - but collapses local good-vs-bad benchmark ranking
+4. strict conclusion:
+   - no current checkpoint is RL-ready
+
+Experimental terminal-anchor repair path:
+
+```bash
+python -u scripts/phase_e_prepare_prmbench_terminal_anchor_pairs.py \
+  --run-name phase_e_prmbench_terminal_anchor_$(date +%m%d_%H%M) \
+  --seed 42
+```
+
+This research-only artifact keeps original `PRMBench` local error-step pairs and
+adds one synthetic terminal anchor per source row:
+1. full correct process,
+2. versus a shorter safe prefix near the first modified error step.
+
+Smoke repair command used in the latest diagnosis:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 \
+python -u scripts/phase_e_train_value.py \
+  --train-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_prmbench_terminal_anchor_0311_0015__95e591d28f80/train_pairs.jsonl \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_prmbench_terminal_anchor_0311_0015__95e591d28f80/validation_pairs.jsonl \
+  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --run-name phase_e_prmbench_terminal_anchor_joint_logit_smoke_0311_0025 \
+  --output-root assets/artifacts/phase_e_runs \
+  --max-train-samples 3000 \
+  --max-eval-samples 600 \
+  --objective-mode joint \
+  --learning-rate 3e-5 \
+  --num-train-epochs 10 \
+  --per-device-train-batch-size 128 \
+  --per-device-eval-batch-size 128 \
+  --max-length 1024 \
+  --lambda-ranking 1.0 \
+  --lambda-bce 1.0 \
+  --ranking-margin 0.02 \
+  --ranking-target-space logit \
+  --pair-weight-mode none \
+  --source-balance none \
+  --permutation-mode stable_hash \
+  --checkpoint-selection-metric ranking_score \
+  --head-architecture mlp \
+  --head-mlp-hidden-size 1024 \
+  --head-dropout-prob 0.05 \
+  --head-init-std 0.02 \
+  --head-activation gelu \
+  --feature-cache-root assets/artifacts/phase_e_feature_cache \
+  --feature-cache-mode read_write
+```
+
+Observed repair-smoke tradeoff:
+1. same-family prompt-pool top1 remains positive:
+   - `0.9280`
+2. terminal completion becomes very strong on ProcessBench:
+   - `terminal_top1 = 0.9585 / 0.9433` (`GSM8K / Math`)
+3. but local good-vs-bad ranking collapses badly:
+   - `auc = 0.4778 / 0.4691`
+
+Interpretation:
+1. terminal undervaluation is a real failure mode,
+2. but naive terminal-anchor augmentation over-corrects and damages local
+   process discrimination,
+3. so this repair direction is scientifically useful,
+4. yet still not sufficient for RL promotion.
+
+## 2026-03-10 Intradataset Candidate Selector Fix
+
+Bug:
+1. `run_phase_e_intradataset_suite.sh` passed repeated
+   `--suite-log-dirs ...` flags,
+2. but `phase_e_select_intradataset_candidate.py` originally parsed only the
+   last repeated occurrence under its argparse contract.
+
+Effect:
+1. the old smoke candidate report incorrectly selected
+   `E48_RPRM_ACC90_MLP_RANK_SEED3`.
+
+Fix:
+1. selector now accepts repeated groups,
+2. flattens them in-order,
+3. deduplicates repeated directories.
+
+Verification:
+1. unit test:
+   - `PYTHONPATH=src pytest -q tests/unit/test_phase_e_select_intradataset_candidate.py`
+2. replay on the existing smoke suite:
+   - selected group is now:
+     - `E41_MS_ACC90_MLP_RANK_SEED3`
+   - report:
+     - `assets/artifacts/phase_e_candidates/phase_e_top3_acc90_0310_1808_candidate_fixcheck/candidate_report.json`
+
+## 2026-03-11 ProcessBench Transfer Repair Plumbing Fixes
+
+Three bugs were fixed before re-running the next ProcessBench transfer sweep:
+
+1. benchmark subset sampling:
+   - `src/ours/phase_e/benchmark_eval.py`
+   - `ProcessBench` smoke subsets are now stratified across:
+     - `all-correct`
+     - `error`
+2. failure-analysis subset matching:
+   - `scripts/phase_e_analyze_processbench_failures.py`
+   - the script now filters the benchmark by `scored_rows.jsonl` example ids
+     before rebuilding prefix rows
+3. terminal-anchor starvation:
+   - `src/ours/phase_d/external_pairs_adapters.py`
+   - `src/ours/phase_e/pairs.py`
+   - `scripts/phase_e_prepare_pairs.py`
+   - `scripts/run_phase_e_processbench_transfer_suite.sh`
+
+Critical diagnosis:
+1. in the current `Math-Shepherd` mirror, the first all-positive trajectory
+   appears only at source row `121569`
+2. therefore `max_pairs_per_source=20000` plus naive stream-head loading makes
+   `terminal_completion_anchor = 0` inevitable
+3. this means an old terminal-anchor config could look correct in the shell
+   while still training on zero terminal pairs
+
+Verified fixed artifact:
+1. artifact:
+   - `assets/artifacts/phase_e_pairs/phase_e_processbench_terminal_focus_0311_e83_ms_processbench_transfer_terminal_seed42_e83_ms_processbench_transfer_terminal_seed42_sharedsplit_s42_pairs__8b75a88516bc`
+2. after the fix, its train split contains:
+   - `local_first_bad_edge = 3595`
+   - `terminal_completion_anchor = 3603`
+
+Recommended reproduction commands:
+
+```bash
+PYTHONPATH=src pytest -q \
+  tests/unit/test_phase_d_external_pairs.py \
+  tests/unit/test_phase_e_pairs.py \
+  tests/unit/test_phase_e_benchmark_eval.py \
+  tests/unit/test_phase_e_runtime.py
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+MAX_GPU_MEMORY_GIB=48 \
+MAX_CPU_MEMORY_GIB=96 \
+ACTIVE_PHASE_E_TRANSFER_GROUP=PT1_PROCESSBENCH_TRANSFER_SMOKE \
+RUN_PREFIX=phase_e_processbench_transfer_smoke_fix_$(date +%m%d_%H%M) \
+SUITE_BENCH_MAX_SAMPLES=96 \
+SUITE_TRAIN_BATCH_SIZE=64 \
+SUITE_EVAL_BATCH_SIZE=64 \
+bash scripts/run_phase_e_processbench_transfer_suite.sh
+```
+
+Terminal-focused subset used for the current repair check:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+MAX_GPU_MEMORY_GIB=48 \
+MAX_CPU_MEMORY_GIB=96 \
+ACTIVE_PHASE_E_TRANSFER_GROUP=PT1_PROCESSBENCH_TRANSFER_SMOKE \
+PHASE_E_TRANSFER_DIRECT_GROUPS_OVERRIDE='E83_MS_PROCESSBENCH_TRANSFER_TERMINAL_SEED42 E84_MS_PROCESSBENCH_TRANSFER_FANOUT_TERMINAL_SEED42 E85_MS_PRMBENCH_TRANSFER_MIX_TERMINAL_SEED42' \
+RUN_PREFIX=phase_e_processbench_terminal_focus_$(date +%m%d_%H%M) \
+SUITE_BENCH_MAX_SAMPLES=96 \
+SUITE_TRAIN_BATCH_SIZE=64 \
+SUITE_EVAL_BATCH_SIZE=64 \
+bash scripts/run_phase_e_processbench_transfer_suite.sh
+```
+
+Current corrected outcome on the fixed `ProcessBench 96` subset:
+1. `E83 terminal` is no longer a fake repair.
+   - train artifact:
+     - `3595 local_first_bad_edge`
+     - `3603 terminal_completion_anchor`
+   - benchmark effect:
+     - `gsm8k all_correct_top1: 0.1087 -> 0.6304`
+     - `math all_correct_top1: 0.0000 -> 0.5641`
+     - but `gsm8k pair_acc: 0.6088 -> 0.3163`
+     - and `math pair_acc: 0.4558 -> 0.3273`
+2. `E84 fanout + terminal` keeps the same terminal improvement and improves
+   geometric alignment over `E83`,
+   but still remains far below the baseline ranking surface:
+   - `gsm8k pair_acc = 0.3299`
+   - `math pair_acc = 0.3233`
+
+Current engineering conclusion:
+1. terminal supervision is a real missing slice,
+2. but the naive `50/50` terminal-heavy repair is over-weighted,
+3. so the next recipe should *reduce* terminal-anchor mass instead of treating
+   it as half of the training pool.
+
+## 2026-03-11 Low-terminal RL-facing repair experiment
+
+New knob added to `Phase E` pair prep:
+1. `--step-label-terminal-anchor-fraction`
+2. intent:
+   - keep terminal anchors as a bounded auxiliary instead of a co-equal half of
+     the training pool
+
+Main new repair run:
+```bash
+CUDA_VISIBLE_DEVICES=3 \
+MAX_GPU_MEMORY_GIB=48 \
+MAX_CPU_MEMORY_GIB=96 \
+ACTIVE_PHASE_E_GROUP=E87_MS_PROCESSBENCH_TRANSFER_FANOUT_TERMINAL10_CONFWT_SEED42 \
+RUN_PREFIX=phase_e_processbench_rlrepair_$(date +%m%d_%H%M) \
+BENCH_MAX_SAMPLES=96 \
+TRAIN_EPOCHS=4 \
+TRAIN_BATCH_SIZE=64 \
+EVAL_BATCH_SIZE=64 \
+bash scripts/run_phase_e_suite.sh
+```
+
+Observed result summary:
+1. train artifact semantics:
+   - `6487 fanout`
+   - `735 terminal`
+2. held-out fit:
+   - `pair_acc = 0.8823`
+   - `auc = 0.8647`
+3. benchmark:
+   - `ProcessBench GSM8K pair_acc = 0.4932`
+   - `ProcessBench Math pair_acc = 0.4217`
+4. terminal slice:
+   - `gsm8k all_correct_top1 = 0.3696`
+   - `math all_correct_top1 = 0.2051`
+
+RL-facing trust audit command used:
+```bash
+CUDA_VISIBLE_DEVICES=3 \
+python -u scripts/phase_e_eval_samefamily_trust.py \
+  --value-run-dir assets/artifacts/phase_e_runs/phase_e_processbench_rlrepair_0311_e87_ms_processbench_transfer_fanout_terminal10_confwt_seed42_e87_ms_processbench_transfer_fanout_terminal10_confwt_seed42_s42_value_20260311T032957Z \
+  --run-name phase_e_rlready_e87_samefamily_0311 \
+  --output-root assets/artifacts/phase_e_samefamily_eval \
+  --checkpoint-name best \
+  --batch-size 64 \
+  --dtype bfloat16 \
+  --device-map auto \
+  --max-gpu-memory-gib 48 \
+  --max-cpu-memory-gib 96 \
+  --feature-cache-root assets/artifacts/phase_e_feature_cache \
+  --feature-cache-mode read_write \
+  --edge-weight-mode confidence \
+  --require-cuda
+```
+
+Strict transfer diagnosis command used:
+```bash
+python -u scripts/phase_e_diagnose_transfer.py \
+  --run-name phase_e_transfer_diag_e87_0311 \
+  --audit-spec 'e87_ms_rlrepair|math_shepherd|assets/artifacts/phase_e_samefamily_eval/phase_e_rlready_e87_samefamily_0311_20260311T040021Z|assets/artifacts/phase_e_eval/phase_e_processbench_rlrepair_0311_e87_ms_processbench_transfer_fanout_terminal10_confwt_seed42_e87_ms_processbench_transfer_fanout_terminal10_confwt_seed42_s42_processbench_gsm8k_20260311T033946Z|assets/artifacts/phase_e_eval/phase_e_processbench_rlrepair_0311_e87_ms_processbench_transfer_fanout_terminal10_confwt_seed42_e87_ms_processbench_transfer_fanout_terminal10_confwt_seed42_s42_processbench_math_20260311T033955Z'
+```
+
+Current conclusion:
+1. `10%` terminal is better than `50%`
+2. but it is still not enough for RL-ready promotion
+3. next step should target training strategy:
+   - semantics-aware weighting,
+   - staged/curriculum repair,
+   - and trust-gated checkpoint selection
+
+## 2026-03-11 Internet-Guided ProcessBench Redesign Suite
+
+This round added a more explicit research pipeline for the current
+`ProcessBench` transfer blocker.
+
+Why this changed:
+1. the latest paper/community check shows that current PRMs usually fail not
+   because same-source learning is impossible,
+   but because transfer requires support beyond pure local first-bad pairs.
+2. at the same time, the literature does **not** support replacing the clean
+   local signal with heavy terminal/global supervision.
+3. therefore the new design is:
+   - keep a strong local core,
+   - add broader support conservatively,
+   - and weight those auxiliary families explicitly.
+
+Primary external references used in this redesign:
+1. `PRM800K / Let's Verify Step by Step`
+   - https://arxiv.org/abs/2305.20050
+2. `OmegaPRM`
+   - https://arxiv.org/abs/2406.06592
+3. `ProcessBench`
+   - https://arxiv.org/abs/2412.06559
+   - https://github.com/QwenLM/ProcessBench
+4. `PRMBench`
+   - https://arxiv.org/abs/2501.03124
+5. `The Lessons of Developing PRMs`
+   - https://arxiv.org/abs/2501.07301
+6. `PathFinder-PRM`
+   - https://arxiv.org/abs/2501.11690
+   - https://github.com/Gen-Verse/PathFinder-PRM
+
+New code landed:
+1. curated profile builder:
+   - `scripts/phase_e_curate_processbench_transfer_pairs.py`
+2. trainer weight modes:
+   - `semantic`
+   - `confidence_semantic`
+3. new one-click suite:
+   - `scripts/run_phase_e_processbench_research_suite.sh`
+
+Executed smoke command:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+ACTIVE_PHASE_E_PB_RESEARCH_GROUP=PBR1_PROCESSBENCH_REDESIGN_SMOKE \
+RUN_PREFIX=phase_e_processbench_research_v2 \
+PHASE_E_PB_RESEARCH_CASES_OVERRIDE='pbr1_ms_align_mlp|one_shot|ms_align_v1|mlp|none pbr2_ms_align_gated|one_shot|ms_align_v1|gated_mlp|none pbr4_ms_curriculum_gated|curriculum|ms_align_v1|gated_mlp|none' \
+TARGET_TOTAL_PAIRS=2048 \
+BENCH_MAX_SAMPLES=64 \
+TRAIN_BATCH_SIZE=64 \
+EVAL_BATCH_SIZE=96 \
+bash scripts/run_phase_e_processbench_research_suite.sh
+```
+
+Artifacts:
+1. suite summary:
+   - `assets/artifacts/phase_e_logs/phase_e_processbench_research_v2/final_summary.md`
+2. per-case rows:
+   - `assets/artifacts/phase_e_logs/phase_e_processbench_research_v2/research_results.jsonl`
+3. transfer compare:
+   - `assets/artifacts/phase_e_transfer_compare/phase_e_processbench_research_v2_gsm_compare_20260311T044545Z/summary.md`
+   - `assets/artifacts/phase_e_transfer_compare/phase_e_processbench_research_v2_math_compare_20260311T044545Z/summary.md`
+4. RL-promotion diagnosis:
+   - `assets/artifacts/phase_e_rl_promotion_diag/phase_e_processbench_research_v2_rl_promotion_20260311T044546Z/summary.md`
+
+Observed result summary:
+1. `pbr2_ms_align_gated` is the best new case.
+2. compared with `ref_e87`, it improves:
+   - same-family `top1: 0.6597 -> 0.8947`
+   - same-family `local_first_bad: 0.2914 -> 0.9231`
+   - `ProcessBench Math auc: 0.4467 -> 0.5055`
+   - terminal-completion `top1` on both benchmark splits
+3. it still does **not** clear RL promotion because:
+   - `gsm first_edge = 0.5600`
+   - `math first_edge = 0.5357`
+   - `pb_min_laterbad = 0.4792`
+4. `pbr4_ms_curriculum_gated` improved terminal slices further,
+   but weakened same-family trust and is not the preferred mainline.
+5. current best next-step reading:
+   - keep `ms_align_v1`
+   - keep `confidence_semantic`
+   - keep `gated_mlp`
+   - next repair should target `later-bad` transfer while preserving
+     `first_edge`
+
+Recommended reruns:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+TARGET_TOTAL_PAIRS=2048 \
+BENCH_MAX_SAMPLES=64 \
+TRAIN_BATCH_SIZE=64 \
+EVAL_BATCH_SIZE=96 \
+bash scripts/run_phase_e_processbench_research_suite.sh
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+ACTIVE_PHASE_E_PB_RESEARCH_GROUP=PBR1_PROCESSBENCH_REDESIGN_SMOKE \
+RUN_PREFIX=phase_e_processbench_research_v2 \
+PHASE_E_PB_RESEARCH_CASES_OVERRIDE='pbr2_ms_align_gated|one_shot|ms_align_v1|gated_mlp|none' \
+TARGET_TOTAL_PAIRS=4096 \
+BENCH_MAX_SAMPLES=96 \
+TRAIN_BATCH_SIZE=64 \
+EVAL_BATCH_SIZE=96 \
+bash scripts/run_phase_e_processbench_research_suite.sh
+```
+
+## 2026-03-11 ProcessBench Hybrid Artifact Result: Tiny Terminal Support Already Over-Corrects
+
+This round tested a stricter benchmark-oriented hybrid recipe based on the
+current literature reading:
+
+1. keep `PRMBench` explicit local error-step pairs as the anchor,
+2. add only a *very small* terminal-completion auxiliary,
+3. compare whether a stronger head (`gated_mlp`) can preserve local ranking
+   better than a standard `mlp`.
+
+### New code and infrastructure
+
+1. `scripts/phase_e_mix_pair_artifacts.py`
+   - now supports weighted input specs:
+     - `LABEL=ARTIFACT_DIR:TRAIN_CAP:VAL_CAP:MIX_WEIGHT`
+2. `scripts/run_phase_e_processbench_hybrid_suite.sh`
+   - new ProcessBench-oriented hybrid curation wrapper
+3. wrapper hardening:
+   - fixed baseline parsing for `run::gsm_eval::math_eval`
+   - removed shell backtick-substitution hazards
+   - separated helper logs from helper outputs
+   - switched helper outputs to global result variables to avoid command-substitution state loss
+
+### Executed artifact
+
+Hybrid pair artifact:
+
+1. `assets/artifacts/phase_e_pairs/phase_e_pbhybrid_ph1_0311_1230_pairs__d6fb5a3ec28c`
+
+Artifact caps:
+
+1. `prm_local`
+   - train `3072`
+   - val `384`
+2. `prm_terminal`
+   - train `512`
+   - val `64`
+
+But the important semantic fact is:
+
+1. failure analysis later showed that only
+   - `132 / 3584 = 3.68%`
+   of the final train rows are actually `terminal_completion_anchor`.
+
+So this was already a conservative terminal repair, not a heavy one.
+
+### Same-source held-out fit
+
+1. `mlp`
+   - run:
+     - `assets/artifacts/phase_e_runs/phase_e_pbhybrid_ph1_0311_1230_ph1_prm_local_ta15_arch_sweep_smoke_mlp_20260311T043055Z`
+   - held-out:
+     - `pair_acc=0.919643`
+     - `auc=0.892518`
+2. `gated_mlp`
+   - run:
+     - `assets/artifacts/phase_e_runs/phase_e_pbhybrid_ph1_0311_1230_ph1_prm_local_ta15_arch_sweep_smoke_gated_mlp_20260311T045211Z`
+   - held-out:
+     - `pair_acc=0.912946`
+     - `auc=0.871079`
+
+Reading:
+
+1. same-source learning is still easy,
+2. so this is not another "the head cannot learn at all" failure.
+
+### ProcessBench transfer comparison
+
+Comparison tables:
+
+1. GSM8K:
+   - `assets/artifacts/phase_e_transfer_compare/phase_e_pbhybrid_ph1_0311_1230_processbench_gsm8k_compare_20260311T045320Z/summary.md`
+2. Math:
+   - `assets/artifacts/phase_e_transfer_compare/phase_e_pbhybrid_ph1_0311_1230_processbench_math_compare_20260311T045332Z/summary.md`
+
+#### GSM8K
+
+1. baseline `E46`
+   - `auc=0.6264`
+   - `first_edge=0.6706`
+   - `terminal_top1=0.2332`
+2. hybrid `mlp`
+   - `auc=0.5543`
+   - `first_edge=0.4906`
+   - `terminal_top1=0.8548`
+3. hybrid `gated_mlp`
+   - `auc=0.5011`
+   - `first_edge=0.5472`
+   - `terminal_top1=0.8710`
+
+#### Math
+
+1. baseline `E46`
+   - `auc=0.6053`
+   - `first_edge=0.6096`
+   - `terminal_top1=0.1970`
+2. hybrid `mlp`
+   - `auc=0.4931`
+   - `first_edge=0.4921`
+   - `terminal_top1=0.7115`
+3. hybrid `gated_mlp`
+   - `auc=0.5162`
+   - `first_edge=0.4921`
+   - `terminal_top1=0.8654`
+
+### Failure-pattern diagnosis
+
+Detailed failure analyses:
+
+1. `assets/artifacts/phase_e_processbench_analysis/pbhybrid_ph1_mlp_gsm_diag_20260311T045406Z/summary.md`
+2. `assets/artifacts/phase_e_processbench_analysis/pbhybrid_ph1_gated_gsm_diag_20260311T045406Z/summary.md`
+3. `assets/artifacts/phase_e_processbench_analysis/pbhybrid_ph1_mlp_math_diag_20260311T045406Z/summary.md`
+4. `assets/artifacts/phase_e_processbench_analysis/pbhybrid_ph1_gated_math_diag_20260311T045406Z/summary.md`
+
+Most important facts:
+
+1. `ProcessBench` still has a large `all_correct` block:
+   - GSM8K `0.4844`
+   - Math `0.4062`
+2. the hybrid train set is still overwhelmingly local:
+   - `local_modified_process_error_step = 3452`
+   - `terminal_completion_anchor = 132`
+3. even so, the small terminal anchor support is already enough to
+   over-correct terminal behavior:
+   - GSM8K `terminal_top1` jumps to `0.85+`
+   - Math `terminal_top1` jumps to `0.71~0.87`
+4. but local discrimination drops sharply:
+   - `first_error_edge_accuracy`
+   - `pair_auc_good_vs_bad`
+   both regress versus `E46`
+
+Interpretation:
+
+1. naive `local + terminal` mixing is still too blunt,
+2. architecture helps only marginally,
+3. the main bottleneck is still supervision geometry, not head capacity.
+
+### Updated conclusion
+
+This round rules out one tempting but incorrect next step:
+
+1. we should **not** assume that adding "just a little" terminal support to a
+   strong local source will automatically fix `ProcessBench`.
+2. we should **not** interpret strong same-source hybrid fit as benchmark
+   progress.
+
+What this does support:
+
+1. keep `PRMBench local` as the benchmark-aligned local anchor,
+2. reduce terminal ratio even further,
+3. or move to a staged / two-objective recipe where terminal repair is
+   constrained instead of naively merged into the same ranking pool,
+4. and use benchmark-aware selection instead of held-out pair fit alone.
+
+## 2026-03-11 Tiny-Terminal Follow-up: Ratio Matters, But Ratio Alone Does Not Fix ProcessBench
+
+After the first hybrid pilot, the next critical question was:
+
+1. did the new hybrid fail only because terminal support was still too large,
+2. or is the deeper problem that terminal supervision should not be naively merged into the same ranking pool at all?
+
+### Tiny-terminal artifact
+
+Artifact:
+
+1. `assets/artifacts/phase_e_pairs/phase_e_pbhybrid_tinyterm_0311__dd5acae29427`
+
+Configured caps:
+
+1. `prm_local`
+   - train `3072`
+   - val `384`
+2. `prm_terminal`
+   - train `64`
+   - val `8`
+   - mix weight `0.10`
+
+Important failure-analysis fact:
+
+1. the resulting artifact contains only:
+   - `17 / 3136 = 0.54%`
+   terminal-anchor semantics.
+
+So this is not just "smaller than before"; it is genuinely tiny.
+
+### Same-source held-out fit
+
+Run:
+
+1. `assets/artifacts/phase_e_runs/phase_e_pbhybrid_tinyterm_0311_mlp_20260311T050119Z`
+
+Held-out:
+
+1. `pair_acc=0.918367`
+2. `auc=0.890293`
+
+This matters because it rules out the easy but wrong story that "the tiny artifact became too weak to learn."
+
+### ProcessBench comparison
+
+Compare tables:
+
+1. GSM8K:
+   - `assets/artifacts/phase_e_transfer_compare/phase_e_pbhybrid_terminal_ratio_gsm_compare_20260311T051627Z/summary.md`
+2. Math:
+   - `assets/artifacts/phase_e_transfer_compare/phase_e_pbhybrid_terminal_ratio_math_compare_20260311T051627Z/summary.md`
+
+#### GSM8K
+
+1. `E46`
+   - `auc=0.6264`
+   - `first_edge=0.6706`
+   - `terminal_top1=0.2332`
+2. `hybrid_ta15`
+   - `auc=0.5543`
+   - `first_edge=0.4906`
+   - `terminal_top1=0.8548`
+3. `hybrid_tiny`
+   - `auc=0.5654`
+   - `first_edge=0.5094`
+   - `terminal_top1=0.7742`
+
+#### Math
+
+1. `E46`
+   - `auc=0.6053`
+   - `first_edge=0.6096`
+   - `terminal_top1=0.1970`
+2. `hybrid_ta15`
+   - `auc=0.4931`
+   - `first_edge=0.4921`
+   - `terminal_top1=0.7115`
+3. `hybrid_tiny`
+   - `auc=0.4948`
+   - `first_edge=0.5238`
+   - `terminal_top1=0.6538`
+
+### Failure analysis
+
+Failure-analysis artifact:
+
+1. `assets/artifacts/phase_e_processbench_analysis/pbhybrid_tinyterm_math_diag_20260311T051628Z/summary.md`
+
+Most important interpretation:
+
+1. shrinking terminal supervision from `3.68%` to `0.54%` clearly softens the over-correction,
+2. terminal slices fall from the extreme `0.71+` range to `0.65` on Math,
+3. `first_error_edge_accuracy` recovers slightly,
+4. but benchmark-local ranking still does not return to `E46`.
+
+### Updated scientific reading
+
+This is one of the most informative negative results so far.
+
+It says:
+
+1. terminal ratio is real and matters,
+2. but the current problem is not *only* a ratio problem,
+3. therefore pure terminal-ratio sweep is unlikely to be the true mainline fix.
+
+The stronger updated conclusion is:
+
+1. terminal supervision likely needs a different optimization role,
+2. such as:
+   - staged training,
+   - two-objective training,
+   - or benchmark-aware checkpoint selection,
+3. instead of further naive local+terminal blending.
+
+## 2026-03-11 Judge Integration Verdict After Network Check
+
+We re-checked the `LLM-as-a-judge` design against the most relevant literature and community guidance, then validated it with local pairwise judge experiments.
+
+What now appears well-supported:
+
+1. `PRMBench_Preview`-style pairwise data is judge-friendly.
+2. `selected relabel` is viable only on narrow, high-value slices.
+3. `disagreement mining` is a realistic use of local judges.
+4. `benchmark-side adjudication` is safer than training-side bulk filtering.
+
+What is not supported by current evidence:
+
+1. bulk judge filtering over `Math-Shepherd local_first_bad_edge`
+2. full-dataset relabel using the current local judge stack
+3. treating the local judge as a strong verifier replacement
+
+Key local evidence:
+
+1. `Qwen2.5-Math-7B-Instruct` on `PRMBench_Preview train64`
+   - `label_preserving_keep_rate = 0.0469`
+2. `Qwen2.5-Math-7B-Instruct` on `Math-Shepherd train64`
+   - `label_preserving_keep_rate = 0.0000`
+3. Pairwise + swap-debias is directionally better than the earlier pointwise strict-JSON judge path, but still not strong enough for bulk filtering.
+
+Operational decision:
+
+1. keep `selected relabel`
+2. keep `disagreement mining`
+3. keep `benchmark-side adjudication`
+4. do not promote `judge-driven bulk pair filtering` into the Phase E mainline

@@ -33,7 +33,11 @@ from ours.phase_b.feature_cache import (
     try_load_feature_cache,
     validate_feature_cache_mode,
 )
-from ours.phase_b.value_head import encode_text_features
+from ours.phase_b.value_head import (
+    encode_text_features,
+    ensure_tokenizer_has_pad_token,
+    maybe_resize_embeddings_for_tokenizer as _maybe_resize_embeddings_for_tokenizer,
+)
 
 
 def import_runtime_deps() -> tuple[Any, Any, Any]:
@@ -42,6 +46,49 @@ def import_runtime_deps() -> tuple[Any, Any, Any]:
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     return torch, AutoModelForCausalLM, AutoTokenizer
+
+
+def resolve_backbone_loader_family(
+    *,
+    model_path: str,
+    trust_remote_code: bool = True,
+) -> str:
+    """Resolve which Hugging Face auto-model family should load one backbone.
+
+    English
+    -------
+    Most Phase E runs use a causal LM backbone, but some community PRM releases
+    package the tuned transformer under a custom reward-model head rather than a
+    causal-LM head.  For frozen feature extraction we only need the transformer
+    hidden states, so this helper allows the runtime to load either family
+    transparently.
+
+    中文
+    ----
+    Phase E 大多数实验默认把 backbone 当作 causal LM 加载，但社区里已有一些
+    PRM checkpoint 是挂在自定义 reward-model 头下面的。对当前冻结特征流程来说，
+    我们真正需要的只是 hidden states，因此这里先解析模型家族，再决定用
+    `AutoModelForCausalLM` 还是 `AutoModel`。
+    """
+    try:
+        from transformers import AutoConfig
+
+        config = AutoConfig.from_pretrained(
+            str(model_path),
+            trust_remote_code=bool(trust_remote_code),
+        )
+    except Exception:  # noqa: BLE001
+        # Fail open to the legacy path so ordinary causal-LM runs never depend
+        # on config introspection succeeding.
+        return "causal_lm"
+
+    architectures = getattr(config, "architectures", None)
+    if not isinstance(architectures, list):
+        return "causal_lm"
+    normalized = [str(item).strip().lower() for item in architectures if str(item).strip()]
+    if any("processrewardmodel" in item or "rewardmodel" in item for item in normalized):
+        return "process_reward_model"
+    return "causal_lm"
 
 
 def resolve_dtype(name: str, torch_module: Any):
@@ -113,6 +160,8 @@ def load_backbone_and_tokenizer(
     adapter_path: Path | None,
     dtype_name: str,
     device_map: str,
+    max_gpu_memory_gib: int | None,
+    max_cpu_memory_gib: int | None,
     torch_module: Any,
     AutoModelForCausalLM: Any,
     AutoTokenizer: Any,
@@ -120,31 +169,84 @@ def load_backbone_and_tokenizer(
     """Load tokenizer and frozen backbone for Phase E."""
     tokenizer_path = resolve_tokenizer_load_path(model_path, adapter_path)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-    if tokenizer.pad_token_id is None:
-        # Some released tokenizer snapshots omit a pad token even though batched scoring needs one.
-        # 一些公开 tokenizer 快照没有 pad token，但批量打分时必须补齐这一语义。
-        if tokenizer.eos_token is not None:
-            tokenizer.pad_token = tokenizer.eos_token
-        else:
-            tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+    synthesized_pad_token = ensure_tokenizer_has_pad_token(tokenizer)
 
     resolved_dtype = resolve_dtype(dtype_name, torch_module)
     load_kwargs: dict[str, Any] = {
         "device_map": str(device_map),
         "trust_remote_code": True,
+        # Stream weights through the meta-device path instead of materializing
+        # a full temporary CPU copy first.
+        # 这里显式打开 low_cpu_mem_usage，避免先在 CPU 上临时摊开完整权重副本，
+        # 对单机研究环境更稳。
+        "low_cpu_mem_usage": True,
     }
     from_pretrained_sig = __import__("inspect").signature(AutoModelForCausalLM.from_pretrained)
     if "dtype" in from_pretrained_sig.parameters:
         load_kwargs["dtype"] = resolved_dtype
     else:
         load_kwargs["torch_dtype"] = resolved_dtype
-    backbone = AutoModelForCausalLM.from_pretrained(str(model_path), **load_kwargs)
+    max_memory = build_max_memory_map(
+        torch_module=torch_module,
+        max_gpu_memory_gib=max_gpu_memory_gib,
+        max_cpu_memory_gib=max_cpu_memory_gib,
+    )
+    if max_memory is not None:
+        load_kwargs["max_memory"] = max_memory
+    loader_family = resolve_backbone_loader_family(
+        model_path=str(model_path),
+        trust_remote_code=True,
+    )
+    if loader_family == "process_reward_model":
+        from transformers import AutoModel
+
+        backbone = AutoModel.from_pretrained(str(model_path), **load_kwargs)
+    else:
+        backbone = AutoModelForCausalLM.from_pretrained(str(model_path), **load_kwargs)
+    if synthesized_pad_token:
+        _maybe_resize_embeddings_for_tokenizer(backbone=backbone, tokenizer=tokenizer)
     if adapter_path is not None:
         backbone = attach_peft_adapter_for_inference(backbone, adapter_path)
     backbone.eval()
     for param in backbone.parameters():
         param.requires_grad = False
     return backbone, tokenizer, resolved_dtype, tokenizer_path
+
+
+def build_max_memory_map(
+    *,
+    torch_module: Any,
+    max_gpu_memory_gib: int | None,
+    max_cpu_memory_gib: int | None,
+) -> dict[Any, str] | None:
+    """Build one Hugging Face `max_memory` map for controlled CPU/GPU offload.
+
+    English
+    -------
+    This is a safety valve for busy shared machines:
+    1. cap visible GPU memory per device,
+    2. optionally allow the rest to spill into CPU RAM,
+    3. keep the setting explicit so manifests record that the run was
+       memory-constrained by design.
+
+    中文
+    ----
+    这是给共享机器准备的安全阀：
+    1. 对每张可见 GPU 设显存上限，
+    2. 剩余部分按需 spill 到 CPU RAM，
+    3. 同时把这个设定显式记录下来，避免后续忘记这次运行其实是 memory-constrained 的。
+    """
+    payload: dict[Any, str] = {}
+    if max_gpu_memory_gib is not None:
+        if int(max_gpu_memory_gib) <= 0:
+            raise ValueError("`max_gpu_memory_gib` must be > 0 when provided")
+        for device_idx in range(int(torch_module.cuda.device_count())):
+            payload[int(device_idx)] = f"{int(max_gpu_memory_gib)}GiB"
+    if max_cpu_memory_gib is not None:
+        if int(max_cpu_memory_gib) <= 0:
+            raise ValueError("`max_cpu_memory_gib` must be > 0 when provided")
+        payload["cpu"] = f"{int(max_cpu_memory_gib)}GiB"
+    return payload or None
 
 
 def resolve_model_input_device(model: Any, torch_module: Any):
@@ -441,10 +543,20 @@ def resolve_checkpoint_path(
             path = Path(best_path)
             if path.exists():
                 return path
+        # RISK WARNING:
+        # This fallback keeps older/incomplete runs evaluable, but it also means
+        # a caller asking for "best" may silently evaluate `final_value_head`
+        # instead.  That can invalidate experiment claims unless the resolved
+        # checkpoint path is surfaced explicitly in logs/reports.
         final_path = files.get("final_value_head")
         if isinstance(final_path, str) and final_path.strip():
             path = Path(final_path)
             if path.exists():
+                print(
+                    "checkpoint_resolve: requested=best but best_value_head missing; "
+                    f"falling back to final checkpoint at {path}",
+                    flush=True,
+                )
                 return path
         raise FileNotFoundError(
             f"Neither best nor final value-head checkpoint found under manifest: {value_run_dir}"

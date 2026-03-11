@@ -138,11 +138,106 @@ def load_processbench_examples(path: Path, *, max_samples: int | None = None) ->
                 final_answer_correct=bool(item.get("final_answer_correct", False)),
             )
         )
-        if max_samples is not None and len(rows) >= int(max_samples):
-            break
     if not rows:
         raise RuntimeError(f"No valid ProcessBench rows loaded from {path}")
+    if max_samples is not None and len(rows) > int(max_samples):
+        rows = _subsample_processbench_examples(
+            rows=rows,
+            max_samples=int(max_samples),
+        )
     return rows
+
+
+def _subsample_processbench_examples(
+    *,
+    rows: list[ProcessBenchExample],
+    max_samples: int,
+) -> list[ProcessBenchExample]:
+    """Deterministically subsample ProcessBench while preserving coarse label mix.
+
+    English
+    -------
+    Smoke runs are often forced to use `max_samples`, but taking the first `N`
+    rows can silently destroy the benchmark geometry if the public file is
+    block-ordered by error type.  We therefore keep two coarse strata:
+    1. all-correct examples (`label < 0`)
+    2. error examples (`label >= 0`)
+
+    Then we allocate the subsample proportionally and spread picks across each
+    stratum's original order.
+
+    中文
+    ----
+    smoke 评测经常会开 `max_samples`，但如果直接取前 N 条，而公开文件又刚好按错误类型
+    分块排列，就会把 benchmark 几何静默采坏。
+
+    所以这里保留两个粗粒度 strata：
+    1. all-correct (`label < 0`)
+    2. error (`label >= 0`)
+
+    然后按原始占比分配样本数，并在每个 stratum 内按原顺序均匀抽点。
+    """
+    if int(max_samples) <= 0:
+        raise ValueError("`max_samples` must be > 0")
+    if len(rows) <= int(max_samples):
+        return list(rows)
+    all_correct = [row for row in rows if int(row.label) < 0]
+    errors = [row for row in rows if int(row.label) >= 0]
+    if not all_correct or not errors:
+        return _spread_select(rows, max_samples=int(max_samples))
+
+    total = len(rows)
+    target_all_correct = round(int(max_samples) * len(all_correct) / total)
+    target_all_correct = min(len(all_correct), max(1, int(target_all_correct)))
+    target_errors = int(max_samples) - int(target_all_correct)
+    target_errors = min(len(errors), max(1, int(target_errors)))
+
+    # If one bucket hits its cardinality cap, donate the remainder to the other.
+    # 如果一个 bucket 的可用样本数不够，就把剩余额度让给另一个 bucket。
+    assigned = int(target_all_correct + target_errors)
+    if assigned < int(max_samples):
+        remaining = int(max_samples) - assigned
+        if len(errors) - int(target_errors) >= len(all_correct) - int(target_all_correct):
+            target_errors = min(len(errors), int(target_errors) + remaining)
+        else:
+            target_all_correct = min(len(all_correct), int(target_all_correct) + remaining)
+
+    selected_ids = {
+        str(row.example_id)
+        for row in (
+            _spread_select(all_correct, max_samples=int(target_all_correct))
+            + _spread_select(errors, max_samples=int(target_errors))
+        )
+    }
+    selected = [row for row in rows if str(row.example_id) in selected_ids]
+    return selected[: int(max_samples)]
+
+
+def _spread_select(rows: list[ProcessBenchExample], *, max_samples: int) -> list[ProcessBenchExample]:
+    """Select evenly spaced rows from one ordered bucket.
+
+    中文
+    ----
+    这里不用随机采样，是为了让 smoke 结果在相同输入下完全可复现。
+    """
+    if len(rows) <= int(max_samples):
+        return list(rows)
+    if int(max_samples) <= 1:
+        return [rows[0]]
+    indices: list[int] = []
+    for slot in range(int(max_samples)):
+        raw_index = round(slot * (len(rows) - 1) / max(int(max_samples) - 1, 1))
+        normalized = min(max(int(raw_index), 0), len(rows) - 1)
+        if normalized not in indices:
+            indices.append(normalized)
+    if len(indices) < int(max_samples):
+        for idx in range(len(rows)):
+            if idx in indices:
+                continue
+            indices.append(idx)
+            if len(indices) >= int(max_samples):
+                break
+    return [rows[idx] for idx in sorted(indices[: int(max_samples)])]
 
 
 def build_processbench_prefix_records(
@@ -188,6 +283,9 @@ def build_processbench_prefix_records(
 def compute_processbench_metrics(
     rows: list[ProcessBenchPrefixRecord],
     scores: list[float],
+    *,
+    processbench_f1_threshold: float | None = None,
+    processbench_f1_threshold_candidates: int = 50,
 ) -> dict[str, Any]:
     """Compute ranking-oriented metrics for ProcessBench prefix scoring.
 
@@ -254,6 +352,12 @@ def compute_processbench_metrics(
                 first_edge_positive += 1
 
     auc = compute_binary_auc(global_scores, global_labels) if len(set(global_labels)) == 2 else 0.5
+    f1_metrics = compute_processbench_f1(
+        rows=rows,
+        scores=scores,
+        threshold=processbench_f1_threshold,
+        threshold_candidates=int(processbench_f1_threshold_candidates),
+    )
     return {
         "num_examples": int(len(grouped)),
         "num_prefixes": int(len(rows)),
@@ -267,6 +371,124 @@ def compute_processbench_metrics(
         "mean_good_prefix_score": float(statistics.mean(good_scores)) if good_scores else 0.0,
         "mean_bad_prefix_score": float(statistics.mean(bad_scores)) if bad_scores else 0.0,
         "mean_all_correct_last_score": float(statistics.mean(all_correct_last_scores)) if all_correct_last_scores else 0.0,
+        **f1_metrics,
+    }
+
+
+def compute_processbench_f1(
+    rows: list[ProcessBenchPrefixRecord],
+    scores: list[float],
+    *,
+    threshold: float | None = None,
+    threshold_candidates: int = 50,
+) -> dict[str, Any]:
+    """Compute the official ProcessBench F1 metric over prefix scores.
+
+    English
+    -------
+    ProcessBench F1 is the harmonic mean of two per-class accuracies:
+    1. Acc_erroneous: fraction of error examples where the model correctly
+       identifies the first wrong step.
+    2. Acc_correct: fraction of all-correct examples where the model correctly
+       predicts "all steps are correct".
+
+    F1 = 2 * Acc_erroneous * Acc_correct / (Acc_erroneous + Acc_correct)
+
+    Decision rule (same as ProcessBench paper):
+    - Apply a scalar threshold τ to all step scores.
+    - For each example, find the *first* step with score < τ.
+    - If such a step exists, predict that step as the first error.
+    - If no step falls below τ, predict "all correct" (label = -1).
+
+    When `threshold` is None, this function sweeps `threshold_candidates`
+    evenly-spaced values over [0, 1] and picks the one that maximises F1.
+    The chosen threshold is returned in the output dict so callers can
+    inspect it or fix it for cross-dataset comparisons.
+
+    中文
+    ----
+    ProcessBench 官方 F1 = 2 × Acc_error × Acc_correct / (Acc_error + Acc_correct)
+
+    其中：
+    - Acc_error = 错误样本中"正确预测第一错误步"的比例
+    - Acc_correct = 全正确样本中"正确预测为全对"的比例
+
+    决策规则：扫阈值 τ → 找第一个分数 < τ 的步骤 → 若无则预测"全对"。
+
+    当 `threshold=None` 时，自动在 [0,1] 上搜索使 F1 最大的阈值并返回。
+    """
+    if len(rows) != len(scores):
+        raise ValueError("rows and scores must have equal length")
+
+    # Group prefix records by example, sort by step index within each group.
+    grouped: dict[str, list[tuple[ProcessBenchPrefixRecord, float]]] = {}
+    for row, score in zip(rows, scores, strict=True):
+        grouped.setdefault(row.example_id, []).append((row, float(score)))
+    for key in grouped:
+        grouped[key].sort(key=lambda item: item[0].prefix_step_index)
+
+    def _f1_at_threshold(tau: float) -> tuple[float, float, float]:
+        error_total = 0
+        error_correct = 0
+        correct_total = 0
+        correct_correct = 0
+        for example_rows in grouped.values():
+            gt_label = int(example_rows[0][0].label)
+            # Find first step where score < tau.
+            predicted_error_step: int | None = None
+            for step_idx, (row, score) in enumerate(example_rows):
+                if float(score) < float(tau):
+                    predicted_error_step = int(row.prefix_step_index)
+                    break
+            if gt_label < 0:
+                # All-correct ground truth.
+                correct_total += 1
+                if predicted_error_step is None:
+                    correct_correct += 1
+            else:
+                # Error example: ground truth first error at prefix_step_index = gt_label.
+                error_total += 1
+                if predicted_error_step is not None and predicted_error_step == gt_label:
+                    error_correct += 1
+        acc_error = float(error_correct / error_total) if error_total > 0 else 0.0
+        acc_correct = float(correct_correct / correct_total) if correct_total > 0 else 0.0
+        denom = acc_error + acc_correct
+        f1 = float(2.0 * acc_error * acc_correct / denom) if denom > 0.0 else 0.0
+        return f1, acc_error, acc_correct
+
+    if threshold is not None:
+        best_tau = float(threshold)
+        best_f1, best_acc_error, best_acc_correct = _f1_at_threshold(best_tau)
+        threshold_selection = "fixed"
+    else:
+        # Sweep threshold over observed score range for efficiency.
+        all_scores_flat = [float(s) for s in scores]
+        lo = min(all_scores_flat) if all_scores_flat else 0.0
+        hi = max(all_scores_flat) if all_scores_flat else 1.0
+        if lo >= hi:
+            lo, hi = 0.0, 1.0
+        step_size = (hi - lo) / max(1, int(threshold_candidates) - 1)
+        best_f1 = -1.0
+        best_tau = 0.5
+        best_acc_error = 0.0
+        best_acc_correct = 0.0
+        for i in range(int(threshold_candidates)):
+            tau = lo + i * step_size
+            f1, acc_error, acc_correct = _f1_at_threshold(tau)
+            if f1 > best_f1:
+                best_f1 = f1
+                best_tau = tau
+                best_acc_error = acc_error
+                best_acc_correct = acc_correct
+        threshold_selection = "oracle_sweep"
+
+    return {
+        "processbench_f1": float(best_f1),
+        "processbench_acc_erroneous": float(best_acc_error),
+        "processbench_acc_correct": float(best_acc_correct),
+        "processbench_f1_threshold": float(best_tau),
+        "processbench_f1_threshold_selection": str(threshold_selection),
+        "processbench_f1_is_oracle": bool(threshold is None),
     }
 
 
@@ -274,6 +496,7 @@ def load_prmbench_preview_pairs(
     path: Path,
     *,
     max_samples: int | None = None,
+    error_step_index_base: str | int = "auto",
 ) -> list[PRMBenchPreviewPairRecord]:
     """Load PRMBench preview into explicit prefix pairs.
 
@@ -286,52 +509,108 @@ def load_prmbench_preview_pairs(
     """
     if not path.exists():
         raise FileNotFoundError(f"PRMBench preview file not found: {path}")
-    rows: list[PRMBenchPreviewPairRecord] = []
+    raw_records: list[tuple[int, dict[str, Any]]] = []
     with path.open("r", encoding="utf-8") as handle:
         for line_no, raw in enumerate(handle, start=1):
             text = raw.strip()
             if text == "":
                 continue
             payload = json.loads(text)
-            original_process = payload.get("original_process")
-            modified_process = payload.get("modified_process")
-            error_steps = payload.get("error_steps")
-            if not isinstance(original_process, list) or not isinstance(modified_process, list):
+            if isinstance(payload, dict):
+                raw_records.append((line_no, payload))
+    resolved_index_base = _resolve_prmbench_error_step_index_base(
+        raw_records=raw_records,
+        error_step_index_base=error_step_index_base,
+    )
+    rows: list[PRMBenchPreviewPairRecord] = []
+    for line_no, payload in raw_records:
+        original_process = payload.get("original_process")
+        modified_process = payload.get("modified_process")
+        error_steps = payload.get("error_steps")
+        if not isinstance(original_process, list) or not isinstance(modified_process, list):
+            continue
+        if not isinstance(error_steps, list) or not error_steps:
+            continue
+        question_text = f"{str(payload.get('question') or payload.get('modified_question') or payload.get('original_question') or '')}\n\n"
+        classification = str(payload.get("classification", "unknown"))
+        for raw_error_step in error_steps:
+            try:
+                idx = int(raw_error_step)
+            except Exception:  # noqa: BLE001
                 continue
-            if not isinstance(error_steps, list) or not error_steps:
+            if resolved_index_base == 1:
+                idx = idx - 1
+            if idx < 0:
                 continue
-            question_text = f"{str(payload.get('question') or payload.get('modified_question') or payload.get('original_question') or '')}\n\n"
-            classification = str(payload.get("classification", "unknown"))
-            for raw_error_step in error_steps:
-                try:
-                    idx = int(raw_error_step)
-                except Exception:  # noqa: BLE001
-                    continue
-                # Some public snapshots store 1-based indices while our code uses
-                # 0-based indices.  Normalize once at load time so later code
-                # stays simple.
-                # 有些公开快照用 1-based，而仓库内部统一用 0-based。
-                # 在加载时统一归一化，后面逻辑就能保持简单。
-                idx = idx - 1 if idx > 0 else idx
-                if idx < 0:
-                    continue
-                if idx >= len(original_process) or idx >= len(modified_process):
-                    continue
-                rows.append(
-                    PRMBenchPreviewPairRecord(
-                        pair_id=f"prmbench_preview:{line_no}:{idx}",
-                        classification=classification,
-                        question_text=question_text,
-                        chosen_prefix_text=_join_steps_as_prefix(original_process, idx),
-                        rejected_prefix_text=_join_steps_as_prefix(modified_process, idx),
-                        error_step_index=int(idx),
-                    )
+            if idx >= len(original_process) or idx >= len(modified_process):
+                continue
+            rows.append(
+                PRMBenchPreviewPairRecord(
+                    pair_id=f"prmbench_preview:{line_no}:{idx}",
+                    classification=classification,
+                    question_text=question_text,
+                    chosen_prefix_text=_join_steps_as_prefix(original_process, idx),
+                    rejected_prefix_text=_join_steps_as_prefix(modified_process, idx),
+                    error_step_index=int(idx),
                 )
-                if max_samples is not None and len(rows) >= int(max_samples):
-                    return rows
+            )
+            if max_samples is not None and len(rows) >= int(max_samples):
+                return rows
     if not rows:
         raise RuntimeError(f"No valid PRMBench preview pairs loaded from {path}")
     return rows
+
+
+def _resolve_prmbench_error_step_index_base(
+    *,
+    raw_records: list[tuple[int, dict[str, Any]]],
+    error_step_index_base: str | int,
+) -> int:
+    if isinstance(error_step_index_base, int):
+        if int(error_step_index_base) not in {0, 1}:
+            raise ValueError("`error_step_index_base` must be 0, 1, or 'auto'")
+        return int(error_step_index_base)
+    normalized = str(error_step_index_base).strip().lower()
+    if normalized in {"0", "zero_based", "zero", "0_based"}:
+        return 0
+    if normalized in {"1", "one_based", "one", "1_based"}:
+        return 1
+    if normalized != "auto":
+        raise ValueError(
+            "`error_step_index_base` must be one of {'auto', 'zero_based', 'one_based', 0, 1}"
+        )
+
+    saw_zero_based_signal = False
+    saw_one_based_signal = False
+    for _, payload in raw_records:
+        original_process = payload.get("original_process")
+        modified_process = payload.get("modified_process")
+        error_steps = payload.get("error_steps")
+        if not isinstance(original_process, list) or not isinstance(modified_process, list):
+            continue
+        if not isinstance(error_steps, list):
+            continue
+        for raw_error_step in error_steps:
+            try:
+                idx = int(raw_error_step)
+            except Exception:  # noqa: BLE001
+                continue
+            if idx == 0:
+                saw_zero_based_signal = True
+            if idx >= len(original_process) or idx >= len(modified_process):
+                saw_one_based_signal = True
+    if saw_zero_based_signal and saw_one_based_signal:
+        raise RuntimeError(
+            "PRMBench preview error-step indices look mixed between 0-based and 1-based."
+        )
+    if saw_zero_based_signal:
+        return 0
+    if saw_one_based_signal:
+        return 1
+    raise RuntimeError(
+        "PRMBench preview error-step index base is ambiguous. "
+        "Pass `error_step_index_base='zero_based'` or `'one_based'` explicitly."
+    )
 
 
 def compute_pair_ranking_metrics(

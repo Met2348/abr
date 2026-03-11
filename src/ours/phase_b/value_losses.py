@@ -195,6 +195,40 @@ def anti_saturation_logit_penalty(
     return torch_module.mean(overflow * overflow)
 
 
+def reward_centering_penalty(
+    logits: Any,
+    *,
+    torch_module: Any,
+    sample_weights: Any | None = None,
+):
+    """把一批 reward/logit 的均值拉回 0 附近。 Keep the batch-mean reward/logit close to zero.
+
+    中文
+    ----
+    Reward model / value head 的绝对偏置并不可靠，很多训练框架都会额外加一个
+    “居中”项，避免模型把整批样本整体抬高或压低。
+
+    English
+    -------
+    Reward values are only meaningful up to an affine shift, so many reward-model
+    training pipelines add an explicit centering regularizer.  This helper keeps
+    the weighted batch mean near zero:
+
+    `penalty = mean(logits)^2`
+
+    当传入 `sample_weights` 时，这里的均值会退化成加权均值。
+    When `sample_weights` is provided, the mean becomes a weighted mean.
+    """
+    if logits.numel() == 0:
+        raise ValueError("reward_centering_penalty expects a non-empty tensor")
+    centered_mean = _weighted_mean(
+        logits,
+        sample_weights=sample_weights,
+        torch_module=torch_module,
+    )
+    return centered_mean * centered_mean
+
+
 def bellman_consistency_loss(
     current_scores: Any,
     next_scores_stopgrad: Any,

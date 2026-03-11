@@ -60,15 +60,18 @@ from ours.phase_e.runtime import (  # noqa: E402
     build_phase_e_backbone_signature,
     import_runtime_deps,
     load_backbone_and_tokenizer,
+    resolve_tokenizer_load_path,
     resolve_value_device,
     set_seed,
 )
 from ours.phase_e.training import (  # noqa: E402
     build_pair_feature_cache,
     build_pair_permutation,
+    compute_pair_truncation_diagnostics,
     compute_pair_objective,
     evaluate_pair_cache,
     select_metric_value,
+    validate_pair_truncation_diagnostics,
 )
 
 
@@ -88,28 +91,37 @@ class PhaseETrainConfig:
     max_length: int
     lambda_ranking: float
     lambda_bce: float
+    lambda_terminal_bce: float
     ranking_margin: float
+    ranking_target_space: str
     pair_weight_mode: str
     source_balance: str
     permutation_mode: str
     anti_saturation_weight: float
     anti_saturation_logit_threshold: float
+    reward_centering_weight: float
     checkpoint_selection_metric: str
     logging_steps: int
     seed: int
     dtype: str
     device_map: str
+    max_gpu_memory_gib: int | None
+    max_cpu_memory_gib: int | None
     require_cuda: bool
     strict_determinism: bool
     init_value_head_path: str | None
     feature_cache_root: str
     feature_cache_mode: str
+    nonfinite_feature_policy: str
     feature_cache_lock_timeout_sec: float
+    truncation_diagnostics_batch_size: int
+    max_truncation_over_limit_fraction: float
     head_architecture: str
     head_dropout_prob: float
     head_init_std: float
     head_mlp_hidden_size: int
     head_activation: str
+    head_inference_alpha: float
 
     def to_dict(self) -> dict[str, Any]:
         """Return JSON-serializable config snapshot."""
@@ -144,25 +156,93 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--lambda-ranking", type=float, default=1.0)
     parser.add_argument("--lambda-bce", type=float, default=0.25)
+    parser.add_argument(
+        "--terminal-bce-lambda",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight for the extra BCE term applied specifically to terminal_completion_anchor pairs "
+            "(BiRM-style terminal supervision).  0 = disabled (default, backward-compatible).  "
+            "Recommended range: 0.1–0.5 when training with terminal anchor pairs."
+        ),
+    )
     parser.add_argument("--ranking-margin", type=float, default=0.05)
-    parser.add_argument("--pair-weight-mode", choices=["none", "confidence"], default="confidence")
+    parser.add_argument(
+        "--ranking-target-space",
+        choices=["score", "logit"],
+        default="score",
+        help=(
+            "Which representation the pairwise ranking loss should optimize. "
+            "`score` keeps the legacy sigmoid-space margin loss; `logit` uses the raw scalar before sigmoid."
+        ),
+    )
+    parser.add_argument(
+        "--pair-weight-mode",
+        choices=[
+            "none",
+            "confidence",
+            "semantic",
+            "confidence_semantic",
+            "verdict_balance",
+            "confidence_verdict_balance",
+            "group_balance",
+            "confidence_group_balance",
+        ],
+        default="confidence",
+    )
     parser.add_argument("--source-balance", choices=["none", "uniform"], default="none")
     parser.add_argument("--permutation-mode", choices=["random", "stable_hash"], default="stable_hash")
     parser.add_argument("--anti-saturation-weight", type=float, default=0.0)
     parser.add_argument("--anti-saturation-logit-threshold", type=float, default=4.0)
+    parser.add_argument(
+        "--reward-centering-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Keep the batch-mean value logit near zero. "
+            "This mirrors reward-centering regularization commonly used in reward-model training."
+        ),
+    )
     parser.add_argument("--checkpoint-selection-metric", choices=["pair_acc", "auc", "ranking_score", "pair_loss"], default="ranking_score")
     parser.add_argument("--logging-steps", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--device-map", default="auto")
+    parser.add_argument(
+        "--max-gpu-memory-gib",
+        type=int,
+        default=None,
+        help=(
+            "Optional per-visible-GPU memory cap passed to Hugging Face `max_memory`. "
+            "Useful on busy shared machines where the backbone should partially offload to CPU instead of filling the whole card."
+        ),
+    )
+    parser.add_argument(
+        "--max-cpu-memory-gib",
+        type=int,
+        default=None,
+        help=(
+            "Optional CPU RAM budget paired with --max-gpu-memory-gib for controlled model offload. "
+            "If unset, no explicit CPU budget is passed."
+        ),
+    )
     parser.add_argument("--require-cuda", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--strict-determinism", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--init-value-head-path", type=Path, default=None)
-    parser.add_argument("--head-architecture", choices=["linear", "mlp"], default="linear")
+    parser.add_argument("--head-architecture", choices=["linear", "mlp", "gated_mlp", "dual_head"], default="linear")
     parser.add_argument("--head-dropout-prob", type=float, default=0.0)
     parser.add_argument("--head-init-std", type=float, default=0.02)
     parser.add_argument("--head-mlp-hidden-size", type=int, default=1024)
     parser.add_argument("--head-activation", choices=["gelu", "relu", "tanh"], default="gelu")
+    parser.add_argument(
+        "--head-inference-alpha",
+        type=float,
+        default=0.5,
+        help=(
+            "Only used by `dual_head`. "
+            "Final inference logit = alpha * local_logit + (1-alpha) * terminal_logit."
+        ),
+    )
     parser.add_argument(
         "--feature-cache-root",
         type=Path,
@@ -173,7 +253,27 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["off", "read", "write", "read_write"],
         default="read_write",
     )
+    parser.add_argument(
+        "--nonfinite-feature-policy",
+        choices=["error", "drop"],
+        default="error",
+        help=(
+            "How to handle pair rows whose pooled chosen/rejected features contain NaN/Inf. "
+            "`error` is the safe default for audits; `drop` is a research escape hatch "
+            "for continuation experiments on otherwise-good artifacts."
+        ),
+    )
     parser.add_argument("--feature-cache-lock-timeout-sec", type=float, default=600.0)
+    parser.add_argument("--truncation-diagnostics-batch-size", type=int, default=64)
+    parser.add_argument(
+        "--max-truncation-over-limit-fraction",
+        type=float,
+        default=0.10,
+        help=(
+            "Fail fast if more than this fraction of pairs exceed --max-length, "
+            "even when the first chosen/rejected difference still appears before the cutoff."
+        ),
+    )
     return parser
 
 
@@ -212,6 +312,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("Per-device batch sizes must be > 0")
     if int(args.gradient_accumulation_steps) <= 0:
         raise ValueError("--gradient-accumulation-steps must be > 0")
+    if args.max_gpu_memory_gib is not None and int(args.max_gpu_memory_gib) <= 0:
+        raise ValueError("--max-gpu-memory-gib must be > 0")
+    if args.max_cpu_memory_gib is not None and int(args.max_cpu_memory_gib) <= 0:
+        raise ValueError("--max-cpu-memory-gib must be > 0")
     if not (0.0 <= float(args.warmup_ratio) < 1.0):
         raise ValueError("--warmup-ratio must be in [0, 1)")
     if float(args.max_grad_norm) <= 0.0:
@@ -226,6 +330,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--anti-saturation-weight must be >= 0")
     if float(args.anti_saturation_logit_threshold) <= 0.0:
         raise ValueError("--anti-saturation-logit-threshold must be > 0")
+    if float(args.reward_centering_weight) < 0.0:
+        raise ValueError("--reward-centering-weight must be >= 0")
     if not (0.0 <= float(args.head_dropout_prob) < 1.0):
         raise ValueError("--head-dropout-prob must be in [0, 1)")
     if float(args.head_init_std) <= 0.0:
@@ -236,6 +342,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--logging-steps must be > 0")
     if float(args.feature_cache_lock_timeout_sec) <= 0.0:
         raise ValueError("--feature-cache-lock-timeout-sec must be > 0")
+    if int(args.truncation_diagnostics_batch_size) <= 0:
+        raise ValueError("--truncation-diagnostics-batch-size must be > 0")
+    if not (0.0 <= float(args.max_truncation_over_limit_fraction) <= 1.0):
+        raise ValueError("--max-truncation-over-limit-fraction must be in [0, 1]")
     if args.objective_mode == "ranking_only" and float(args.lambda_ranking) == 0.0:
         raise ValueError("ranking_only requires --lambda-ranking > 0")
     if args.objective_mode == "pair_bce_only" and float(args.lambda_bce) == 0.0:
@@ -296,28 +406,41 @@ def main(argv: list[str] | None = None) -> int:
         max_length=int(args.max_length),
         lambda_ranking=float(args.lambda_ranking),
         lambda_bce=float(args.lambda_bce),
+        lambda_terminal_bce=float(args.terminal_bce_lambda),
         ranking_margin=float(args.ranking_margin),
+        ranking_target_space=str(args.ranking_target_space),
         pair_weight_mode=str(args.pair_weight_mode),
         source_balance=str(args.source_balance),
         permutation_mode=str(args.permutation_mode),
         anti_saturation_weight=float(args.anti_saturation_weight),
         anti_saturation_logit_threshold=float(args.anti_saturation_logit_threshold),
+        reward_centering_weight=float(args.reward_centering_weight),
         checkpoint_selection_metric=str(args.checkpoint_selection_metric),
         logging_steps=int(args.logging_steps),
         seed=int(args.seed),
         dtype=str(args.dtype),
         device_map=str(args.device_map),
+        max_gpu_memory_gib=(
+            int(args.max_gpu_memory_gib) if args.max_gpu_memory_gib is not None else None
+        ),
+        max_cpu_memory_gib=(
+            int(args.max_cpu_memory_gib) if args.max_cpu_memory_gib is not None else None
+        ),
         require_cuda=bool(args.require_cuda),
         strict_determinism=bool(args.strict_determinism),
         init_value_head_path=(str(args.init_value_head_path) if args.init_value_head_path is not None else None),
         feature_cache_root=str(args.feature_cache_root),
         feature_cache_mode=str(args.feature_cache_mode),
+        nonfinite_feature_policy=str(args.nonfinite_feature_policy),
         feature_cache_lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
+        truncation_diagnostics_batch_size=int(args.truncation_diagnostics_batch_size),
+        max_truncation_over_limit_fraction=float(args.max_truncation_over_limit_fraction),
         head_architecture=str(args.head_architecture),
         head_dropout_prob=float(args.head_dropout_prob),
         head_init_std=float(args.head_init_std),
         head_mlp_hidden_size=int(args.head_mlp_hidden_size),
         head_activation=str(args.head_activation),
+        head_inference_alpha=float(args.head_inference_alpha),
     )
 
     # Every run gets a timestamped directory so repeated executions with the
@@ -351,19 +474,79 @@ def main(argv: list[str] | None = None) -> int:
     print(f"batch_eval         : {args.per_device_eval_batch_size}")
     print(f"grad_accum         : {args.gradient_accumulation_steps}")
     print(f"max_length         : {args.max_length}")
+    print(f"ranking_target     : {args.ranking_target_space}")
     print(f"pair_weight_mode   : {args.pair_weight_mode}")
     print(f"source_balance     : {args.source_balance}")
     print(f"permutation_mode   : {args.permutation_mode}")
+    print(f"trunc_diag_batch   : {args.truncation_diagnostics_batch_size}")
+    print(f"trunc_overlimit_max: {float(args.max_truncation_over_limit_fraction):.4f}")
     print(f"selection_metric   : {args.checkpoint_selection_metric}")
+    print(f"nonfinite_policy   : {args.nonfinite_feature_policy}")
+    print(f"reward_centering   : {float(args.reward_centering_weight):.6f}")
     print(f"strict_determinism : {bool(args.strict_determinism)}")
+    print(f"max_gpu_memory_gib : {args.max_gpu_memory_gib if args.max_gpu_memory_gib is not None else '<none>'}")
+    print(f"max_cpu_memory_gib : {args.max_cpu_memory_gib if args.max_cpu_memory_gib is not None else '<none>'}")
     print("=" * 88)
 
+    adapter_path = Path(args.adapter_path) if args.adapter_path is not None else None
+    tokenizer_path = resolve_tokenizer_load_path(
+        str(args.model_path),
+        adapter_path,
+    )
+    # 这里先只加载 tokenizer，不急着加载大模型。
+    # 对 R-PRM 这类可能被截断门槛直接拒绝的配置，应该尽早失败，避免空耗 GPU 初始化时间。
+    # Load only the tokenizer first so obviously unsafe configs can fail before the expensive backbone load.
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+    if tokenizer.pad_token_id is None:
+        if tokenizer.eos_token is not None:
+            tokenizer.pad_token = tokenizer.eos_token
+        else:
+            tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+
+    # 先审计输入截断，再做特征缓存与训练。这样即使训练结果很差，也能先分清楚是不是监督信号在入口处就被截坏了。
+    # Audit input truncation before feature caching and training so poor results can be separated from input-side signal loss.
+    train_truncation_diagnostics = compute_pair_truncation_diagnostics(
+        pairs=train_pairs,
+        tokenizer=tokenizer,
+        max_length=int(args.max_length),
+        batch_size=int(args.truncation_diagnostics_batch_size),
+    )
+    eval_truncation_diagnostics = compute_pair_truncation_diagnostics(
+        pairs=eval_pairs,
+        tokenizer=tokenizer,
+        max_length=int(args.max_length),
+        batch_size=int(args.truncation_diagnostics_batch_size),
+    )
+    _emit_truncation_console_report(
+        split_label="train",
+        diagnostics=train_truncation_diagnostics,
+    )
+    _emit_truncation_console_report(
+        split_label="eval",
+        diagnostics=eval_truncation_diagnostics,
+    )
+    validate_pair_truncation_diagnostics(
+        diagnostics=train_truncation_diagnostics,
+        context_label="Phase E train split",
+        max_allowed_over_limit_fraction=float(args.max_truncation_over_limit_fraction),
+    )
+    validate_pair_truncation_diagnostics(
+        diagnostics=eval_truncation_diagnostics,
+        context_label="Phase E eval split",
+        max_allowed_over_limit_fraction=float(args.max_truncation_over_limit_fraction),
+    )
     load_start = time.perf_counter()
     backbone, tokenizer, _, tokenizer_path = load_backbone_and_tokenizer(
         model_path=str(args.model_path),
-        adapter_path=(Path(args.adapter_path) if args.adapter_path is not None else None),
+        adapter_path=adapter_path,
         dtype_name=str(args.dtype),
         device_map=str(args.device_map),
+        max_gpu_memory_gib=(
+            int(args.max_gpu_memory_gib) if args.max_gpu_memory_gib is not None else None
+        ),
+        max_cpu_memory_gib=(
+            int(args.max_cpu_memory_gib) if args.max_cpu_memory_gib is not None else None
+        ),
         torch_module=torch,
         AutoModelForCausalLM=AutoModelForCausalLM,
         AutoTokenizer=AutoTokenizer,
@@ -376,6 +559,7 @@ def main(argv: list[str] | None = None) -> int:
         architecture=str(args.head_architecture),
         mlp_hidden_size=int(args.head_mlp_hidden_size),
         activation=str(args.head_activation),
+        inference_alpha=float(args.head_inference_alpha),
     )
     value_head = SigmoidValueHead(value_head_config)
     value_device = resolve_value_device(backbone, torch)
@@ -411,7 +595,7 @@ def main(argv: list[str] | None = None) -> int:
         dtype=str(args.dtype),
         max_length=int(args.max_length),
     )
-    use_confidence_weights = bool(args.pair_weight_mode == "confidence")
+    pair_weight_mode = str(args.pair_weight_mode)
     train_cache = build_pair_feature_cache(
         pairs=train_pairs,
         split_label="train",
@@ -423,7 +607,8 @@ def main(argv: list[str] | None = None) -> int:
         feature_cache_mode=str(args.feature_cache_mode),
         lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
         backbone_signature=backbone_signature,
-        use_confidence_weights=use_confidence_weights,
+        pair_weight_mode=pair_weight_mode,
+        nonfinite_feature_policy=str(args.nonfinite_feature_policy),
         torch_module=torch,
         feature_cache_stats=feature_cache_stats,
     )
@@ -438,7 +623,8 @@ def main(argv: list[str] | None = None) -> int:
         feature_cache_mode=str(args.feature_cache_mode),
         lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
         backbone_signature=backbone_signature,
-        use_confidence_weights=use_confidence_weights,
+        pair_weight_mode=pair_weight_mode,
+        nonfinite_feature_policy=str(args.nonfinite_feature_policy),
         torch_module=torch,
         feature_cache_stats=feature_cache_stats,
     )
@@ -505,11 +691,14 @@ def main(argv: list[str] | None = None) -> int:
             grad_accum_steps=int(args.gradient_accumulation_steps),
             max_grad_norm=float(args.max_grad_norm),
             objective_mode=str(args.objective_mode),
+            ranking_target_space=str(args.ranking_target_space),
             ranking_margin=float(args.ranking_margin),
             lambda_ranking=float(args.lambda_ranking),
             lambda_bce=float(args.lambda_bce),
+            lambda_terminal_bce=float(args.terminal_bce_lambda),
             anti_saturation_weight=float(args.anti_saturation_weight),
             anti_saturation_logit_threshold=float(args.anti_saturation_logit_threshold),
+            reward_centering_weight=float(args.reward_centering_weight),
             source_balance=str(args.source_balance),
             permutation_mode=str(args.permutation_mode),
             logging_steps=int(args.logging_steps),
@@ -521,11 +710,14 @@ def main(argv: list[str] | None = None) -> int:
             pair_cache=eval_cache,
             batch_size=int(args.per_device_eval_batch_size),
             objective_mode=str(args.objective_mode),
+            ranking_target_space=str(args.ranking_target_space),
             ranking_margin=float(args.ranking_margin),
             lambda_ranking=float(args.lambda_ranking),
             lambda_bce=float(args.lambda_bce),
             anti_saturation_weight=float(args.anti_saturation_weight),
             anti_saturation_logit_threshold=float(args.anti_saturation_logit_threshold),
+            reward_centering_weight=float(args.reward_centering_weight),
+            lambda_terminal_bce=float(args.terminal_bce_lambda),
             torch_module=torch,
         )
         selection_value, _ = select_metric_value(
@@ -589,7 +781,7 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError("No best checkpoint was selected")
     _write_eval_pair_scores(
         path=eval_pair_scores_path,
-        eval_pairs=eval_pairs,
+        eval_pairs=eval_cache["pairs"],
         chosen_scores=best_eval_scores[0],
         rejected_scores=best_eval_scores[1],
     )
@@ -622,6 +814,12 @@ def main(argv: list[str] | None = None) -> int:
             "adapter_path": (str(args.adapter_path) if args.adapter_path is not None else None),
             "dtype": str(args.dtype),
             "device_map": str(args.device_map),
+            "max_gpu_memory_gib": (
+                int(args.max_gpu_memory_gib) if args.max_gpu_memory_gib is not None else None
+            ),
+            "max_cpu_memory_gib": (
+                int(args.max_cpu_memory_gib) if args.max_cpu_memory_gib is not None else None
+            ),
             "tokenizer_path": str(tokenizer_path),
         },
         "input_files": {
@@ -631,6 +829,8 @@ def main(argv: list[str] | None = None) -> int:
         "train_config": train_config.to_dict(),
         "train_pair_summary": train_pair_stats,
         "eval_pair_summary": eval_pair_stats,
+        "train_truncation_diagnostics": train_truncation_diagnostics,
+        "eval_truncation_diagnostics": eval_truncation_diagnostics,
         "init_value_head": init_info,
         "output_files": {
             "manifest": str(manifest_path),
@@ -651,9 +851,15 @@ def main(argv: list[str] | None = None) -> int:
         "best_epoch": int(best_epoch),
         "selection_metric": str(args.checkpoint_selection_metric),
         "selection_value": float(best_selection_value),
+        "ranking_target_space": str(args.ranking_target_space),
+        "head_architecture": str(args.head_architecture),
         "eval_pairs": best_eval_metrics,
         "train_pairs": int(len(train_pairs)),
         "eval_pairs_n": int(len(eval_pairs)),
+        "train_truncation_diagnostics": train_truncation_diagnostics,
+        "eval_truncation_diagnostics": eval_truncation_diagnostics,
+        "train_nonfinite_feature_summary": dict(train_cache.get("nonfinite_feature_summary", {})),
+        "eval_nonfinite_feature_summary": dict(eval_cache.get("nonfinite_feature_summary", {})),
         "train_elapsed_sec": float(train_elapsed),
         "feature_cache_elapsed_sec": float(feature_cache_elapsed),
         "model_load_elapsed_sec": float(model_load_elapsed),
@@ -674,6 +880,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"pair_accuracy      : {float(best_eval_metrics['pair_accuracy']):.6f}")
     print(f"auc                : {float(best_eval_metrics['auc']):.6f}")
     print(f"mean_margin        : {float(best_eval_metrics['mean_margin']):.6f}")
+    print(
+        "trunc_over_limit   : "
+        f"train={float(train_truncation_diagnostics['overall']['frac_pairs_over_limit']):.4f} "
+        f"eval={float(eval_truncation_diagnostics['overall']['frac_pairs_over_limit']):.4f}"
+    )
+    print(
+        "trunc_hidden_diff  : "
+        f"train={float(train_truncation_diagnostics['overall']['frac_pairs_first_diff_after_cutoff']):.4f} "
+        f"eval={float(eval_truncation_diagnostics['overall']['frac_pairs_first_diff_after_cutoff']):.4f}"
+    )
     print(f"train_metrics      : {train_metrics_path}")
     print(f"eval_metrics       : {eval_metrics_path}")
     print(f"manifest           : {manifest_path}")
@@ -693,11 +909,14 @@ def _run_one_epoch(
     grad_accum_steps: int,
     max_grad_norm: float,
     objective_mode: str,
+    ranking_target_space: str,
     ranking_margin: float,
     lambda_ranking: float,
     lambda_bce: float,
+    lambda_terminal_bce: float,
     anti_saturation_weight: float,
     anti_saturation_logit_threshold: float,
+    reward_centering_weight: float,
     source_balance: str,
     permutation_mode: str,
     logging_steps: int,
@@ -725,6 +944,8 @@ def _run_one_epoch(
     chosen_features = pair_cache["chosen_features"]
     rejected_features = pair_cache["rejected_features"]
     pair_weights = pair_cache["pair_weights"]
+    local_route_weights = pair_cache.get("local_route_weights")
+    terminal_route_weights = pair_cache.get("terminal_route_weights")
     head_device = next(value_head.parameters()).device
     head_dtype = next(value_head.parameters()).dtype
 
@@ -741,12 +962,24 @@ def _run_one_epoch(
         chosen_batch = chosen_features[indices]
         rejected_batch = rejected_features[indices]
         weight_batch = pair_weights[indices]
+        local_route_batch = local_route_weights[indices] if local_route_weights is not None else None
+        terminal_route_batch = (
+            terminal_route_weights[indices] if terminal_route_weights is not None else None
+        )
         if chosen_batch.device != head_device or chosen_batch.dtype != head_dtype:
             chosen_batch = chosen_batch.to(device=head_device, dtype=head_dtype)
         if rejected_batch.device != head_device or rejected_batch.dtype != head_dtype:
             rejected_batch = rejected_batch.to(device=head_device, dtype=head_dtype)
         if weight_batch.device != head_device or weight_batch.dtype != head_dtype:
             weight_batch = weight_batch.to(device=head_device, dtype=head_dtype)
+        if local_route_batch is not None and (
+            local_route_batch.device != head_device or local_route_batch.dtype != head_dtype
+        ):
+            local_route_batch = local_route_batch.to(device=head_device, dtype=head_dtype)
+        if terminal_route_batch is not None and (
+            terminal_route_batch.device != head_device or terminal_route_batch.dtype != head_dtype
+        ):
+            terminal_route_batch = terminal_route_batch.to(device=head_device, dtype=head_dtype)
 
         chosen_out = value_head(chosen_batch)
         rejected_out = value_head(rejected_batch)
@@ -757,15 +990,48 @@ def _run_one_epoch(
             rejected_scores=rejected_out["scores"],
             pair_weights=weight_batch,
             objective_mode=str(objective_mode),
+            ranking_target_space=str(ranking_target_space),
             ranking_margin=float(ranking_margin),
             lambda_ranking=float(lambda_ranking),
             lambda_bce=float(lambda_bce),
             anti_saturation_weight=float(anti_saturation_weight),
             anti_saturation_logit_threshold=float(anti_saturation_logit_threshold),
+            reward_centering_weight=float(reward_centering_weight),
+            chosen_local_logits=chosen_out.get("local_logits"),
+            rejected_local_logits=rejected_out.get("local_logits"),
+            chosen_local_scores=chosen_out.get("local_scores"),
+            rejected_local_scores=rejected_out.get("local_scores"),
+            local_pair_weights=(
+                weight_batch * local_route_batch if local_route_batch is not None else None
+            ),
+            chosen_terminal_logits=chosen_out.get("terminal_logits"),
+            rejected_terminal_logits=rejected_out.get("terminal_logits"),
+            chosen_terminal_scores=chosen_out.get("terminal_scores"),
+            rejected_terminal_scores=rejected_out.get("terminal_scores"),
+            terminal_pair_weights=(
+                weight_batch * terminal_route_batch if terminal_route_batch is not None else None
+            ),
+            lambda_terminal_bce=float(lambda_terminal_bce),
             torch_module=torch_module,
         )
+        loss_value = float(loss.detach().cpu().item())
+        if not math.isfinite(loss_value):
+            batch_pair_ids = [
+                str(pair_cache["pair_ids"][int(idx)])
+                for idx in indices[: min(len(indices), 3)].tolist()
+            ]
+            chosen_logit_abs_max = float(chosen_out["logits"].detach().abs().max().cpu().item())
+            rejected_logit_abs_max = float(rejected_out["logits"].detach().abs().max().cpu().item())
+            raise RuntimeError(
+                "Non-finite training loss detected. "
+                f"batch_idx={batch_idx} "
+                f"global_step={global_step} "
+                f"batch_pair_ids={batch_pair_ids} "
+                f"chosen_logit_abs_max={chosen_logit_abs_max:.6f} "
+                f"rejected_logit_abs_max={rejected_logit_abs_max:.6f}"
+            )
         (loss / float(grad_accum_steps)).backward()
-        running_loss += float(loss.detach().cpu().item())
+        running_loss += float(loss_value)
         batches += 1
 
         # We step the optimizer either:
@@ -920,6 +1186,8 @@ def _render_summary_markdown(summary: dict[str, Any]) -> str:
         f"- best_epoch: {summary['best_epoch']}",
         f"- selection_metric: {summary['selection_metric']}",
         f"- selection_value: {summary['selection_value']:.6f}",
+        f"- ranking_target_space: {summary.get('ranking_target_space', 'score')}",
+        f"- head_architecture: {summary.get('head_architecture', 'linear')}",
         f"- train_pairs: {summary['train_pairs']}",
         f"- eval_pairs: {summary['eval_pairs_n']}",
         "",
@@ -932,7 +1200,70 @@ def _render_summary_markdown(summary: dict[str, Any]) -> str:
         f"- pair_loss: {eval_metrics['pair_loss']:.6f}",
         "",
     ]
+    lines.extend(_render_truncation_markdown_block("Train", summary["train_truncation_diagnostics"]))
+    lines.extend(_render_truncation_markdown_block("Eval", summary["eval_truncation_diagnostics"]))
     return "\n".join(lines)
+
+
+def _emit_truncation_console_report(*, split_label: str, diagnostics: dict[str, Any]) -> None:
+    """把截断诊断摘要打印到控制台。 Print one compact truncation diagnostic summary to the console."""
+    overall = dict(diagnostics["overall"])
+    print(
+        "truncation_diag    : "
+        f"split={split_label} "
+        f"over_limit={float(overall['frac_pairs_over_limit']):.4f} "
+        f"collapse_after_cut={float(overall['frac_pairs_identical_after_truncation']):.4f} "
+        f"hidden_diff_after_cut={float(overall['frac_pairs_first_diff_after_cutoff']):.4f}",
+        flush=True,
+    )
+    for source_tag, payload in dict(diagnostics.get("by_source", {})).items():
+        warning_flags = dict(payload.get("warning_flags", {}))
+        if not any(bool(flag) for flag in warning_flags.values()):
+            continue
+        print(
+            "truncation_warn    : "
+            f"split={split_label} "
+            f"source={source_tag} "
+            f"over_limit={float(payload['frac_pairs_over_limit']):.4f} "
+            f"collapse_after_cut={float(payload['frac_pairs_identical_after_truncation']):.4f} "
+            f"hidden_diff_after_cut={float(payload['frac_pairs_first_diff_after_cutoff']):.4f}",
+            flush=True,
+        )
+
+
+def _render_truncation_markdown_block(section_title: str, diagnostics: dict[str, Any]) -> list[str]:
+    """把截断诊断渲染成 Markdown 小节。 Render one truncation-diagnostic section as Markdown."""
+    overall = dict(diagnostics["overall"])
+    lines = [
+        f"## {section_title} Truncation Diagnostics",
+        "",
+        f"- max_length: `{overall['max_length']}`",
+        f"- frac_pairs_over_limit: `{float(overall['frac_pairs_over_limit']):.6f}`",
+        f"- frac_pairs_identical_after_truncation: `{float(overall['frac_pairs_identical_after_truncation']):.6f}`",
+        f"- frac_pairs_first_diff_after_cutoff: `{float(overall['frac_pairs_first_diff_after_cutoff']):.6f}`",
+        f"- chosen_length_p95: `{int(overall['chosen_length']['p95'])}`",
+        f"- rejected_length_p95: `{int(overall['rejected_length']['p95'])}`",
+        f"- first_diff_token_p95: `{int(overall['first_diff_token_index']['p95'])}`",
+        "",
+        "| source_tag | frac_over_limit | frac_collapse_after_cut | frac_hidden_diff_after_cut | p95_first_diff |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for source_tag, payload in dict(diagnostics.get("by_source", {})).items():
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(source_tag),
+                    f"{float(payload['frac_pairs_over_limit']):.4f}",
+                    f"{float(payload['frac_pairs_identical_after_truncation']):.4f}",
+                    f"{float(payload['frac_pairs_first_diff_after_cutoff']):.4f}",
+                    f"{int(payload['first_diff_token_index']['p95'])}",
+                ]
+            )
+            + " |"
+        )
+    lines.append("")
+    return lines
 
 
 if __name__ == "__main__":

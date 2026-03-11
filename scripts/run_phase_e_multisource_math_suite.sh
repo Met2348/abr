@@ -234,40 +234,59 @@ append_summary_result() {
   local result_id="$1"
   local stage_label="$2"
   local summary_path="$3"
-  local out_jsonl="$4"
+  local seed_results_path="$4"
+  local out_jsonl="$5"
   # Summarize one completed direct/curriculum sub-suite into a compact JSONL row
   # so the final top-level summary can compare them uniformly.
   # 把一个子 suite 的结果压缩成统一 JSONL 行，方便最外层 summary 一视同仁地比较。
-  python - "$result_id" "$stage_label" "$summary_path" "$out_jsonl" <<'PY'
+  python - "$result_id" "$stage_label" "$summary_path" "$seed_results_path" "$out_jsonl" <<'PY'
 import json
-import re
+import statistics
 import sys
 from pathlib import Path
 
 result_id = sys.argv[1]
 stage_label = sys.argv[2]
 summary_path = Path(sys.argv[3])
-out_path = Path(sys.argv[4])
-text = summary_path.read_text(encoding="utf-8")
+seed_results_path = Path(sys.argv[4])
+out_path = Path(sys.argv[5])
 
-def grab(name: str) -> float | None:
-    m = re.search(rf"- {re.escape(name)}: `([^`]+)`", text)
-    if not m:
-        return None
-    return float(m.group(1))
+rows = []
+for raw in seed_results_path.read_text(encoding="utf-8").splitlines():
+    raw = raw.strip()
+    if raw:
+        rows.append(json.loads(raw))
+if not rows:
+    raise ValueError(f"No seed rows found in {seed_results_path}")
+
+def mean(values):
+    return float(statistics.mean(values)) if values else None
+
+def std(values):
+    return float(statistics.pstdev(values)) if len(values) > 1 else None
+
+def benchmark_mean(bench_id: str, metric_name: str):
+    values = []
+    for row in rows:
+        bench = dict(row.get("benchmarks", {}) or {}).get(bench_id)
+        if bench is None:
+            continue
+        values.append(float(bench.get(metric_name, 0.0)))
+    return mean(values)
 
 row = {
     "result_id": result_id,
     "stage_label": stage_label,
     "summary_path": str(summary_path),
-    "mean_heldout_pair_acc": grab("mean_heldout_pair_acc"),
-    "mean_heldout_auc": grab("mean_heldout_auc"),
-    "mean_heldout_ranking_score": grab("mean_heldout_ranking_score"),
-    "std_heldout_pair_acc": grab("std_heldout_pair_acc"),
-    "std_heldout_auc": grab("std_heldout_auc"),
-    "mean_processbench_gsm8k_auc": grab("mean_processbench_gsm8k_auc"),
-    "mean_processbench_math_auc": grab("mean_processbench_math_auc"),
-    "mean_prmbench_preview_auc": grab("mean_prmbench_preview_auc"),
+    "seed_results_path": str(seed_results_path),
+    "mean_heldout_pair_acc": mean([float(item["heldout_pair_acc"]) for item in rows]),
+    "mean_heldout_auc": mean([float(item["heldout_auc"]) for item in rows]),
+    "mean_heldout_ranking_score": mean([float(item.get("heldout_ranking_score", 0.0)) for item in rows]),
+    "std_heldout_pair_acc": std([float(item["heldout_pair_acc"]) for item in rows]),
+    "std_heldout_auc": std([float(item["heldout_auc"]) for item in rows]),
+    "mean_processbench_gsm8k_auc": benchmark_mean("processbench_gsm8k", "auc"),
+    "mean_processbench_math_auc": benchmark_mean("processbench_math", "auc"),
+    "mean_prmbench_preview_auc": benchmark_mean("prmbench_preview", "auc"),
 }
 with out_path.open("a", encoding="utf-8") as handle:
     handle.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -493,7 +512,7 @@ run_curriculum() {
     "Judge whether staged warm-start beats or stabilizes the matching direct mixture." \
     "A good curriculum should preserve held-out strength while improving benchmark-facing behavior." \
     "$stage_sequence"
-  append_summary_result "$curriculum_id" "E" "$curr_summary" "$CURRICULUM_RESULTS_JSONL"
+  append_summary_result "$curriculum_id" "E" "$curr_summary" "$curr_rows" "$CURRICULUM_RESULTS_JSONL"
 }
 
 render_final_summary() {
@@ -642,11 +661,16 @@ for group_id in "${DIRECT_GROUPS[@]}"; do
   log_line "Launching direct sub-suite ${group_id} with RUN_PREFIX=${sub_prefix}" | tee -a "$SUITE_LOG_FILE"
   run_phase_e_subsuite "$group_id" "$sub_prefix"
   sub_summary="assets/artifacts/phase_e_logs/${sub_prefix}/final_summary.md"
+  sub_seed_results="assets/artifacts/phase_e_logs/${sub_prefix}/seed_results.jsonl"
   if [[ ! -f "$sub_summary" ]]; then
     echo "ERROR: Missing direct sub-suite summary: $sub_summary" >&2
     exit 1
   fi
-  append_summary_result "$group_id" "$(stage_label_for_group "$group_id")" "$sub_summary" "$DIRECT_RESULTS_JSONL"
+  if [[ ! -f "$sub_seed_results" ]]; then
+    echo "ERROR: Missing direct sub-suite seed results: $sub_seed_results" >&2
+    exit 1
+  fi
+  append_summary_result "$group_id" "$(stage_label_for_group "$group_id")" "$sub_summary" "$sub_seed_results" "$DIRECT_RESULTS_JSONL"
 done
 
 for curriculum_id in "${CURRICULA[@]}"; do

@@ -71,6 +71,10 @@ from ours.phase_e.runtime import (  # noqa: E402
     score_feature_tensor,
     score_pair_features,
 )
+from ours.phase_e.training import (  # noqa: E402
+    compute_text_truncation_diagnostics,
+    validate_text_truncation_diagnostics,
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -94,8 +98,53 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--max-length", type=int, default=None)
+    parser.add_argument(
+        "--processbench-f1-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Optional fixed threshold for ProcessBench F1. "
+            "If unset, the benchmark metric reports the optimistic oracle sweep threshold."
+        ),
+    )
+    parser.add_argument(
+        "--processbench-f1-threshold-candidates",
+        type=int,
+        default=50,
+        help="Number of threshold candidates to sweep when --processbench-f1-threshold is unset.",
+    )
+    parser.add_argument(
+        "--prmbench-error-step-index-base",
+        choices=["auto", "zero_based", "one_based"],
+        default="auto",
+        help="How to interpret PRMBench preview error_steps indices.",
+    )
+    parser.add_argument(
+        "--max-truncation-over-limit-fraction",
+        type=float,
+        default=0.10,
+        help=(
+            "Fail fast if more than this fraction of benchmark texts exceed max_length. "
+            "This keeps benchmark evals from silently scoring heavily truncated inputs."
+        ),
+    )
     parser.add_argument("--dtype", default="")
     parser.add_argument("--device-map", default="")
+    parser.add_argument(
+        "--max-gpu-memory-gib",
+        type=int,
+        default=None,
+        help=(
+            "Optional per-visible-GPU memory cap forwarded to Hugging Face `max_memory`. "
+            "Useful when evaluation must coexist with other long-running jobs."
+        ),
+    )
+    parser.add_argument(
+        "--max-cpu-memory-gib",
+        type=int,
+        default=None,
+        help="Optional CPU RAM budget paired with --max-gpu-memory-gib for controlled offload.",
+    )
     parser.add_argument(
         "--require-cuda",
         action=argparse.BooleanOptionalAction,
@@ -134,6 +183,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--batch-size must be > 0")
     if args.max_length is not None and int(args.max_length) <= 8:
         raise ValueError("--max-length must be > 8")
+    if int(args.processbench_f1_threshold_candidates) <= 0:
+        raise ValueError("--processbench-f1-threshold-candidates must be > 0")
+    if args.max_gpu_memory_gib is not None and int(args.max_gpu_memory_gib) <= 0:
+        raise ValueError("--max-gpu-memory-gib must be > 0")
+    if args.max_cpu_memory_gib is not None and int(args.max_cpu_memory_gib) <= 0:
+        raise ValueError("--max-cpu-memory-gib must be > 0")
+    if not (0.0 <= float(args.max_truncation_over_limit_fraction) <= 1.0):
+        raise ValueError("--max-truncation-over-limit-fraction must be in [0, 1]")
     if float(args.feature_cache_lock_timeout_sec) <= 0.0:
         raise ValueError("--feature-cache-lock-timeout-sec must be > 0")
     return args
@@ -162,6 +219,22 @@ def main(argv: list[str] | None = None) -> int:
         run_manifest=run_manifest,
         checkpoint_name=str(args.checkpoint_name),
     )
+    requested_checkpoint_path = str(
+        dict(run_manifest.get("output_files", {})).get(
+            "best_value_head" if str(args.checkpoint_name) == "best" else "final_value_head",
+            "",
+        )
+    ).strip()
+    checkpoint_resolution = {
+        "requested_checkpoint_name": str(args.checkpoint_name),
+        "requested_checkpoint_path": requested_checkpoint_path,
+        "resolved_checkpoint_path": str(checkpoint_path),
+        "fallback_to_final": bool(
+            str(args.checkpoint_name) == "best"
+            and requested_checkpoint_path != ""
+            and Path(requested_checkpoint_path) != checkpoint_path
+        ),
+    }
     value_head, _, _ = load_value_head_checkpoint(checkpoint_path)
 
     resolved_backbone = dict(run_manifest.get("resolved_backbone", {}))
@@ -176,6 +249,24 @@ def main(argv: list[str] | None = None) -> int:
 
     dtype_name = str(args.dtype).strip() or str(resolved_backbone.get("dtype", "bfloat16"))
     device_map = str(args.device_map).strip() or str(resolved_backbone.get("device_map", "auto"))
+    max_gpu_memory_gib = (
+        int(args.max_gpu_memory_gib)
+        if args.max_gpu_memory_gib is not None
+        else (
+            int(resolved_backbone["max_gpu_memory_gib"])
+            if resolved_backbone.get("max_gpu_memory_gib") is not None
+            else None
+        )
+    )
+    max_cpu_memory_gib = (
+        int(args.max_cpu_memory_gib)
+        if args.max_cpu_memory_gib is not None
+        else (
+            int(resolved_backbone["max_cpu_memory_gib"])
+            if resolved_backbone.get("max_cpu_memory_gib") is not None
+            else None
+        )
+    )
     max_length = int(args.max_length) if args.max_length is not None else int(
         run_manifest.get("train_config", {}).get("max_length", 1024)
     )
@@ -189,12 +280,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"benchmark_type    : {benchmark_spec.benchmark_type}")
     print(f"benchmark_path    : {benchmark_path}")
     print(f"checkpoint_path   : {checkpoint_path}")
+    print(f"checkpoint_fallback: {checkpoint_resolution['fallback_to_final']}")
     print(f"model_path        : {model_path}")
     print(f"adapter_path      : {adapter_path if adapter_path is not None else '<none>'}")
     print(f"batch_size        : {args.batch_size}")
     print(f"max_length        : {max_length}")
+    print(f"trunc_overlimit_max: {float(args.max_truncation_over_limit_fraction):.4f}")
     print(f"dtype             : {dtype_name}")
     print(f"device_map        : {device_map}")
+    print(f"max_gpu_memory_gib: {max_gpu_memory_gib if max_gpu_memory_gib is not None else '<none>'}")
+    print(f"max_cpu_memory_gib: {max_cpu_memory_gib if max_cpu_memory_gib is not None else '<none>'}")
     print("=" * 88)
 
     load_start = time.perf_counter()
@@ -203,6 +298,8 @@ def main(argv: list[str] | None = None) -> int:
         adapter_path=adapter_path,
         dtype_name=dtype_name,
         device_map=device_map,
+        max_gpu_memory_gib=max_gpu_memory_gib,
+        max_cpu_memory_gib=max_cpu_memory_gib,
         torch_module=torch,
         AutoModelForCausalLM=AutoModelForCausalLM,
         AutoTokenizer=AutoTokenizer,
@@ -242,7 +339,7 @@ def main(argv: list[str] | None = None) -> int:
     # 1. ProcessBench 需要先把一题展开成多个 prefix
     # 2. PRMBench_Preview 则直接对 chosen/rejected pair 打分
     if benchmark_spec.benchmark_type == "processbench":
-        metrics, scored_rows = _eval_processbench(
+        metrics, scored_rows, truncation_diagnostics = _eval_processbench(
             benchmark_path=benchmark_path,
             max_samples=args.max_samples,
             backbone=backbone,
@@ -250,6 +347,9 @@ def main(argv: list[str] | None = None) -> int:
             value_head=value_head,
             batch_size=int(args.batch_size),
             max_length=int(max_length),
+            processbench_f1_threshold=args.processbench_f1_threshold,
+            processbench_f1_threshold_candidates=int(args.processbench_f1_threshold_candidates),
+            max_truncation_over_limit_fraction=float(args.max_truncation_over_limit_fraction),
             feature_cache_root=Path(args.feature_cache_root),
             feature_cache_mode=str(args.feature_cache_mode),
             lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
@@ -258,7 +358,7 @@ def main(argv: list[str] | None = None) -> int:
             feature_cache_stats=feature_cache_stats,
         )
     elif benchmark_spec.benchmark_type == "prmbench_preview":
-        metrics, scored_rows = _eval_prmbench_preview(
+        metrics, scored_rows, truncation_diagnostics = _eval_prmbench_preview(
             benchmark_path=benchmark_path,
             max_samples=args.max_samples,
             backbone=backbone,
@@ -266,6 +366,8 @@ def main(argv: list[str] | None = None) -> int:
             value_head=value_head,
             batch_size=int(args.batch_size),
             max_length=int(max_length),
+            prmbench_error_step_index_base=str(args.prmbench_error_step_index_base),
+            max_truncation_over_limit_fraction=float(args.max_truncation_over_limit_fraction),
             feature_cache_root=Path(args.feature_cache_root),
             feature_cache_mode=str(args.feature_cache_mode),
             lock_timeout_sec=float(args.feature_cache_lock_timeout_sec),
@@ -291,7 +393,9 @@ def main(argv: list[str] | None = None) -> int:
         "benchmark_path": str(benchmark_path),
         "value_run_dir": str(args.value_run_dir),
         "checkpoint_path": str(checkpoint_path),
+        "checkpoint_resolution": checkpoint_resolution,
         "metrics": metrics,
+        "truncation_diagnostics": truncation_diagnostics,
         "feature_cache_stats": feature_cache_stats,
         "model_load_elapsed_sec": float(load_elapsed),
     }
@@ -301,6 +405,14 @@ def main(argv: list[str] | None = None) -> int:
         "value_run_dir": str(args.value_run_dir),
         "benchmark_spec": benchmark_spec.to_dict(),
         "benchmark_path": str(benchmark_path),
+        "checkpoint_resolution": checkpoint_resolution,
+        "processbench_f1_threshold": (
+            None if args.processbench_f1_threshold is None else float(args.processbench_f1_threshold)
+        ),
+        "processbench_f1_threshold_candidates": int(args.processbench_f1_threshold_candidates),
+        "prmbench_error_step_index_base": str(args.prmbench_error_step_index_base),
+        "max_truncation_over_limit_fraction": float(args.max_truncation_over_limit_fraction),
+        "truncation_diagnostics": truncation_diagnostics,
         "output_files": {
             "metrics": str(metrics_path),
             "summary": str(summary_path),
@@ -311,8 +423,7 @@ def main(argv: list[str] | None = None) -> int:
     metrics_path.write_text(json.dumps(metrics, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     manifest_out_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    summary_md_path.write_text(
-        render_phase_e_benchmark_summary_markdown(
+    summary_md = render_phase_e_benchmark_summary_markdown(
             title=f"Phase E Benchmark Eval: {benchmark_spec.benchmark_id}",
             metadata={
                 "value_run_dir": args.value_run_dir,
@@ -320,9 +431,9 @@ def main(argv: list[str] | None = None) -> int:
                 "benchmark_path": benchmark_path,
             },
             metrics=metrics,
-        ),
-        encoding="utf-8",
     )
+    summary_md += _render_text_truncation_markdown(truncation_diagnostics)
+    summary_md_path.write_text(summary_md, encoding="utf-8")
     with scored_rows_path.open("w", encoding="utf-8") as handle:
         for row in scored_rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -347,13 +458,16 @@ def _eval_processbench(
     value_head: Any,
     batch_size: int,
     max_length: int,
+    processbench_f1_threshold: float | None,
+    processbench_f1_threshold_candidates: int,
+    max_truncation_over_limit_fraction: float,
     feature_cache_root: Path,
     feature_cache_mode: str,
     lock_timeout_sec: float,
     backbone_signature: dict[str, Any],
     torch_module: Any,
     feature_cache_stats: dict[str, Any],
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     """Evaluate one checkpoint on ProcessBench-style prefix data.
 
     中文
@@ -367,6 +481,23 @@ def _eval_processbench(
     examples = load_processbench_examples(benchmark_path, max_samples=max_samples)
     rows = build_processbench_prefix_records(examples)
     texts = [row.input_text() for row in rows]
+    truncation_diagnostics = compute_text_truncation_diagnostics(
+        texts=texts,
+        tokenizer=tokenizer,
+        max_length=int(max_length),
+        batch_size=int(batch_size),
+        group_labels=[
+            "good_prefix"
+            if bool(row.is_good_prefix)
+            else ("first_bad_prefix" if bool(row.is_first_bad_prefix) else "bad_prefix")
+            for row in rows
+        ],
+    )
+    validate_text_truncation_diagnostics(
+        diagnostics=truncation_diagnostics,
+        context_label="Phase E benchmark eval (ProcessBench)",
+        max_allowed_over_limit_fraction=float(max_truncation_over_limit_fraction),
+    )
     features = load_or_encode_text_features(
         cache_namespace="phase_e_processbench_eval",
         cache_kind="processbench_prefixes",
@@ -392,7 +523,12 @@ def _eval_processbench(
         batch_size=int(batch_size),
         torch_module=torch_module,
     )
-    metrics = compute_processbench_metrics(rows, scores)
+    metrics = compute_processbench_metrics(
+        rows,
+        scores,
+        processbench_f1_threshold=processbench_f1_threshold,
+        processbench_f1_threshold_candidates=int(processbench_f1_threshold_candidates),
+    )
     scored_rows = [
         {
             "row_id": row.row_id,
@@ -405,7 +541,7 @@ def _eval_processbench(
         }
         for row, score in zip(rows, scores, strict=True)
     ]
-    return metrics, scored_rows
+    return metrics, scored_rows, truncation_diagnostics
 
 
 def _eval_prmbench_preview(
@@ -417,13 +553,15 @@ def _eval_prmbench_preview(
     value_head: Any,
     batch_size: int,
     max_length: int,
+    prmbench_error_step_index_base: str,
+    max_truncation_over_limit_fraction: float,
     feature_cache_root: Path,
     feature_cache_mode: str,
     lock_timeout_sec: float,
     backbone_signature: dict[str, Any],
     torch_module: Any,
     feature_cache_stats: dict[str, Any],
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     """Evaluate one checkpoint on PRMBench_Preview explicit pairs.
 
     中文
@@ -431,9 +569,25 @@ def _eval_prmbench_preview(
     与 ProcessBench 路径不同，这里不需要先展开 prefix 序列，因为输入已经是
     显式 chosen/rejected pair。
     """
-    rows = load_prmbench_preview_pairs(benchmark_path, max_samples=max_samples)
+    rows = load_prmbench_preview_pairs(
+        benchmark_path,
+        max_samples=max_samples,
+        error_step_index_base=prmbench_error_step_index_base,
+    )
     chosen_texts = [row.chosen_input_text() for row in rows]
     rejected_texts = [row.rejected_input_text() for row in rows]
+    truncation_diagnostics = compute_text_truncation_diagnostics(
+        texts=[*chosen_texts, *rejected_texts],
+        tokenizer=tokenizer,
+        max_length=int(max_length),
+        batch_size=int(batch_size),
+        group_labels=(["chosen"] * len(chosen_texts)) + (["rejected"] * len(rejected_texts)),
+    )
+    validate_text_truncation_diagnostics(
+        diagnostics=truncation_diagnostics,
+        context_label="Phase E benchmark eval (PRMBench_Preview)",
+        max_allowed_over_limit_fraction=float(max_truncation_over_limit_fraction),
+    )
     chosen_features = load_or_encode_text_features(
         cache_namespace="phase_e_prmbench_preview_eval",
         cache_kind="prmbench_chosen",
@@ -490,7 +644,35 @@ def _eval_prmbench_preview(
         }
         for row, chosen, rejected in zip(rows, chosen_scores, rejected_scores, strict=True)
     ]
-    return metrics, scored_rows
+    return metrics, scored_rows, truncation_diagnostics
+
+
+def _render_text_truncation_markdown(diagnostics: dict[str, Any]) -> str:
+    """Render one compact Markdown appendix for text-level truncation diagnostics."""
+    overall = dict(diagnostics["overall"])
+    lines = [
+        "",
+        "## Truncation Diagnostics",
+        "",
+        f"- frac_texts_over_limit: `{float(overall['frac_texts_over_limit']):.6f}`",
+        f"- text_length_p95: `{int(overall['text_length']['p95'])}`",
+    ]
+    by_group = dict(diagnostics.get("by_group", {}))
+    if by_group:
+        lines.extend(
+            [
+                "",
+                "| group | frac_over_limit | text_length_p95 |",
+                "|---|---:|---:|",
+            ]
+        )
+        for group_label, payload in by_group.items():
+            lines.append(
+                f"| {group_label} | {float(payload['frac_texts_over_limit']):.4f} | "
+                f"{int(payload['text_length']['p95'])} |"
+            )
+    lines.append("")
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

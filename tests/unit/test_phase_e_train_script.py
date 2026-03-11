@@ -82,6 +82,8 @@ def test_phase_e_train_parse_args_accepts_head_options(tmp_path: Path) -> None:
             str(eval_path),
             "--model-path",
             "assets/models/Qwen2.5-7B-Instruct",
+            "--ranking-target-space",
+            "logit",
             "--head-architecture",
             "mlp",
             "--head-mlp-hidden-size",
@@ -90,12 +92,19 @@ def test_phase_e_train_parse_args_accepts_head_options(tmp_path: Path) -> None:
             "0.1",
             "--head-activation",
             "relu",
+            "--head-inference-alpha",
+            "0.35",
+            "--reward-centering-weight",
+            "0.01",
         ]
     )
+    assert args.ranking_target_space == "logit"
     assert args.head_architecture == "mlp"
     assert args.head_mlp_hidden_size == 256
     assert args.head_dropout_prob == 0.1
     assert args.head_activation == "relu"
+    assert args.head_inference_alpha == 0.35
+    assert args.reward_centering_weight == 0.01
 
 
 def test_phase_e_train_initialize_value_head_from_checkpoint(tmp_path: Path) -> None:

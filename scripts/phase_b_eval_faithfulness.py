@@ -68,8 +68,10 @@ from ours.phase_b.value_data import (  # noqa: E402
 )
 from ours.phase_b.value_head import (  # noqa: E402
     encode_text_features,
+    ensure_tokenizer_has_pad_token,
     freeze_backbone,
     load_value_head_checkpoint,
+    maybe_resize_embeddings_for_tokenizer,
     resolve_model_input_device,
 )
 
@@ -225,11 +227,7 @@ def main(argv: list[str] | None = None) -> int:
         adapter_path=(Path(resolved["adapter_path"]) if resolved.get("adapter_path") else None),
     )
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-    if tokenizer.pad_token_id is None:
-        if tokenizer.eos_token is not None:
-            tokenizer.pad_token = tokenizer.eos_token
-        else:
-            tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+    synthesized_pad_token = ensure_tokenizer_has_pad_token(tokenizer)
 
     dtype = _resolve_dtype(str(resolved["dtype"]), torch)
     model_load_kwargs: dict[str, Any] = {
@@ -243,6 +241,8 @@ def main(argv: list[str] | None = None) -> int:
         model_load_kwargs["torch_dtype"] = dtype
 
     backbone = AutoModelForCausalLM.from_pretrained(str(resolved["model_path"]), **model_load_kwargs)
+    if synthesized_pad_token:
+        maybe_resize_embeddings_for_tokenizer(backbone=backbone, tokenizer=tokenizer)
     adapter_path = resolved.get("adapter_path")
     if adapter_path:
         backbone = _attach_peft_adapter_for_inference(backbone, Path(adapter_path))

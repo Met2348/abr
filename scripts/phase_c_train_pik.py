@@ -103,8 +103,10 @@ from ours.phase_b.value_head import (  # noqa: E402
     SigmoidValueHead,
     ValueHeadConfig,
     encode_text_features,
+    ensure_tokenizer_has_pad_token,
     freeze_backbone,
     infer_backbone_hidden_size,
+    maybe_resize_embeddings_for_tokenizer,
     save_value_head_checkpoint,
     write_value_head_config_json,
 )
@@ -427,11 +429,7 @@ def main(argv: list[str] | None = None) -> int:
     resolved_dtype = _resolve_dtype(args.dtype, torch)
     tokenizer_path = _resolve_tokenizer_load_path(model_path=model_path, adapter_path=(Path(adapter_path) if adapter_path else None))
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-    if tokenizer.pad_token_id is None:
-        if tokenizer.eos_token is not None:
-            tokenizer.pad_token = tokenizer.eos_token
-        else:
-            tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+    synthesized_pad_token = ensure_tokenizer_has_pad_token(tokenizer)
 
     model_load_kwargs: dict[str, Any] = {
         "device_map": args.device_map,
@@ -444,6 +442,8 @@ def main(argv: list[str] | None = None) -> int:
         model_load_kwargs["torch_dtype"] = resolved_dtype
 
     backbone = AutoModelForCausalLM.from_pretrained(model_path, **model_load_kwargs)
+    if synthesized_pad_token:
+        maybe_resize_embeddings_for_tokenizer(backbone=backbone, tokenizer=tokenizer)
     if adapter_path is not None:
         backbone = _attach_peft_adapter_for_inference(backbone, Path(adapter_path))
     freeze_backbone(backbone)
@@ -1038,6 +1038,7 @@ def _evaluate_pik_head(
             torch_module=torch_module,
         )
         scores = [float(v) for v in scores_tensor.detach().cpu().tolist()]
+        logits = [float(v) for v in logits_tensor.detach().cpu().tolist()]
     target_scores = [float(v) for v in eval_cache["targets"].detach().cpu().tolist()]
 
     calibration_raw = compute_calibration_summary(
@@ -1085,14 +1086,15 @@ def _evaluate_pik_head(
         known_auc_posthoc = compute_binary_auc(scores=posthoc_scores, labels=known_labels)
 
     rows: list[dict[str, Any]] = []
-    for idx, (example, score) in enumerate(zip(eval_examples, scores, strict=True)):
+    for idx, (example, score, logit) in enumerate(zip(eval_examples, scores, logits, strict=True)):
         row = {
             "sample_id": example.sample_id,
             "dataset": example.dataset,
             "split": example.split,
             "question": example.question,
             "predicted_value": float(score),
-            "predicted_value_raw": float(score),
+            "predicted_value_raw": float(logit),
+            "predicted_logit": float(logit),
             "target_success_rate": float(example.target_success_rate),
             "target_parseable_rate": float(example.target_parseable_rate),
             "target_k_rollouts": int(example.target_k_rollouts),
