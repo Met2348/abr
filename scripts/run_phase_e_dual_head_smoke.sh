@@ -8,8 +8,16 @@
 # -------
 # Validates that `dual_head` architecture with pair_semantics routing
 # (local_proj for first_bad/fanout/grid pairs, terminal_proj for terminal_anchor
-# pairs) outperforms or matches mlp baseline on ProcessBench after the routing
-# logic was confirmed implemented in training.py.
+# pairs) can be tested under the *safe* Phase E recipe defaults after the
+# routing logic was confirmed implemented in training.py.
+#
+# Important safety note:
+#   - Older versions of this wrapper used the audited-dangerous combo
+#     `logit + confidence_semantic + ranking_score`.
+#   - Those settings are no longer the default because they can produce flat
+#     loss / inverted ProcessBench behavior and silently pollute conclusions.
+#   - If someone wants to reproduce that failure mode, they must now do so
+#     explicitly by overriding the flags on purpose.
 #
 # Prerequisites:
 #   - ms_align_v1 pair artifact already curated (reused from PBR2a)
@@ -22,8 +30,14 @@
 # 中文
 # ----
 # 验证 dual_head 架构加 pair_semantics 路由（local_proj 接 first_bad/fanout/grid，
-# terminal_proj 接 terminal_anchor）是否优于 mlp 基线。
-# 前置条件：ms_align_v1 pair artifact 已经由 PBR2a 准备好，直接复用。
+# terminal_proj 接 terminal_anchor）在 **安全默认配方** 下能否工作。
+#
+# 安全提醒：
+#   - 旧版脚本默认使用过已被审计判定危险的组合：
+#     `logit + confidence_semantic + ranking_score`
+#   - 那套组合会造成 loss 变平、ProcessBench 指标倒置等问题；
+#   - 现在默认不再允许它悄悄回流进新实验。若确实要复现旧坏例，
+#     必须显式覆写参数，不能再依赖默认值。
 #
 set -euo pipefail
 
@@ -47,7 +61,7 @@ MAX_LENGTH="${MAX_LENGTH:-1024}"
 HEAD_MLP_HIDDEN_SIZE="${HEAD_MLP_HIDDEN_SIZE:-1024}"
 HEAD_DROPOUT_PROB="${HEAD_DROPOUT_PROB:-0.05}"
 BENCH_MAX_SAMPLES="${BENCH_MAX_SAMPLES:-96}"
-RECIPE_RISK_POLICY="${RECIPE_RISK_POLICY:-warn}"
+RECIPE_RISK_POLICY="${RECIPE_RISK_POLICY:-error}"
 
 # Reuse the existing ms_align_v1 artifact from PBR2a.
 # If the PBR2a version not found, fall back to the PBR research version.
@@ -98,11 +112,11 @@ run_train() {
     --lambda-ranking 1.0 \
     --lambda-bce 1.0 \
     --ranking-margin 0.02 \
-    --ranking-target-space logit \
-    --pair-weight-mode confidence_semantic \
+    --ranking-target-space score \
+    --pair-weight-mode none \
     --source-balance none \
     --permutation-mode stable_hash \
-    --checkpoint-selection-metric ranking_score \
+    --checkpoint-selection-metric pair_acc \
     --seed $seed \
     --feature-cache-root $FEATURE_CACHE_ROOT \
     --feature-cache-mode read_write \
@@ -131,11 +145,11 @@ run_train() {
     --lambda-ranking 1.0 \
     --lambda-bce 1.0 \
     --ranking-margin 0.02 \
-    --ranking-target-space logit \
-    --pair-weight-mode confidence_semantic \
+    --ranking-target-space score \
+    --pair-weight-mode none \
     --source-balance none \
     --permutation-mode stable_hash \
-    --checkpoint-selection-metric ranking_score \
+    --checkpoint-selection-metric pair_acc \
     --seed "$seed" \
     --feature-cache-root "$FEATURE_CACHE_ROOT" \
     --feature-cache-mode read_write \

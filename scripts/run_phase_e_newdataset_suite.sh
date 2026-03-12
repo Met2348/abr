@@ -187,7 +187,11 @@ run_train() {
   local eval_jsonl="$3"
   local ranking_target_space="${4:-logit}"
   local pair_weight_mode="${5:-confidence_semantic}"
-  local checkpoint_selection_metric="${6:-ranking_score}"
+  # 安全默认值使用 pair_acc，避免把 ranking_score 这种更偏诊断用途的指标
+  # 静默扩散到新的数据集基线实验。
+  # Default to pair_acc so diagnostic-oriented ranking_score does not silently
+  # become the baseline selector for new-dataset experiments.
+  local checkpoint_selection_metric="${6:-pair_acc}"
   local run_name="${RUN_PREFIX}_${case_id}_value"
   local cmd=(
     "$PYTHON_BIN" -u scripts/phase_e_train_value.py

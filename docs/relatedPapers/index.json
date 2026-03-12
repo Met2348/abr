@@ -1,0 +1,1332 @@
+{
+  "generated_at": "2026-03-12T16:18:14+0800",
+  "run_name": "related_papers_sync_0312_1618",
+  "docs_root": "docs",
+  "output_dir": "docs/relatedPapers",
+  "download_enabled": true,
+  "counts": {
+    "total_urls": 106,
+    "already_present": 101,
+    "downloaded": 5,
+    "failed": 0,
+    "unresolved": 0,
+    "pending": 0
+  },
+  "entries": [
+    {
+      "source_url": "https://aclanthology.org/2024.acl-long.510.pdf",
+      "pdf_url": "https://aclanthology.org/2024.acl-long.510.pdf",
+      "filename": "2024.acl-long.510.pdf",
+      "origin_paths": [
+        "docs/literature_synthesis_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://aclanthology.org/2024.acl-long.510/",
+      "pdf_url": "https://aclanthology.org/2024.acl-long.510.pdf",
+      "filename": "2024.acl-long.510.pdf",
+      "origin_paths": [
+        "docs/phase_C_fix_value_head.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://aclanthology.org/2024.emnlp-main.125/",
+      "pdf_url": "https://aclanthology.org/2024.emnlp-main.125.pdf",
+      "filename": "2024.emnlp-main.125.pdf",
+      "origin_paths": [
+        "docs/phase_C_fix_value_head.md",
+        "docs/phase_C_plan.md",
+        "docs/phase_E_multisource_math_plan.md",
+        "docs/readme_full.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://aclanthology.org/2025.acl-long.1102/",
+      "pdf_url": "https://aclanthology.org/2025.acl-long.1102.pdf",
+      "filename": "2025.acl-long.1102.pdf",
+      "origin_paths": [
+        "docs/phase_e_frontier_paradigms_and_experiments_20260311.md",
+        "docs/phase_e_literature_refresh_20260311.md",
+        "docs/phase_e_rl_ready_research_redesign_20260311.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://aclanthology.org/2025.acl-long.50.pdf",
+      "pdf_url": "https://aclanthology.org/2025.acl-long.50.pdf",
+      "filename": "2025.acl-long.50.pdf",
+      "origin_paths": [
+        "docs/phase_e_rl_ready_research_redesign_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://aclanthology.org/2025.acl-long.50/",
+      "pdf_url": "https://aclanthology.org/2025.acl-long.50.pdf",
+      "filename": "2025.acl-long.50.pdf",
+      "origin_paths": [
+        "docs/phase_abcde_impl_audit_and_redesign_20260311.md",
+        "docs/phase_abcdef_audit_research_redesign_20260312.md",
+        "docs/phase_e_internet_research_20260311.md",
+        "docs/progress_detailed.md",
+        "docs/readme_full.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://aclanthology.org/2025.findings-acl.1249.pdf",
+      "pdf_url": "https://aclanthology.org/2025.findings-acl.1249.pdf",
+      "filename": "2025.findings-acl.1249.pdf",
+      "origin_paths": [
+        "docs/research_survey_processverifier_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://aclanthology.org/2025.findings-acl.464.pdf",
+      "pdf_url": "https://aclanthology.org/2025.findings-acl.464.pdf",
+      "filename": "2025.findings-acl.464.pdf",
+      "origin_paths": [
+        "docs/literature_refresh_20260312_prm_rl.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://aclanthology.org/2025.findings-acl.747/",
+      "pdf_url": "https://aclanthology.org/2025.findings-acl.747.pdf",
+      "filename": "2025.findings-acl.747.pdf",
+      "origin_paths": [
+        "docs/literature_synthesis_20260312_prm_rl_grpo.md"
+      ],
+      "status": "downloaded",
+      "note": "path=docs/relatedPapers/2025.findings-acl.747.pdf; sha256=b4c44dd1d318390b4bf44e61d5a959797f7f08f516ff63819f7a301479f39017"
+    },
+    {
+      "source_url": "https://arxiv.org/abs/1705.07115",
+      "pdf_url": "https://arxiv.org/pdf/1705.07115.pdf",
+      "filename": "1705.07115.pdf",
+      "origin_paths": [
+        "docs/phase_C_plan.md",
+        "docs/readme_full.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2002.05202",
+      "pdf_url": "https://arxiv.org/pdf/2002.05202.pdf",
+      "filename": "2002.05202.pdf",
+      "origin_paths": [
+        "docs/literature_synthesis_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2110.14168",
+      "pdf_url": "https://arxiv.org/pdf/2110.14168.pdf",
+      "filename": "2110.14168.pdf",
+      "origin_paths": [
+        "docs/phase_C_fix_value_head.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2203.02155",
+      "pdf_url": "https://arxiv.org/pdf/2203.02155.pdf",
+      "filename": "2203.02155.pdf",
+      "origin_paths": [
+        "docs/phase_E_plan.md",
+        "docs/phase_F_plan.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2203.14465",
+      "pdf_url": "https://arxiv.org/pdf/2203.14465.pdf",
+      "filename": "2203.14465.pdf",
+      "origin_paths": [
+        "docs/phase_C_fix_value_head.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2207.05221",
+      "pdf_url": "https://arxiv.org/pdf/2207.05221.pdf",
+      "filename": "2207.05221.pdf",
+      "origin_paths": [
+        "docs/phase_C_plan.md",
+        "docs/phase_E_multisource_math_plan.md",
+        "docs/phase_E_plan.md",
+        "docs/readme_full.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2210.10760",
+      "pdf_url": "https://arxiv.org/pdf/2210.10760.pdf",
+      "filename": "2210.10760.pdf",
+      "origin_paths": [
+        "docs/literature_synthesis_20260311.md",
+        "docs/phase_E_plan.md",
+        "docs/phase_F_plan.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2211.14275",
+      "pdf_url": "https://arxiv.org/pdf/2211.14275.pdf",
+      "filename": "2211.14275.pdf",
+      "origin_paths": [
+        "docs/phase_C_fix_value_head.md",
+        "docs/phase_C_plan.md",
+        "docs/phase_D_plan.md",
+        "docs/readme_full.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2212.08073",
+      "pdf_url": "https://arxiv.org/pdf/2212.08073.pdf",
+      "filename": "2212.08073.pdf",
+      "origin_paths": [
+        "docs/phase_C_fix_value_head.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2305.20050",
+      "pdf_url": "https://arxiv.org/pdf/2305.20050.pdf",
+      "filename": "2305.20050.pdf",
+      "origin_paths": [
+        "docs/dataset_survey_stepwise_pairs_20260311.md",
+        "docs/literature_synthesis_20260311.md",
+        "docs/phase_C_fix_value_head.md",
+        "docs/phase_C_plan.md",
+        "docs/phase_D_plan.md",
+        "docs/phase_E_multisource_math_plan.md",
+        "docs/phase_E_plan.md",
+        "docs/phase_F_plan.md",
+        "docs/phase_abcde_impl_audit_and_redesign_20260311.md",
+        "docs/phase_abcdef_audit_research_redesign_20260312.md",
+        "docs/phase_e_internet_research_20260311.md",
+        "docs/processbench_transfer_20260311.md",
+        "docs/readme_full.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2307.09288",
+      "pdf_url": "https://arxiv.org/pdf/2307.09288.pdf",
+      "filename": "2307.09288.pdf",
+      "origin_paths": [
+        "docs/phase_F_plan.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2308.08747",
+      "pdf_url": "https://arxiv.org/pdf/2308.08747.pdf",
+      "filename": "2308.08747.pdf",
+      "origin_paths": [
+        "docs/phase_B_report.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2310.02743",
+      "pdf_url": "https://arxiv.org/pdf/2310.02743.pdf",
+      "filename": "2310.02743.pdf",
+      "origin_paths": [
+        "docs/phase_E_plan.md",
+        "docs/phase_F_plan.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2312.08935",
+      "pdf_url": "https://arxiv.org/pdf/2312.08935.pdf",
+      "filename": "2312.08935.pdf",
+      "origin_paths": [
+        "docs/dataset_survey_stepwise_pairs_20260311.md",
+        "docs/new_dataset_experiment_plan_20260311.md",
+        "docs/phase_E_multisource_math_plan.md",
+        "docs/phase_E_plan.md",
+        "docs/phase_F_plan.md",
+        "docs/phase_e_internet_research_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2401.10020",
+      "pdf_url": "https://arxiv.org/pdf/2401.10020.pdf",
+      "filename": "2401.10020.pdf",
+      "origin_paths": [
+        "docs/phase_C_fix_value_head.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2402.00782",
+      "pdf_url": "https://arxiv.org/pdf/2402.00782.pdf",
+      "filename": "2402.00782.pdf",
+      "origin_paths": [
+        "docs/phase_E_plan.md",
+        "docs/phase_F_plan.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2402.03300",
+      "pdf_url": "https://arxiv.org/pdf/2402.03300.pdf",
+      "filename": "2402.03300.pdf",
+      "origin_paths": [
+        "docs/literature_refresh_20260312_prm_rl.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2404.02078",
+      "pdf_url": "https://arxiv.org/pdf/2404.02078.pdf",
+      "filename": "2404.02078.pdf",
+      "origin_paths": [
+        "docs/dataset_survey_stepwise_pairs_20260311.md",
+        "docs/new_dataset_experiment_plan_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2406.03816",
+      "pdf_url": "https://arxiv.org/pdf/2406.03816.pdf",
+      "filename": "2406.03816.pdf",
+      "origin_paths": [
+        "docs/phase_E_multisource_math_plan.md",
+        "docs/readme_full.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2406.06592",
+      "pdf_url": "https://arxiv.org/pdf/2406.06592.pdf",
+      "filename": "2406.06592.pdf",
+      "origin_paths": [
+        "docs/bcr_feasibility_review_20260311.md",
+        "docs/dataset_survey_stepwise_pairs_20260311.md",
+        "docs/literature_refresh_20260312_prm_rl.md",
+        "docs/literature_synthesis_20260311.md",
+        "docs/new_dataset_experiment_plan_20260311.md",
+        "docs/phase_E_multisource_math_plan.md",
+        "docs/phase_E_plan.md",
+        "docs/phase_F_plan.md",
+        "docs/phase_abcde_impl_audit_and_redesign_20260311.md",
+        "docs/processbench_transfer_20260311.md",
+        "docs/readme_full.md",
+        "docs/research_survey_processverifier_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2406.08391",
+      "pdf_url": "https://arxiv.org/pdf/2406.08391.pdf",
+      "filename": "2406.08391.pdf",
+      "origin_paths": [
+        "docs/phase_E_multisource_math_plan.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2406.10858",
+      "pdf_url": "https://arxiv.org/pdf/2406.10858.pdf",
+      "filename": "2406.10858.pdf",
+      "origin_paths": [
+        "docs/phase_E_plan.md",
+        "docs/phase_F_plan.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2406.18629",
+      "pdf_url": "https://arxiv.org/pdf/2406.18629.pdf",
+      "filename": "2406.18629.pdf",
+      "origin_paths": [
+        "docs/dataset_survey_stepwise_pairs_20260311.md",
+        "docs/new_dataset_experiment_plan_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2407.00390",
+      "pdf_url": "https://arxiv.org/pdf/2407.00390.pdf",
+      "filename": "2407.00390.pdf",
+      "origin_paths": [
+        "docs/phase_E_multisource_math_plan.md",
+        "docs/phase_abcde_impl_audit_and_redesign_20260311.md",
+        "docs/phase_abcdef_audit_research_redesign_20260312.md",
+        "docs/phase_e_internet_research_20260311.md",
+        "docs/phase_e_rl_ready_research_redesign_20260311.md",
+        "docs/progress_detailed.md",
+        "docs/readme_full.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2409.12122",
+      "pdf_url": "https://arxiv.org/pdf/2409.12122.pdf",
+      "filename": "2409.12122.pdf",
+      "origin_paths": [
+        "docs/phase_E_multisource_math_plan.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2410.08146",
+      "pdf_url": "https://arxiv.org/pdf/2410.08146.pdf",
+      "filename": "2410.08146.pdf",
+      "origin_paths": [
+        "docs/literature_synthesis_20260311.md",
+        "docs/literature_synthesis_20260312_prm_rl_grpo.md",
+        "docs/phase_C_plan.md",
+        "docs/phase_E_multisource_math_plan.md",
+        "docs/phase_abcde_impl_audit_and_redesign_20260311.md",
+        "docs/phase_abcdef_audit_research_redesign_20260312.md",
+        "docs/phase_e_internet_research_20260311.md",
+        "docs/phase_e_rl_ready_research_redesign_20260311.md",
+        "docs/progress_detailed.md",
+        "docs/readme_full.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2410.11287",
+      "pdf_url": "https://arxiv.org/pdf/2410.11287.pdf",
+      "filename": "2410.11287.pdf",
+      "origin_paths": [
+        "docs/literature_refresh_20260312_prm_rl.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2410.15115",
+      "pdf_url": "https://arxiv.org/pdf/2410.15115.pdf",
+      "filename": "2410.15115.pdf",
+      "origin_paths": [
+        "docs/literature_synthesis_20260311.md",
+        "docs/literature_synthesis_20260312_prm_rl_grpo.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2412.01981",
+      "pdf_url": "https://arxiv.org/pdf/2412.01981.pdf",
+      "filename": "2412.01981.pdf",
+      "origin_paths": [
+        "docs/dataset_survey_stepwise_pairs_20260311.md",
+        "docs/literature_refresh_20260312_prm_rl.md",
+        "docs/new_dataset_experiment_plan_20260311.md",
+        "docs/phase_E_multisource_math_plan.md",
+        "docs/phase_F_plan.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2412.06559",
+      "pdf_url": "https://arxiv.org/pdf/2412.06559.pdf",
+      "filename": "2412.06559.pdf",
+      "origin_paths": [
+        "docs/bcr_feasibility_review_20260311.md",
+        "docs/literature_synthesis_20260311.md",
+        "docs/phase_C_fix_value_head.md",
+        "docs/phase_D_plan.md",
+        "docs/phase_D_ppt_2slides.md",
+        "docs/phase_E_multisource_math_plan.md",
+        "docs/phase_E_plan.md",
+        "docs/phase_F_plan.md",
+        "docs/phase_e_judge_llm_selection_20260311.md",
+        "docs/processbench_transfer_20260311.md",
+        "docs/readme_full.md",
+        "docs/research_survey_processverifier_20260311.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2412.11006",
+      "pdf_url": "https://arxiv.org/pdf/2412.11006.pdf",
+      "filename": "2412.11006.pdf",
+      "origin_paths": [
+        "docs/literature_refresh_20260312_prm_rl.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2501.02446",
+      "pdf_url": "https://arxiv.org/pdf/2501.02446.pdf",
+      "filename": "2501.02446.pdf",
+      "origin_paths": [
+        "docs/phase_F_plan.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2501.03124",
+      "pdf_url": "https://arxiv.org/pdf/2501.03124.pdf",
+      "filename": "2501.03124.pdf",
+      "origin_paths": [
+        "docs/phase_C_fix_value_head.md",
+        "docs/phase_D_plan.md",
+        "docs/phase_E_multisource_math_plan.md",
+        "docs/phase_E_plan.md",
+        "docs/phase_F_plan.md",
+        "docs/phase_abcde_impl_audit_and_redesign_20260311.md",
+        "docs/phase_abcdef_audit_research_redesign_20260312.md",
+        "docs/phase_e_internet_research_20260311.md",
+        "docs/processbench_transfer_20260311.md",
+        "docs/progress_detailed.md",
+        "docs/readme_full.md",
+        "docs/research_survey_processverifier_20260311.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2501.07301",
+      "pdf_url": "https://arxiv.org/pdf/2501.07301.pdf",
+      "filename": "2501.07301.pdf",
+      "origin_paths": [
+        "docs/dataset_survey_stepwise_pairs_20260311.md",
+        "docs/literature_synthesis_20260311.md",
+        "docs/new_dataset_experiment_plan_20260311.md",
+        "docs/phase_C_fix_value_head.md",
+        "docs/phase_D_plan.md",
+        "docs/phase_E_multisource_math_plan.md",
+        "docs/phase_E_plan.md",
+        "docs/phase_F_plan.md",
+        "docs/phase_abcde_impl_audit_and_redesign_20260311.md",
+        "docs/phase_abcdef_audit_research_redesign_20260312.md",
+        "docs/phase_e_internet_research_20260311.md",
+        "docs/phase_e_judge_llm_selection_20260311.md",
+        "docs/phase_e_rl_ready_research_redesign_20260311.md",
+        "docs/processbench_transfer_20260311.md",
+        "docs/progress_detailed.md",
+        "docs/readme_full.md",
+        "docs/research_survey_processverifier_20260311.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2501.11690",
+      "pdf_url": "https://arxiv.org/pdf/2501.11690.pdf",
+      "filename": "2501.11690.pdf",
+      "origin_paths": [
+        "docs/phase_E_plan.md",
+        "docs/processbench_transfer_20260311.md",
+        "docs/readme_full.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2501.12948",
+      "pdf_url": "https://arxiv.org/pdf/2501.12948.pdf",
+      "filename": "2501.12948.pdf",
+      "origin_paths": [
+        "docs/literature_refresh_20260312_prm_rl.md",
+        "docs/literature_synthesis_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2501.13622",
+      "pdf_url": "https://arxiv.org/pdf/2501.13622.pdf",
+      "filename": "2501.13622.pdf",
+      "origin_paths": [
+        "docs/literature_refresh_20260312_prm_rl.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2501.15407",
+      "pdf_url": "https://arxiv.org/pdf/2501.15407.pdf",
+      "filename": "2501.15407.pdf",
+      "origin_paths": [
+        "docs/phase_F_plan.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2502.01456",
+      "pdf_url": "https://arxiv.org/pdf/2502.01456.pdf",
+      "filename": "2502.01456.pdf",
+      "origin_paths": [
+        "docs/bcr_feasibility_review_20260311.md",
+        "docs/literature_refresh_20260312_prm_rl.md",
+        "docs/literature_synthesis_20260311.md",
+        "docs/literature_synthesis_20260312_prm_rl_grpo.md",
+        "docs/phase_E_plan.md",
+        "docs/phase_e_phase_f_best_practice_refresh_20260312.md",
+        "docs/research_survey_processverifier_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2502.06042",
+      "pdf_url": "https://arxiv.org/pdf/2502.06042.pdf",
+      "filename": "2502.06042.pdf",
+      "origin_paths": [
+        "docs/phase_B_report.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2502.06737",
+      "pdf_url": "https://arxiv.org/pdf/2502.06737.pdf",
+      "filename": "2502.06737.pdf",
+      "origin_paths": [
+        "docs/dataset_survey_stepwise_pairs_20260311.md",
+        "docs/new_dataset_experiment_plan_20260311.md",
+        "docs/phase_E_multisource_math_plan.md",
+        "docs/phase_E_plan.md",
+        "docs/phase_F_plan.md",
+        "docs/readme_full.md",
+        "docs/research_survey_processverifier_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2502.10581",
+      "pdf_url": "https://arxiv.org/pdf/2502.10581.pdf",
+      "filename": "2502.10581.pdf",
+      "origin_paths": [
+        "docs/phase_D_plan.md",
+        "docs/phase_E_plan.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2502.11157",
+      "pdf_url": "https://arxiv.org/pdf/2502.11157.pdf",
+      "filename": "2502.11157.pdf",
+      "origin_paths": [
+        "docs/literature_refresh_20260312_prm_rl.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2502.11379",
+      "pdf_url": "https://arxiv.org/pdf/2502.11379.pdf",
+      "filename": "2502.11379.pdf",
+      "origin_paths": [
+        "docs/phase_e_internet_research_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2502.11520",
+      "pdf_url": "https://arxiv.org/pdf/2502.11520.pdf",
+      "filename": "2502.11520.pdf",
+      "origin_paths": [
+        "docs/research_survey_processverifier_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2502.12468",
+      "pdf_url": "https://arxiv.org/pdf/2502.12468.pdf",
+      "filename": "2502.12468.pdf",
+      "origin_paths": [
+        "docs/phase_E_multisource_math_plan.md",
+        "docs/readme_full.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2502.18048",
+      "pdf_url": "https://arxiv.org/pdf/2502.18048.pdf",
+      "filename": "2502.18048.pdf",
+      "origin_paths": [
+        "docs/phase_e_internet_research_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2502.20307",
+      "pdf_url": "https://arxiv.org/pdf/2502.20307.pdf",
+      "filename": "2502.20307.pdf",
+      "origin_paths": [
+        "docs/phase_e_internet_research_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2503.04412",
+      "pdf_url": "https://arxiv.org/pdf/2503.04412.pdf",
+      "filename": "2503.04412.pdf",
+      "origin_paths": [
+        "docs/literature_refresh_20260312_prm_rl.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2503.04618",
+      "pdf_url": "https://arxiv.org/pdf/2503.04618.pdf",
+      "filename": "2503.04618.pdf",
+      "origin_paths": [
+        "docs/literature_refresh_20260312_prm_rl.md",
+        "docs/new_dataset_experiment_plan_20260311.md",
+        "docs/phase_abcde_impl_audit_and_redesign_20260311.md",
+        "docs/research_survey_processverifier_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2503.14476",
+      "pdf_url": "https://arxiv.org/pdf/2503.14476.pdf",
+      "filename": "2503.14476.pdf",
+      "origin_paths": [
+        "docs/literature_synthesis_20260312_prm_rl_grpo.md"
+      ],
+      "status": "downloaded",
+      "note": "path=docs/relatedPapers/2503.14476.pdf; sha256=f01e4fd347530cadd68e5c36b1998532a6d1adb272c817e73b927453c26e9d79"
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2503.18013",
+      "pdf_url": "https://arxiv.org/pdf/2503.18013.pdf",
+      "filename": "2503.18013.pdf",
+      "origin_paths": [
+        "docs/phase_F_plan.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2503.20783",
+      "pdf_url": "https://arxiv.org/pdf/2503.20783.pdf",
+      "filename": "2503.20783.pdf",
+      "origin_paths": [
+        "docs/literature_synthesis_20260312_prm_rl_grpo.md"
+      ],
+      "status": "downloaded",
+      "note": "path=docs/relatedPapers/2503.20783.pdf; sha256=98243d51297f011fb5baad8a70a972d061ffbef618f1d7cfc10deea37c5887d0"
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2503.21295",
+      "pdf_url": "https://arxiv.org/pdf/2503.21295.pdf",
+      "filename": "2503.21295.pdf",
+      "origin_paths": [
+        "docs/bcr_feasibility_review_20260311.md",
+        "docs/literature_refresh_20260312_prm_rl.md",
+        "docs/literature_synthesis_20260311.md",
+        "docs/phase_E_multisource_math_plan.md",
+        "docs/phase_E_plan.md",
+        "docs/phase_F_plan.md",
+        "docs/readme_full.md",
+        "docs/research_survey_processverifier_20260311.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2503.22233",
+      "pdf_url": "https://arxiv.org/pdf/2503.22233.pdf",
+      "filename": "2503.22233.pdf",
+      "origin_paths": [
+        "docs/literature_refresh_20260312_prm_rl.md",
+        "docs/literature_synthesis_20260312_prm_rl_grpo.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2504.00891",
+      "pdf_url": "https://arxiv.org/pdf/2504.00891.pdf",
+      "filename": "2504.00891.pdf",
+      "origin_paths": [
+        "docs/dataset_survey_stepwise_pairs_20260311.md",
+        "docs/literature_refresh_20260312_prm_rl.md",
+        "docs/literature_synthesis_20260311.md",
+        "docs/literature_synthesis_20260312_prm_rl_grpo.md",
+        "docs/new_dataset_experiment_plan_20260311.md",
+        "docs/phase_E_plan.md",
+        "docs/phase_F_plan.md",
+        "docs/phase_abcde_impl_audit_and_redesign_20260311.md",
+        "docs/phase_abcdef_audit_research_redesign_20260312.md",
+        "docs/phase_e_phase_f_best_practice_refresh_20260312.md",
+        "docs/readme_full.md",
+        "docs/research_survey_processverifier_20260311.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2504.05118",
+      "pdf_url": "https://arxiv.org/pdf/2504.05118.pdf",
+      "filename": "2504.05118.pdf",
+      "origin_paths": [
+        "docs/literature_synthesis_20260312_prm_rl_grpo.md"
+      ],
+      "status": "downloaded",
+      "note": "path=docs/relatedPapers/2504.05118.pdf; sha256=a10387626b86a8f9a6a80d17e727eb5a5036dc237a81d370c26e60d7c4168457"
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2504.08481",
+      "pdf_url": "https://arxiv.org/pdf/2504.08481.pdf",
+      "filename": "2504.08481.pdf",
+      "origin_paths": [
+        "docs/phase_E_plan.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2504.09418",
+      "pdf_url": "https://arxiv.org/pdf/2504.09418.pdf",
+      "filename": "2504.09418.pdf",
+      "origin_paths": [
+        "docs/phase_E_plan.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2504.10559",
+      "pdf_url": "https://arxiv.org/pdf/2504.10559.pdf",
+      "filename": "2504.10559.pdf",
+      "origin_paths": [
+        "docs/phase_e_literature_refresh_20260311.md",
+        "docs/phase_e_paradigm_refresh_experiments_20260311.md",
+        "docs/research_survey_processverifier_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2504.15275",
+      "pdf_url": "https://arxiv.org/pdf/2504.15275.pdf",
+      "filename": "2504.15275.pdf",
+      "origin_paths": [
+        "docs/phase_F_plan.md",
+        "docs/phase_abcde_impl_audit_and_redesign_20260311.md",
+        "docs/phase_e_internet_research_20260311.md",
+        "docs/phase_e_phase_f_overnight_bestpractice_20260313.md",
+        "docs/phase_e_rl_ready_research_redesign_20260311.md",
+        "docs/progress_detailed.md",
+        "docs/readme_full.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2504.16828",
+      "pdf_url": "https://arxiv.org/pdf/2504.16828.pdf",
+      "filename": "2504.16828.pdf",
+      "origin_paths": [
+        "docs/bcr_feasibility_review_20260311.md",
+        "docs/literature_refresh_20260312_prm_rl.md",
+        "docs/literature_synthesis_20260311.md",
+        "docs/literature_synthesis_20260312_prm_rl_grpo.md",
+        "docs/phase_C_fix_value_head.md",
+        "docs/phase_C_plan.md",
+        "docs/phase_D_plan.md",
+        "docs/phase_D_ppt_2slides.md",
+        "docs/phase_E_multisource_math_plan.md",
+        "docs/phase_E_plan.md",
+        "docs/phase_F_plan.md",
+        "docs/phase_abcde_impl_audit_and_redesign_20260311.md",
+        "docs/phase_abcdef_audit_research_redesign_20260312.md",
+        "docs/phase_e_frontier_paradigms_and_experiments_20260311.md",
+        "docs/phase_e_judge_llm_selection_20260311.md",
+        "docs/phase_e_paradigm_refresh_experiments_20260311.md",
+        "docs/readme_full.md",
+        "docs/research_survey_processverifier_20260311.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2505.11227",
+      "pdf_url": "https://arxiv.org/pdf/2505.11227.pdf",
+      "filename": "2505.11227.pdf",
+      "origin_paths": [
+        "docs/literature_synthesis_20260312_prm_rl_grpo.md"
+      ],
+      "status": "downloaded",
+      "note": "path=docs/relatedPapers/2505.11227.pdf; sha256=be8cfec61975a749dd170f5243154e587ee07ed7dd36442197c5a391cad7998b"
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2505.11966",
+      "pdf_url": "https://arxiv.org/pdf/2505.11966.pdf",
+      "filename": "2505.11966.pdf",
+      "origin_paths": [
+        "docs/phase_e_literature_refresh_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2505.13445",
+      "pdf_url": "https://arxiv.org/pdf/2505.13445.pdf",
+      "filename": "2505.13445.pdf",
+      "origin_paths": [
+        "docs/phase_e_frontier_paradigms_and_experiments_20260311.md",
+        "docs/phase_e_overnight_frontier_plan_20260313.md",
+        "docs/phase_e_rl_ready_research_redesign_20260311.md",
+        "docs/phase_e_updated_literature_redesign_20260311.md",
+        "docs/phase_ef_verifier_system_refresh_20260312.md",
+        "docs/readme_full.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2505.13617",
+      "pdf_url": "https://arxiv.org/pdf/2505.13617.pdf",
+      "filename": "2505.13617.pdf",
+      "origin_paths": [
+        "docs/phase_e_internet_research_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2505.13905",
+      "pdf_url": "https://arxiv.org/pdf/2505.13905.pdf",
+      "filename": "2505.13905.pdf",
+      "origin_paths": [
+        "docs/phase_e_phase_f_best_practice_refresh_20260312.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2505.14674",
+      "pdf_url": "https://arxiv.org/pdf/2505.14674.pdf",
+      "filename": "2505.14674.pdf",
+      "origin_paths": [
+        "docs/phase_e_literature_refresh_20260311.md",
+        "docs/phase_e_paradigm_refresh_experiments_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2505.19706",
+      "pdf_url": "https://arxiv.org/pdf/2505.19706.pdf",
+      "filename": "2505.19706.pdf",
+      "origin_paths": [
+        "docs/phase_e_literature_refresh_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2505.24814",
+      "pdf_url": "https://arxiv.org/pdf/2505.24814.pdf",
+      "filename": "2505.24814.pdf",
+      "origin_paths": [
+        "docs/phase_F_plan.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2506.09038",
+      "pdf_url": "https://arxiv.org/pdf/2506.09038.pdf",
+      "filename": "2506.09038.pdf",
+      "origin_paths": [
+        "docs/phase_F_plan.md",
+        "docs/phase_e_phase_f_overnight_bestpractice_20260313.md",
+        "docs/readme_full.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2506.12721",
+      "pdf_url": "https://arxiv.org/pdf/2506.12721.pdf",
+      "filename": "2506.12721.pdf",
+      "origin_paths": [
+        "docs/literature_refresh_20260312_prm_rl.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2506.13342",
+      "pdf_url": "https://arxiv.org/pdf/2506.13342.pdf",
+      "filename": "2506.13342.pdf",
+      "origin_paths": [
+        "docs/phase_e_literature_refresh_20260311.md",
+        "docs/phase_e_rl_ready_research_redesign_20260311.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2506.21495",
+      "pdf_url": "https://arxiv.org/pdf/2506.21495.pdf",
+      "filename": "2506.21495.pdf",
+      "origin_paths": [
+        "docs/literature_refresh_20260312_prm_rl.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2507.09884",
+      "pdf_url": "https://arxiv.org/pdf/2507.09884.pdf",
+      "filename": "2507.09884.pdf",
+      "origin_paths": [
+        "docs/phase_F_plan.md",
+        "docs/phase_e_frontier_paradigms_and_experiments_20260311.md",
+        "docs/phase_e_literature_refresh_20260311.md",
+        "docs/phase_e_overnight_frontier_plan_20260313.md",
+        "docs/phase_e_phase_f_best_practice_refresh_20260312.md",
+        "docs/phase_e_phase_f_overnight_bestpractice_20260313.md",
+        "docs/phase_e_rl_ready_research_redesign_20260311.md",
+        "docs/phase_ef_verifier_system_refresh_20260312.md",
+        "docs/readme_full.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2507.21645",
+      "pdf_url": "https://arxiv.org/pdf/2507.21645.pdf",
+      "filename": "2507.21645.pdf",
+      "origin_paths": [
+        "docs/phase_e_literature_refresh_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2508.01682",
+      "pdf_url": "https://arxiv.org/pdf/2508.01682.pdf",
+      "filename": "2508.01682.pdf",
+      "origin_paths": [
+        "docs/literature_refresh_20260312_prm_rl.md",
+        "docs/literature_synthesis_20260312_prm_rl_grpo.md",
+        "docs/phase_e_literature_refresh_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2508.03686",
+      "pdf_url": "https://arxiv.org/pdf/2508.03686.pdf",
+      "filename": "2508.03686.pdf",
+      "origin_paths": [
+        "docs/phase_e_literature_refresh_20260311.md",
+        "docs/phase_e_paradigm_refresh_experiments_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2510.00915",
+      "pdf_url": "https://arxiv.org/pdf/2510.00915.pdf",
+      "filename": "2510.00915.pdf",
+      "origin_paths": [
+        "docs/literature_synthesis_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2510.01152",
+      "pdf_url": "https://arxiv.org/pdf/2510.01152.pdf",
+      "filename": "2510.01152.pdf",
+      "origin_paths": [
+        "docs/phase_F_plan.md",
+        "docs/readme_full.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2510.13744",
+      "pdf_url": "https://arxiv.org/pdf/2510.13744.pdf",
+      "filename": "2510.13744.pdf",
+      "origin_paths": [
+        "docs/phase_e_frontier_paradigms_and_experiments_20260311.md",
+        "docs/phase_e_literature_refresh_20260311.md",
+        "docs/phase_e_overnight_frontier_plan_20260313.md",
+        "docs/phase_e_paradigm_refresh_experiments_20260311.md",
+        "docs/phase_e_phase_f_best_practice_refresh_20260312.md",
+        "docs/phase_e_rl_ready_research_redesign_20260311.md",
+        "docs/phase_e_updated_literature_redesign_20260311.md",
+        "docs/phase_ef_verifier_system_refresh_20260312.md",
+        "docs/readme_full.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2510.18084",
+      "pdf_url": "https://arxiv.org/pdf/2510.18084.pdf",
+      "filename": "2510.18084.pdf",
+      "origin_paths": [
+        "docs/phase_e_frontier_paradigms_and_experiments_20260311.md",
+        "docs/phase_e_literature_refresh_20260311.md",
+        "docs/phase_e_rl_ready_research_redesign_20260311.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2510.19807",
+      "pdf_url": "https://arxiv.org/pdf/2510.19807.pdf",
+      "filename": "2510.19807.pdf",
+      "origin_paths": [
+        "docs/literature_refresh_20260312_prm_rl.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2601.17223",
+      "pdf_url": "https://arxiv.org/pdf/2601.17223.pdf",
+      "filename": "2601.17223.pdf",
+      "origin_paths": [
+        "docs/phase_abcdef_audit_research_redesign_20260312.md",
+        "docs/phase_e_frontier_paradigms_and_experiments_20260311.md",
+        "docs/phase_e_overnight_frontier_plan_20260313.md",
+        "docs/phase_e_phase_f_best_practice_refresh_20260312.md",
+        "docs/phase_e_rl_ready_research_redesign_20260311.md",
+        "docs/phase_e_updated_literature_redesign_20260311.md",
+        "docs/phase_ef_verifier_system_refresh_20260312.md",
+        "docs/readme_full.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2602.11570",
+      "pdf_url": "https://arxiv.org/pdf/2602.11570.pdf",
+      "filename": "2602.11570.pdf",
+      "origin_paths": [
+        "docs/phase_abcdef_audit_research_redesign_20260312.md",
+        "docs/phase_e_frontier_paradigms_and_experiments_20260311.md",
+        "docs/phase_e_overnight_frontier_plan_20260313.md",
+        "docs/phase_e_rl_ready_research_redesign_20260311.md",
+        "docs/phase_e_updated_literature_redesign_20260311.md",
+        "docs/phase_ef_verifier_system_refresh_20260312.md",
+        "docs/readme_full.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2602.17633",
+      "pdf_url": "https://arxiv.org/pdf/2602.17633.pdf",
+      "filename": "2602.17633.pdf",
+      "origin_paths": [
+        "docs/phase_e_phase_f_best_practice_refresh_20260312.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2603.03307",
+      "pdf_url": "https://arxiv.org/pdf/2603.03307.pdf",
+      "filename": "2603.03307.pdf",
+      "origin_paths": [
+        "docs/phase_e_literature_refresh_20260311.md",
+        "docs/phase_e_overnight_frontier_plan_20260313.md",
+        "docs/phase_e_phase_f_best_practice_refresh_20260312.md",
+        "docs/phase_e_rl_ready_research_redesign_20260311.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2603.03538",
+      "pdf_url": "https://arxiv.org/pdf/2603.03538.pdf",
+      "filename": "2603.03538.pdf",
+      "origin_paths": [
+        "docs/phase_e_literature_refresh_20260311.md",
+        "docs/phase_e_paradigm_refresh_experiments_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2603.05390",
+      "pdf_url": "https://arxiv.org/pdf/2603.05390.pdf",
+      "filename": "2603.05390.pdf",
+      "origin_paths": [
+        "docs/phase_e_frontier_paradigms_and_experiments_20260311.md",
+        "docs/phase_e_literature_refresh_20260311.md",
+        "docs/phase_e_overnight_frontier_plan_20260313.md",
+        "docs/phase_e_rl_ready_research_redesign_20260311.md",
+        "docs/phase_ef_verifier_system_refresh_20260312.md",
+        "docs/result_records.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/pdf/2507.02076",
+      "pdf_url": "https://arxiv.org/pdf/2507.02076.pdf",
+      "filename": "2507.02076.pdf",
+      "origin_paths": [
+        "docs/literature_refresh_20260312_prm_rl.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://openreview.net/forum?id=HMGsqApBM3",
+      "pdf_url": "https://openreview.net/pdf?id=HMGsqApBM3",
+      "filename": "openreview_HMGsqApBM3.pdf",
+      "origin_paths": [
+        "docs/phase_e_literature_refresh_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://openreview.net/forum?id=JfsjGmuFxz",
+      "pdf_url": "https://openreview.net/pdf?id=JfsjGmuFxz",
+      "filename": "openreview_JfsjGmuFxz.pdf",
+      "origin_paths": [
+        "docs/phase_e_literature_refresh_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://openreview.net/forum?id=ZUFJQrZuRp",
+      "pdf_url": "https://openreview.net/pdf?id=ZUFJQrZuRp",
+      "filename": "openreview_ZUFJQrZuRp.pdf",
+      "origin_paths": [
+        "docs/phase_e_literature_refresh_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://openreview.net/forum?id=iH2yiN1xsn",
+      "pdf_url": "https://openreview.net/pdf?id=iH2yiN1xsn",
+      "filename": "openreview_iH2yiN1xsn.pdf",
+      "origin_paths": [
+        "docs/phase_e_literature_refresh_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://openreview.net/forum?id=jKAqtb63Bl",
+      "pdf_url": "https://openreview.net/pdf?id=jKAqtb63Bl",
+      "filename": "openreview_jKAqtb63Bl.pdf",
+      "origin_paths": [
+        "docs/phase_e_literature_refresh_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://openreview.net/forum?id=omVhYvyTPJ",
+      "pdf_url": "https://openreview.net/pdf?id=omVhYvyTPJ",
+      "filename": "openreview_omVhYvyTPJ.pdf",
+      "origin_paths": [
+        "docs/phase_e_literature_refresh_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://openreview.net/pdf/189f5f32f4df82449edce9c06a6fbd6a0d7ccfea.pdf",
+      "pdf_url": "https://openreview.net/pdf/189f5f32f4df82449edce9c06a6fbd6a0d7ccfea.pdf",
+      "filename": "openreview_openreview.pdf",
+      "origin_paths": [
+        "docs/research_survey_processverifier_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    }
+  ]
+}

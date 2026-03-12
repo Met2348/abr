@@ -36,6 +36,17 @@ SLICE_GPU="${SLICE_GPU:-0}"
 JUDGE_GPU="${JUDGE_GPU:-1}"
 TRAIN_GPU="${TRAIN_GPU:-0}"
 RECIPE_RISK_POLICY="${RECIPE_RISK_POLICY:-error}"
+MODEL_PATH="${MODEL_PATH:-assets/models/Qwen2.5-7B-Instruct}"
+SLICE_BATCH_SIZE="${SLICE_BATCH_SIZE:-128}"
+SLICE_MAX_LENGTH="${SLICE_MAX_LENGTH:-1024}"
+SLICE_MAX_GPU_MEMORY_GIB="${SLICE_MAX_GPU_MEMORY_GIB:-45}"
+TRAIN_EPOCHS="${TRAIN_EPOCHS:-14}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-128}"
+TRAIN_EVAL_BATCH_SIZE="${TRAIN_EVAL_BATCH_SIZE:-128}"
+TRAIN_MAX_LENGTH="${TRAIN_MAX_LENGTH:-1024}"
+TRAIN_MAX_GPU_MEMORY_GIB="${TRAIN_MAX_GPU_MEMORY_GIB:-45}"
+TRAIN_MAX_CPU_MEMORY_GIB="${TRAIN_MAX_CPU_MEMORY_GIB:-96}"
+TRAIN_FEATURE_CACHE_MODE="${TRAIN_FEATURE_CACHE_MODE:-read_write}"
 
 LOG_DIR="assets/artifacts/phase_e_logs/${RUN_PREFIX}"
 LOG_FILE="${LOG_DIR}/suite.log"
@@ -84,11 +95,11 @@ CUDA_VISIBLE_DEVICES="$SLICE_GPU" "$PYTHON_BIN" -u scripts/phase_e_slice_pairs_b
   --selection-mode lowest_abs_margin \
   --run-name "$SLICE_RUN_NAME" \
   --output-root assets/artifacts/phase_e_pairs \
-  --batch-size 128 \
-  --max-length 1024 \
+  --batch-size "$SLICE_BATCH_SIZE" \
+  --max-length "$SLICE_MAX_LENGTH" \
   --dtype bfloat16 \
   --device-map auto \
-  --max-gpu-memory-gib 45 | tee -a "$LOG_FILE"
+  --max-gpu-memory-gib "$SLICE_MAX_GPU_MEMORY_GIB" | tee -a "$LOG_FILE"
 SLICE_DIR="$(latest_timestamped_dir "assets/artifacts/phase_e_pairs/${SLICE_RUN_NAME}")"
 
 JUDGE_RUN_NAME="${RUN_PREFIX}_pairjudge"
@@ -129,15 +140,15 @@ log "Train selected-relabel PRMBench value head"
 CUDA_VISIBLE_DEVICES="$TRAIN_GPU" "$PYTHON_BIN" -u scripts/phase_e_train_value.py \
   --train-pairs-jsonl "$MERGED_DIR/train_pairs.jsonl" \
   --eval-pairs-jsonl "$MERGED_DIR/validation_pairs.jsonl" \
-  --model-path assets/models/Qwen2.5-7B-Instruct \
+  --model-path "$MODEL_PATH" \
   --run-name "$TRAIN_RUN_NAME" \
   --output-root assets/artifacts/phase_e_runs \
   --objective-mode joint \
   --learning-rate 3e-5 \
-  --num-train-epochs 14 \
-  --per-device-train-batch-size 128 \
-  --per-device-eval-batch-size 128 \
-  --max-length 1024 \
+  --num-train-epochs "$TRAIN_EPOCHS" \
+  --per-device-train-batch-size "$TRAIN_BATCH_SIZE" \
+  --per-device-eval-batch-size "$TRAIN_EVAL_BATCH_SIZE" \
+  --max-length "$TRAIN_MAX_LENGTH" \
   --lambda-ranking 1.0 \
   --lambda-bce 1.0 \
   --ranking-margin 0.02 \
@@ -154,7 +165,9 @@ CUDA_VISIBLE_DEVICES="$TRAIN_GPU" "$PYTHON_BIN" -u scripts/phase_e_train_value.p
   --head-activation gelu \
   --anti-saturation-weight 0.0 \
   --anti-saturation-logit-threshold 4.0 \
-  --feature-cache-mode read_write | tee -a "$LOG_FILE"
+  --max-gpu-memory-gib "$TRAIN_MAX_GPU_MEMORY_GIB" \
+  --max-cpu-memory-gib "$TRAIN_MAX_CPU_MEMORY_GIB" \
+  --feature-cache-mode "$TRAIN_FEATURE_CACHE_MODE" | tee -a "$LOG_FILE"
 SELECTED_VALUE_DIR="$(python - <<PY
 from pathlib import Path
 matches = sorted(Path('assets/artifacts/phase_e_runs').glob('${TRAIN_RUN_NAME}_*'))

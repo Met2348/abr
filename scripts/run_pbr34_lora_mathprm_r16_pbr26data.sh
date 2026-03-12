@@ -13,7 +13,7 @@
 #
 # Usage: CUDA_DEVICE=<gpu> bash run_pbr34_lora_mathprm_r16_pbr26data.sh
 
-set -e
+set -euo pipefail
 
 CUDA_DEVICE="${CUDA_DEVICE:-2}"
 PY="${PYTHON_BIN:-/home/zling/anaconda3/bin/python3}"
@@ -23,6 +23,23 @@ RUN_ROOT="assets/artifacts/phase_e_runs"
 PAIR_DIR="assets/artifacts/phase_e_pairs/phase_e_pbr26_dpo_plus_ms_full_pairs__b17437d10dfc"
 
 mkdir -p "${LOGDIR}"
+
+latest_complete_run_dir() {
+    local prefix="$1"
+    python - "${RUN_ROOT}" "${prefix}" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+prefix = sys.argv[2]
+matches = sorted(root.glob(f"{prefix}_*"), key=lambda path: path.stat().st_mtime, reverse=True)
+for path in matches:
+    if (path / "manifest.json").exists():
+        print(path)
+        raise SystemExit(0)
+raise SystemExit(f"No completed run dir with manifest.json found for prefix={prefix!r}")
+PY
+}
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting PBR34 training on GPU ${CUDA_DEVICE}"
 
@@ -57,7 +74,10 @@ CUDA_VISIBLE_DEVICES="${CUDA_DEVICE}" "${PY}" -u scripts/phase_e_train_value_lor
     --require-cuda \
     2>&1 | tee "${LOGDIR}/pbr34_lora_mathprm_r16_top4_pbr26data.log"
 
-RUN_DIR=$(ls -td "${RUN_ROOT}/phase_e_pbr34_lora_mathprm_r16_top4_pbr26data_s42_"* 2>/dev/null | head -1)
+# 只有完整写出 manifest 的 run dir 才算训练成功，避免半成品目录被误当成最新成功结果。
+# Only accept a run dir once `manifest.json` exists, so an incomplete crashed run
+# cannot be mistaken for the latest successful artifact.
+RUN_DIR="$(latest_complete_run_dir "phase_e_pbr34_lora_mathprm_r16_top4_pbr26data_s42")"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Training done. Run dir: ${RUN_DIR}"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting ProcessBench MATH eval..."

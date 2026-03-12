@@ -284,6 +284,7 @@ CURRENT_STAGE="candidate_selection"
 python -u scripts/phase_e_select_candidate.py \
   --suite-log-dirs "${suite_dirs[@]}" \
   --required-benchmark-ids processbench_gsm8k processbench_math \
+  --checkpoint-missing-policy fail \
   --run-name "$CANDIDATE_RUN_NAME" \
   --output-root "$CANDIDATE_OUTPUT_ROOT" | tee -a "$SUITE_LOG_FILE"
 

@@ -98,10 +98,19 @@ launch_job() {
   local gpu_id="$2"
   local command="$3"
   local log_file="${LOG_ROOT}/${job_name}.log"
+  local job_script="${LOG_ROOT}/${job_name}.sh"
   local pid
   log_line "LAUNCH ${job_name} on GPU${gpu_id}"
   log_line "CMD ${command}"
-  pid="$(nohup bash -lc "cd '$REPO_ROOT' && export PYTORCH_CUDA_ALLOC_CONF='$PYTORCH_CUDA_ALLOC_CONF' && ${command}" >"$log_file" 2>&1 < /dev/null & echo \$!)"
+  cat >"$job_script" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$REPO_ROOT"
+export PYTORCH_CUDA_ALLOC_CONF="$PYTORCH_CUDA_ALLOC_CONF"
+$command
+EOF
+  chmod +x "$job_script"
+  pid="$(nohup "$job_script" >"$log_file" 2>&1 < /dev/null & echo $!)"
   "$PYTHON_BIN" - "$job_name" "$gpu_id" "$pid" "$log_file" "$command" "$MANIFEST_JSONL" <<'PY'
 import json
 import sys
@@ -176,11 +185,12 @@ CMD_F2="CUDA_VISIBLE_DEVICES=${GPU_F2} RUN_PREFIX=${RUN_PREFIX}_f2 ACTIVE_PHASE_
 CMD_F3="CUDA_VISIBLE_DEVICES=${GPU_F3} RUN_PREFIX=${RUN_PREFIX}_f3 ACTIVE_PHASE_E_FRONTIER_GROUP=F3_LORA_PBR10 BENCH_MAX_SAMPLES=${BENCH_MAX_SAMPLES} RECIPE_RISK_POLICY=${RECIPE_RISK_POLICY} bash scripts/run_phase_e_frontier_suite.sh"
 CMD_HYBRID_CHAIN="CUDA_VISIBLE_DEVICES=${GPU_HYBRID} RUN_PREFIX=${RUN_PREFIX}_ph2 ACTIVE_PHASE_E_PB_HYBRID_GROUP=PH2_PRM_LOCAL_TA10_MSGRID10_ARCH_SWEEP_SMOKE BENCH_MAX_SAMPLES=${BENCH_MAX_SAMPLES} RECIPE_RISK_POLICY=${RECIPE_RISK_POLICY} bash scripts/run_phase_e_processbench_hybrid_suite.sh && CUDA_VISIBLE_DEVICES=${GPU_CURATED} RUN_PREFIX=${RUN_PREFIX}_cr1 ACTIVE_PHASE_E_CURATED_GROUP=CR1_CURATED_CENTER_GATE_SMOKE BENCH_MAX_SAMPLES=${BENCH_MAX_SAMPLES} RECIPE_RISK_POLICY=${RECIPE_RISK_POLICY} bash scripts/run_phase_e_curated_rlready_suite.sh"
 CMD_F2_CHAIN="CUDA_VISIBLE_DEVICES=${GPU_TA} RUN_PREFIX=${RUN_PREFIX}_ta TRAIN_BATCH_SIZE=192 EVAL_BATCH_SIZE=192 RECIPE_RISK_POLICY=${RECIPE_RISK_POLICY} bash scripts/run_phase_e_terminal_ratio_sweep.sh"
+WAIT_F2_SUCCESS="${PYTHON_BIN} scripts/wait_for_summary_status.py assets/artifacts/phase_e_logs/${RUN_PREFIX}_f2/final_summary.md --expect-status ok --timeout-sec 43200 --poll-sec 120"
 
 launch_job "f2_dual_head" "$GPU_F2" "$CMD_F2"
 launch_job "f3_lora_probe" "$GPU_F3" "$CMD_F3"
 launch_job "ph2_then_cr1" "$GPU_HYBRID" "$CMD_HYBRID_CHAIN"
-launch_job "ta_sweep_after_f2" "$GPU_TA" "until [[ -f assets/artifacts/phase_e_logs/${RUN_PREFIX}_f2/final_summary.md ]]; do sleep 120; done; ${CMD_F2_CHAIN}"
+launch_job "ta_sweep_after_f2" "$GPU_TA" "${WAIT_F2_SUCCESS} && ${CMD_F2_CHAIN}"
 
 log_line "Overnight frontier launcher complete."
 log_line "Plan file: ${PLAN_MD}"

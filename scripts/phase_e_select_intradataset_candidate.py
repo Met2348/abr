@@ -96,6 +96,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-worst-auc", type=float, default=0.85)
     parser.add_argument("--max-pair-std", type=float, default=0.05)
     parser.add_argument("--max-auc-std", type=float, default=0.05)
+    parser.add_argument(
+        "--checkpoint-missing-policy",
+        choices=["fail", "fallback_final"],
+        default="fail",
+        help=(
+            "How to handle a missing best_value_head.pt when promoting an intradataset candidate. "
+            "`fail` is the safe default; `fallback_final` is only for legacy diagnostics."
+        ),
+    )
     return parser
 
 
@@ -197,7 +206,7 @@ def _std(values: list[float]) -> float | None:
     return float(statistics.pstdev(values))
 
 
-def _resolve_best_checkpoint_path(value_run_dir: Path) -> tuple[str, list[str]]:
+def _resolve_best_checkpoint_path(value_run_dir: Path, *, missing_policy: str) -> tuple[str, list[str]]:
     """Resolve the checkpoint path this report should publish.
 
     English
@@ -213,8 +222,13 @@ def _resolve_best_checkpoint_path(value_run_dir: Path) -> tuple[str, list[str]]:
     1. 有些保留 `best_value_head.pt`，
     2. 有些只保留 `final_value_head.pt`，
     3. 还有些需要从 `manifest.json` 里解析真实路径。
+
+    关键策略变化是：默认不再把缺失的 `best` 静默回退到 `final`。
+    只有显式传 `fallback_final` 才允许做 legacy 兼容。
     """
     notes: list[str] = []
+    if missing_policy not in {"fail", "fallback_final"}:
+        raise ValueError(f"Unsupported --checkpoint-missing-policy: {missing_policy!r}")
     manifest_path = value_run_dir / "manifest.json"
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -225,7 +239,7 @@ def _resolve_best_checkpoint_path(value_run_dir: Path) -> tuple[str, list[str]]:
             if best_path.exists():
                 return str(best_path), notes
         final_path_text = str(output_files.get("final_value_head") or "").strip()
-        if final_path_text:
+        if final_path_text and missing_policy == "fallback_final":
             final_path = Path(final_path_text)
             if final_path.exists():
                 notes.append("best checkpoint missing; resolved best_checkpoint_path to final_value_head")
@@ -234,11 +248,14 @@ def _resolve_best_checkpoint_path(value_run_dir: Path) -> tuple[str, list[str]]:
     if best_path.exists():
         return str(best_path), notes
     final_path = value_run_dir / "final_value_head.pt"
-    if final_path.exists():
+    if final_path.exists() and missing_policy == "fallback_final":
         notes.append("best checkpoint missing; resolved best_checkpoint_path to final_value_head")
         return str(final_path), notes
-    notes.append("best checkpoint path unresolved")
-    return str(best_path), notes
+    raise FileNotFoundError(
+        "Missing best_value_head.pt for intradataset promotion under strict policy: "
+        f"{value_run_dir}. Rerun with --checkpoint-missing-policy fallback_final "
+        "only for legacy diagnostics."
+    )
 
 
 def _build_group_summary(suite_dir: Path, args: argparse.Namespace) -> GroupSummary:
@@ -288,7 +305,10 @@ def _build_group_summary(suite_dir: Path, args: argparse.Namespace) -> GroupSumm
             float(row.heldout_ranking_score),
         ),
     )
-    best_checkpoint_path, checkpoint_notes = _resolve_best_checkpoint_path(Path(best_row.value_run_dir))
+    best_checkpoint_path, checkpoint_notes = _resolve_best_checkpoint_path(
+        Path(best_row.value_run_dir),
+        missing_policy=str(args.checkpoint_missing_policy),
+    )
     notes.extend(f"best_seed={int(best_row.seed)}: {note}" for note in checkpoint_notes)
     trust_score = float(
         0.50 * _mean(pair_values)

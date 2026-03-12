@@ -186,6 +186,8 @@ def test_main_selects_best_group_across_repeated_suite_log_dirs(tmp_path: Path) 
         processbench_math_pair_acc=0.49,
         processbench_math_auc=0.50,
     )
+    _attach_fake_run_manifest(suite_dir=first, keep_best=True, keep_final=True)
+    _attach_fake_run_manifest(suite_dir=second, keep_best=True, keep_final=True)
     output_root = tmp_path / "candidates"
 
     exit_code = module.main(
@@ -208,7 +210,41 @@ def test_main_selects_best_group_across_repeated_suite_log_dirs(tmp_path: Path) 
     assert len(payload["groups"]) == 2
 
 
-def test_main_resolves_best_checkpoint_path_to_final_when_best_missing(tmp_path: Path) -> None:
+def test_main_fails_when_best_checkpoint_missing_under_strict_policy(tmp_path: Path) -> None:
+    module = _load_selector_module()
+    first = _write_suite_log_dir(
+        root=tmp_path,
+        group_id="E20_STAGEA_MS_ANCHOR_SEED3",
+        group_title="E20",
+        heldout_pair_acc=0.82,
+        heldout_auc=0.79,
+        heldout_ranking_score=0.80,
+        processbench_gsm8k_pair_acc=0.56,
+        processbench_gsm8k_auc=0.58,
+        processbench_math_pair_acc=0.55,
+        processbench_math_auc=0.57,
+    )
+    _attach_fake_run_manifest(suite_dir=first, keep_best=False, keep_final=True)
+    output_root = tmp_path / "candidates"
+
+    try:
+        module.main(
+            [
+                "--run-name",
+                "candidate_checkpoint_resolution",
+                "--output-root",
+                str(output_root),
+                "--suite-log-dirs",
+                str(first),
+            ]
+        )
+    except FileNotFoundError as exc:
+        assert "Missing best_value_head.pt" in str(exc)
+    else:
+        raise AssertionError("strict candidate selection should fail when best checkpoint is missing")
+
+
+def test_main_can_fallback_to_final_when_explicitly_requested(tmp_path: Path) -> None:
     module = _load_selector_module()
     first = _write_suite_log_dir(
         root=tmp_path,
@@ -231,6 +267,8 @@ def test_main_resolves_best_checkpoint_path_to_final_when_best_missing(tmp_path:
             "candidate_checkpoint_resolution",
             "--output-root",
             str(output_root),
+            "--checkpoint-missing-policy",
+            "fallback_final",
             "--suite-log-dirs",
             str(first),
         ]
@@ -268,6 +306,8 @@ def test_main_defaults_to_heldout_only_selection_policy(tmp_path: Path) -> None:
         processbench_math_pair_acc=0.95,
         processbench_math_auc=0.95,
     )
+    _attach_fake_run_manifest(suite_dir=heldout_better, keep_best=True, keep_final=True)
+    _attach_fake_run_manifest(suite_dir=benchmark_better, keep_best=True, keep_final=True)
     _attach_fake_run_manifest(suite_dir=heldout_better, keep_best=True, keep_final=True)
     _attach_fake_run_manifest(suite_dir=benchmark_better, keep_best=True, keep_final=True)
     output_root = tmp_path / "candidates"

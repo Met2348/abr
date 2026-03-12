@@ -60,6 +60,15 @@ Operational interpretation:
 2. Phase E should now develop along two parallel tracks:
    - bounded-support scalar verifier,
    - benchmark-aligned process / critique verifier.
+3. a pure `cheap verifier -> rare strong verifier escalation` system is also
+   not yet supported by local evidence:
+   - current `ms_e43 -> pbr26` and `prm_e46 -> pbr26` gate sweeps only approach
+     strong-verifier AUC when strong usage rises to roughly `86%-97%`.
+4. therefore the nearer-term architectural target should be:
+   - local/process verifier,
+   - terminal/answer verifier,
+   - abstain/escalate gate,
+   not one scalar verifier with a thin escalation wrapper.
 
 ---
 

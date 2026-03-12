@@ -195,14 +195,50 @@ row = {
     "math_dir": math_dir,
     "heldout_pair_acc": float(value_summary["eval_pairs"]["pair_accuracy"]),
     "heldout_auc": float(value_summary["eval_pairs"]["auc"]),
-    "samefamily_top1": float(samefamily_summary["pool_metrics"]["top1_accuracy"]),
-    "samefamily_local_first_bad": float(samefamily_summary["local_metrics"]["first_bad_accuracy"]),
-    "samefamily_rej40_gain": float((samefamily_summary.get("rejection_curve") or {}).get("coverage_0.40", {}).get("gain_over_full", 0.0)),
+    # English: same-family summaries were flattened in the newer evaluator.
+    # Keep a backward-compatible fallback here so old/nested artifacts can
+    # still be summarized instead of silently turning the whole suite red.
+    # 中文：same-family summary 在新版本里改成了扁平字段。
+    # 这里保留兼容逻辑，避免因为 summary 结构升级导致整套实验被误记为 failed。
+    "samefamily_top1": float(
+        samefamily_summary.get("prompt_pool_top1_accuracy")
+        if samefamily_summary.get("prompt_pool_top1_accuracy") is not None
+        else samefamily_summary["pool_metrics"]["top1_accuracy"]
+    ),
+    "samefamily_local_first_bad": float(
+        samefamily_summary.get("local_first_bad_edge_accuracy")
+        if samefamily_summary.get("local_first_bad_edge_accuracy") is not None
+        else samefamily_summary["local_metrics"]["first_bad_accuracy"]
+    ),
+    "samefamily_rej40_gain": float(0.0),
     "gsm_auc": float(gsm_summary["metrics"]["pair_auc_good_vs_bad"]),
     "gsm_first_edge": float(gsm_summary["metrics"]["first_error_edge_accuracy"]),
     "math_auc": float(math_summary["metrics"]["pair_auc_good_vs_bad"]),
     "math_first_edge": float(math_summary["metrics"]["first_error_edge_accuracy"]),
 }
+# English: newer same-family artifacts store rejection_curve as a list of
+# coverage rows instead of a dict keyed by coverage. Recover the 0.40 gain in a
+# format-agnostic way so the suite summary remains stable across artifact
+# schema revisions.
+# 中文：新的 same-family artifact 会把 rejection_curve 存成 list，而不是旧版
+# 的 coverage->row dict。这里统一提取 0.40 覆盖率对应的 gain，避免 schema
+# 变化再次把 suite 汇总打挂。
+rejection_curve = samefamily_summary.get("rejection_curve") or {}
+if isinstance(rejection_curve, list):
+    full_regret = None
+    cov40_regret = None
+    for entry in rejection_curve:
+        cov = float(entry.get("target_coverage", entry.get("actual_coverage", 0.0)))
+        if abs(cov - 1.0) < 1e-6:
+            full_regret = float(entry.get("mean_regret", 0.0))
+        if abs(cov - 0.4) < 1e-6:
+            cov40_regret = float(entry.get("mean_regret", 0.0))
+    if full_regret is not None and cov40_regret is not None:
+        row["samefamily_rej40_gain"] = float(full_regret - cov40_regret)
+elif isinstance(rejection_curve, dict):
+    row["samefamily_rej40_gain"] = float(
+        (rejection_curve.get("coverage_0.40") or {}).get("gain_over_full", 0.0)
+    )
 with Path(out_path).open("a", encoding="utf-8") as handle:
     handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 print(json.dumps(row, ensure_ascii=False))

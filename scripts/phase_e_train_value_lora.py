@@ -127,6 +127,8 @@ class PhaseELoraTrainConfig:
     lora_target_modules: list[str]
     lora_top_k_layers: int | None
     gradient_checkpointing: bool
+    contrastive_loss_weight: float
+    contrastive_margin: float
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -199,7 +201,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lambda-bce", type=float, default=1.0)
     parser.add_argument("--terminal-bce-lambda", type=float, default=0.0)
     parser.add_argument("--ranking-margin", type=float, default=0.02)
-    parser.add_argument("--ranking-target-space", choices=["score", "logit"], default="logit")
+    parser.add_argument(
+        "--ranking-target-space",
+        choices=["score", "logit"],
+        default="score",
+        help=(
+            "Repository-safe default is `score`. "
+            "`logit` is still available for controlled diagnostics, but should not be the default "
+            "because mixed-semantics Phase E runs repeatedly collapsed under raw-logit ranking."
+        ),
+    )
     parser.add_argument(
         "--pair-weight-mode",
         choices=[
@@ -212,14 +223,22 @@ def _build_parser() -> argparse.ArgumentParser:
             "group_balance",
             "confidence_group_balance",
         ],
-        default="confidence_semantic",
+        default="none",
     )
     parser.add_argument("--source-balance", choices=["none", "uniform"], default="none")
     parser.add_argument("--permutation-mode", choices=["random", "stable_hash"], default="stable_hash")
     parser.add_argument("--anti-saturation-weight", type=float, default=5e-4)
     parser.add_argument("--anti-saturation-logit-threshold", type=float, default=3.5)
     parser.add_argument("--reward-centering-weight", type=float, default=0.0)
-    parser.add_argument("--checkpoint-selection-metric", choices=["pair_acc", "auc", "ranking_score", "pair_loss"], default="pair_acc")
+    parser.add_argument(
+        "--checkpoint-selection-metric",
+        choices=["pair_acc", "auc", "ranking_score", "pair_loss"],
+        default="pair_acc",
+        help=(
+            "Repository-safe default is `pair_acc`. "
+            "`ranking_score` remains available only for tightly controlled diagnostics."
+        ),
+    )
     parser.add_argument(
         "--recipe-risk-policy",
         choices=["off", "warn", "error"],
@@ -269,6 +288,26 @@ def _build_parser() -> argparse.ArgumentParser:
         "--gradient-checkpointing",
         action=argparse.BooleanOptionalAction,
         default=True,
+    )
+    parser.add_argument(
+        "--contrastive-loss-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight for auxiliary contrastive margin loss on backbone features. "
+            "Pushes L2-normalized chosen/rejected hidden states to be dissimilar. "
+            "Recommended 0.05-0.15 when using LoRA. 0.0 = disabled."
+        ),
+    )
+    parser.add_argument(
+        "--contrastive-margin",
+        type=float,
+        default=0.15,
+        help=(
+            "Cosine dissimilarity margin for contrastive loss. "
+            "Loss = ReLU(cos_sim(chosen, rejected) - (1 - margin)). "
+            "Default 0.15 means push cos_sim below 0.85."
+        ),
     )
     return parser
 
@@ -483,7 +522,8 @@ def _forward_value_pair_batch(
     tokenized_batch: dict[str, Any],
     num_pairs: int,
     torch_module: Any,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+    return_features: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]] | tuple[dict[str, Any], dict[str, Any], Any, Any]:
     model_device = next(model.parameters()).device
     head_device = next(value_head.parameters()).device
     head_dtype = next(value_head.parameters()).dtype
@@ -501,7 +541,38 @@ def _forward_value_pair_batch(
     rejected_features = pooled[int(num_pairs) :]
     chosen_out = value_head(chosen_features)
     rejected_out = value_head(rejected_features)
+    if return_features:
+        return chosen_out, rejected_out, chosen_features, rejected_features
     return chosen_out, rejected_out
+
+
+def _contrastive_feature_loss(
+    *,
+    chosen_features: Any,
+    rejected_features: Any,
+    margin: float,
+    torch_module: Any,
+) -> Any:
+    """Cosine-margin contrastive loss between chosen and rejected backbone features.
+
+    English
+    -------
+    Pushes the L2-normalized chosen and rejected hidden states to be dissimilar.
+    Loss = mean(ReLU(cos_sim(chosen, rejected) - (1 - margin))).
+    A margin of 0.15 means we penalise pairs where cos_sim > 0.85.
+
+    中文
+    ----
+    在 backbone 特征空间中拉远 chosen 和 rejected 表示。
+    Loss = mean(ReLU(cos_sim(chosen, rejected) - (1 - margin)))。
+    """
+    import torch.nn.functional as F
+
+    chosen_norm = F.normalize(chosen_features.float(), dim=-1)
+    rejected_norm = F.normalize(rejected_features.float(), dim=-1)
+    cos_sim = (chosen_norm * rejected_norm).sum(dim=-1)
+    loss = torch_module.relu(cos_sim - float(1.0 - margin))
+    return loss.mean().to(chosen_features.dtype)
 
 
 def _evaluate_pairs(
@@ -749,6 +820,8 @@ def main(argv: list[str] | None = None) -> int:
         lora_target_modules=[m.strip() for m in str(args.lora_target_modules).split(",") if m.strip()],
         lora_top_k_layers=(int(args.lora_top_k_layers) if int(args.lora_top_k_layers) > 0 else None),
         gradient_checkpointing=bool(args.gradient_checkpointing),
+        contrastive_loss_weight=float(args.contrastive_loss_weight),
+        contrastive_margin=float(args.contrastive_margin),
     )
 
     run_dir = Path(args.output_root) / f"{args.run_name}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
@@ -788,6 +861,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"lora_rank          : {args.lora_rank}")
     print(f"lora_target_modules: {train_config.lora_target_modules}")
     print(f"lora_top_k_layers  : {train_config.lora_top_k_layers}")
+    print(f"contrastive_weight : {args.contrastive_loss_weight}")
+    print(f"contrastive_margin : {args.contrastive_margin}")
     print("=" * 88)
 
     recipe_risk_report = assess_phase_e_recipe_risk(
@@ -940,17 +1015,24 @@ def main(argv: list[str] | None = None) -> int:
         running_loss = 0.0
         batches = 0
         optimizer_steps = 0
+        contrastive_running = 0.0
         for batch_idx, start in enumerate(range(0, len(permutation), int(args.per_device_train_batch_size)), start=1):
             batch_indices = permutation[start : start + int(args.per_device_train_batch_size)]
             batch_pairs = [train_rows.pairs[idx] for idx in batch_indices]
             batch_payload = collator(batch_pairs)
-            chosen_out, rejected_out = _forward_value_pair_batch(
+            _need_features = float(args.contrastive_loss_weight) > 0.0
+            _fwd_result = _forward_value_pair_batch(
                 model=model,
                 value_head=value_head,
                 tokenized_batch=batch_payload["tokenized"],
                 num_pairs=batch_payload["num_pairs"],
                 torch_module=torch,
+                return_features=_need_features,
             )
+            if _need_features:
+                chosen_out, rejected_out, _chosen_feat, _rejected_feat = _fwd_result
+            else:
+                chosen_out, rejected_out = _fwd_result
             head_device = next(value_head.parameters()).device
             head_dtype = next(value_head.parameters()).dtype
             pair_weights = torch.tensor(
@@ -995,6 +1077,15 @@ def main(argv: list[str] | None = None) -> int:
                 lambda_terminal_bce=float(args.terminal_bce_lambda),
                 torch_module=torch,
             )
+            if _need_features and float(args.contrastive_loss_weight) > 0.0:
+                contrastive = _contrastive_feature_loss(
+                    chosen_features=_chosen_feat,
+                    rejected_features=_rejected_feat,
+                    margin=float(args.contrastive_margin),
+                    torch_module=torch,
+                )
+                contrastive_running += float(contrastive.detach().cpu().item())
+                loss = loss + float(args.contrastive_loss_weight) * contrastive
             loss = loss / int(args.gradient_accumulation_steps)
             loss.backward()
             running_loss += float(loss.detach().cpu().item())
@@ -1013,11 +1104,17 @@ def main(argv: list[str] | None = None) -> int:
                 optimizer_steps += 1
                 global_step += 1
                 if global_step % int(args.logging_steps) == 0:
+                    _ctr_str = (
+                        f" avg_contrastive={(contrastive_running / max(1, batches)):.6f}"
+                        if float(args.contrastive_loss_weight) > 0.0
+                        else ""
+                    )
                     print(
                         "train_step          : "
                         f"epoch={epoch_idx} global_step={global_step} "
                         f"avg_loss={(running_loss / max(1, batches)):.6f} "
-                        f"lr={scheduler.get_last_lr()[0]:.8f}",
+                        f"lr={scheduler.get_last_lr()[0]:.8f}"
+                        f"{_ctr_str}",
                         flush=True,
                     )
         epoch_stats = {

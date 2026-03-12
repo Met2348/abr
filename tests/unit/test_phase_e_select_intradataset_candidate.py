@@ -142,6 +142,26 @@ def test_main_selects_best_group_across_repeated_suite_log_dirs(tmp_path: Path) 
         auc=0.46,
         ranking_score=0.45,
     )
+    for suite_dir in (first, second, third):
+        fake_run = suite_dir / "fake_run"
+        fake_run.mkdir(parents=True, exist_ok=True)
+        best_path = fake_run / "best_value_head.pt"
+        final_path = fake_run / "final_value_head.pt"
+        best_path.write_text("best\n", encoding="utf-8")
+        final_path.write_text("final\n", encoding="utf-8")
+        (fake_run / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "output_files": {
+                        "best_value_head": str(best_path),
+                        "final_value_head": str(final_path),
+                    }
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
     output_root = tmp_path / "candidates"
 
     exit_code = module.main(
@@ -166,7 +186,53 @@ def test_main_selects_best_group_across_repeated_suite_log_dirs(tmp_path: Path) 
     assert len(payload["group_summaries"]) == 3
 
 
-def test_main_resolves_best_checkpoint_path_to_final_when_best_missing(tmp_path: Path) -> None:
+def test_main_fails_when_best_checkpoint_missing_under_strict_policy(tmp_path: Path) -> None:
+    module = _load_selector_module()
+    first = _write_suite_log_dir(
+        root=tmp_path,
+        group_id="E41_MS_ACC90_MLP_RANK_SEED3",
+        group_title="E41",
+        pair_acc=0.96,
+        auc=0.89,
+        ranking_score=0.93,
+    )
+    fake_run = first / "fake_run"
+    fake_run.mkdir(parents=True, exist_ok=True)
+    final_path = fake_run / "final_value_head.pt"
+    final_path.write_text("final\n", encoding="utf-8")
+    (fake_run / "manifest.json").write_text(
+        json.dumps(
+            {
+                "output_files": {
+                    "best_value_head": str(fake_run / "best_value_head.pt"),
+                    "final_value_head": str(final_path),
+                }
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output_root = tmp_path / "candidates"
+
+    try:
+        module.main(
+            [
+                "--run-name",
+                "candidate_checkpoint_resolution",
+                "--output-root",
+                str(output_root),
+                "--suite-log-dirs",
+                str(first),
+            ]
+        )
+    except FileNotFoundError as exc:
+        assert "Missing best_value_head.pt" in str(exc)
+    else:
+        raise AssertionError("strict candidate selection should fail when best checkpoint is missing")
+
+
+def test_main_can_fallback_to_final_when_explicitly_requested(tmp_path: Path) -> None:
     module = _load_selector_module()
     first = _write_suite_log_dir(
         root=tmp_path,
@@ -201,6 +267,8 @@ def test_main_resolves_best_checkpoint_path_to_final_when_best_missing(tmp_path:
             "candidate_checkpoint_resolution",
             "--output-root",
             str(output_root),
+            "--checkpoint-missing-policy",
+            "fallback_final",
             "--suite-log-dirs",
             str(first),
         ]

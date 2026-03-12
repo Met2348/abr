@@ -1,5 +1,80 @@
 # A-E 实现审计、社区对照与重设计结论（2026-03-11）
 
+## 2026-03-12 再补一轮 E/F 审计：LoRA 默认安全化 + controller 评估口径修正
+
+这轮确认并修复了两个更偏“解释风险”的高危点：
+
+1. `phase_e_train_value_lora.py` direct defaults
+   - 风险：
+     - wrapper 已经安全，但直接调用 LoRA trainer 时仍可能继承 legacy-dangerous 默认值
+   - 修复：
+     - 默认 `ranking_target_space=score`
+     - 默认 `pair_weight_mode=none`
+     - 默认 `checkpoint_selection_metric=pair_acc`
+
+2. `phase_f_train_trainable_controller.py` / `phase_f_behavior_clone_controller.py`
+   - 风险：
+     - 以前只做 train/dev split，就在 full benchmark trace pool 上报 headline
+     - 这不是代码崩坏，但会系统性高估 controller 质量
+   - 修复：
+     - 显式切成 `train/dev/test`
+     - `test_eval` 成为主结果
+     - `full_eval` 降级为 in-benchmark ceiling / debug reference
+
+这次修复后的含义：
+
+1. 活跃 Phase E wrapper 与 direct LoRA trainer 现在共享同一套更安全的默认口径；
+2. 新的 Phase F controller summary 更适合拿来和其他 held-out 结果并列解读；
+3. 历史 controller summary 若只看到单个 `eval` 字段，应按“旧口径、低信任”处理。
+
+## 2026-03-12 再补一轮 E/F 审计：paper mirror 完成 + dual-head 旧入口去危险化
+
+这轮没有发现新的跨阶段主链静默污染 bug，但完成了两件基础设施级收口：
+
+1. `docs/relatedPapers/`
+   - 现在已经覆盖文档中提到且可稳定解析的论文 PDF；
+   - `scripts/download_related_papers.py` 也补齐了 bare arXiv PDF URL 的解析。
+2. `run_phase_e_dual_head_smoke.sh`
+   - 不再默认跑已知危险组合：
+     - `logit`
+     - `confidence_semantic`
+     - `ranking_score`
+   - 现在默认回到安全口径：
+     - `score`
+     - `none`
+     - `pair_acc`
+     - `RECIPE_RISK_POLICY=error`
+
+为什么这重要：
+
+1. 旧 dual-head smoke 本来是历史诊断脚本；
+2. 但如果它继续保留危险默认值，就可能在未来被误当成“正常可复现实验”重新跑；
+3. 这会让已经确认过的 collapse recipe 又回流到新矩阵中，重新污染 source-quality 结论。
+
+
+## 2026-03-13 再补一轮审计：主链路无新增高危，launcher provenance 风险已修
+
+本轮继续复查了 A/B/C/D/E/F 的活跃入口与最近新增脚本，结论是：
+
+1. 没有新发现会直接污染 A-F 主实验结论的跨阶段实现级高危 bug；
+2. 新确认的一类真实风险发生在夜间 launcher 层，不在模型训练主链本身：
+   - 下游 frontier 任务原先只等待 `final_summary.md` 出现；
+   - 但 `failed` 运行同样会写出 `final_summary.md`；
+   - 因此存在“上游失败、下游仍误启动”的 provenance 风险。
+
+修复：
+
+1. 新增 `scripts/wait_for_summary_status.py`
+2. `scripts/run_phase_e_overnight_frontier_suite.sh` 现在必须等待 `- status: ok`
+
+补充判断：
+
+1. 当前仓库更主要的问题已转向研究设计层：
+   - 数据监督几何
+   - terminal completion ordering
+   - controller / reward shaping
+2. 不是新一轮实现层 silent corruption。
+
 ## 2026-03-13 追加更新：B/C/D/E 评测 provenance 收口
 
 这轮又补了一类会直接污染实验结论的实现风险：

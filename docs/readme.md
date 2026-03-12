@@ -1,10 +1,204 @@
 # BCR/ABR Research Pipeline (Condensed)
 
+## 2026-03-12 Midday E/F Refresh
+
+这轮新增的已验证结论很直接：
+
+1. `docs/relatedPapers/` 现在已经补齐到 `106/106` 个文档中出现的论文 URL。
+2. `Phase E` 的 cheap -> strong verifier gate 只在当前 `GSM` 风格切片上成立：
+   - `p19 -> p31` / `p19 -> p33` 都能小幅提高 AUC，且只需要 `9%-16%` 的 strong usage；
+   - 但 `Math` 上 `p26/p31 -> p32` 当前没有收益。
+3. `Phase F` 的 corrected mixed-pool GRPO proxy 显示 reward signal 并不缺，真正的问题更像是：
+   - `GSM8K` 太饱和，
+   - from-scratch RL 仍然极不稳定。
+4. 聚焦 controller 实验里：
+   - `bc_then_rl` 比 `bc_only` 有小幅提升，
+   - 但 from-scratch RL-like 直接塌到 `0.0000`，所以主线仍应保持 `heuristic / BC first`。
+5. 新的 `Phase E L2` gated LoRA frontier 已经在 GPU2 正式启动。
+
+详细研究与实验汇总见：
+
+1. `docs/phase_e_phase_f_web_research_refresh_20260312.md`
+2. `docs/result_records.md` 顶部最新条目
+
 本仓库用于推进“推理可靠性/一致性/Faithfulness”研究，当前主线已经切换为：
 - 先用 Phase A/B 建立稳定基线与现象诊断，
 - 在 Phase C/D 验证 ranking-style value supervision 是否可学，
 - 但不再把 StrategyQA 当作主监督训练基准，
 - 后续先在具备高质量步骤监督的数据集上验证方法，再把结果迁移回 StrategyQA。
+
+## 2026-03-12 Phase E/F 审计补充：LoRA 默认安全化 + Controller test-split 修正
+
+这轮又修了两个会误导结论的实现口径问题：
+
+1. `scripts/phase_e_train_value_lora.py`
+   - 现在默认改成仓库安全配方：
+     - `--ranking-target-space score`
+     - `--pair-weight-mode none`
+     - `--checkpoint-selection-metric pair_acc`
+   - 含义：
+     - 直接调用 LoRA trainer 时，不会再因为 legacy 默认值而静默落入已知危险 recipe。
+
+2. `scripts/phase_f_train_trainable_controller.py`
+   - `scripts/phase_f_behavior_clone_controller.py`
+   - 现在主结果固定看 `test_eval`，而不是把 train/dev 混回 full traces 再报 headline。
+   - `full_eval` 仍然保留，但只作为 in-benchmark 上界参考，不能当外部泛化证据。
+
+这次修复后，Phase F controller 的 summary 解释标准更严格：
+
+1. `best_dev_eval`
+   - 只用于选模型
+2. `test_eval`
+   - 才是主结果
+3. `full_eval`
+   - 只能当“同 benchmark 家族内的上界参考”，不能拿去替代真正 held-out / external 结论
+
+## 2026-03-12 Phase E / F Overnight Packaging
+
+这一轮又补了两条更贴近当前瓶颈的一键入口：
+
+1. `scripts/run_phase_e_lora_overnight_suite.sh`
+   - 直接围绕 `PBR26` 数据池做 stronger LoRA frontier
+   - 包含：
+     - all-layer LoRA + mild contrastive + centering
+     - all-layer LoRA + stronger contrastive + gated head
+     - stronger-setting dual-head controlled retry
+2. `scripts/run_phase_f_usability_overnight_suite.sh`
+   - 直接围绕 stronger verifier slices 做 controller usability chain
+   - 串行覆盖：
+     - controller sweep
+     - generator robustness
+     - weak-verifier ensemble
+     - BC / BC->RL
+     - robust-from-scratch RL-like probe
+
+同时修掉了一个会污染结论的 LoRA launcher 风险：
+
+1. 手写 `PBR33/34/35` launchers 以前是 `set -e` 但没开 `pipefail`
+2. `python ... | tee log` 中途挂掉时，shell 仍可能继续做 eval
+3. 现在这些脚本只会接受已经写出 `manifest.json` 的完整 run dir
+
+## 2026-03-12 Phase E/F 安全化与 verifier 系统重设计补充
+
+1. `docs/relatedPapers/` 现已补齐文档里提到的论文 PDF 镜像，可离线查阅。
+2. `Phase E` 活跃入口进一步收紧：
+   - candidate selector 默认严格要求 `best_value_head.pt`
+   - 不再默认静默回退到 `final_value_head.pt`
+   - `run_phase_e_dual_head_smoke.sh` 也不再默认跑已知危险 recipe
+3. 新增一个离线 `cheap -> strong verifier` 门控实验，直接回答：
+   - 便宜 verifier 什么时候该自己判，
+   - 什么时候必须升级到更强 verifier。
+
+当前最重要的新结论：
+
+1. `cheap -> strong` 门控方向是合理的，但当前 weak verifier 还不够强。
+2. 以 `prm_e46` 或 `ms_e43` 为 weak、`pbr26` 为 strong 时：
+   - benchmark AUC 的确会随着强 verifier 覆盖率上升而改善；
+   - 但要接近强 verifier 本体，通常需要把 `~87%-97%` 的样本都交给 strong。
+3. 这说明当前 repo 还不能依赖“cheap verifier 只审大部分样本，少量升级”来解决 RL-ready 问题。
+4. 更合理的新主线是：
+   - local/process verifier
+   - terminal/answer verifier
+   - abstain / escalate gate
+   三者分开建模，而不是继续押注单一 scalar head。
+
+## 2026-03-12 当前活跃 Overnight 运行
+
+已重新修复并启动这轮更贴近当前瓶颈的夜间任务：
+
+1. `phase_e_phase_f_overnight_0312_1621`
+   - 修复后的单卡顺序包：`PH2` + `selected relabel` + `modern preflight`
+2. `phase_e_selrel_wide_0312_1615`
+   - 更宽 low-margin slice 的 `selected relabel`
+3. `phase_e_selrel_strict_0312_1615`
+   - 更严格共识过滤版 `selected relabel`
+4. `phase_f_usability_0312_1615`
+   - Phase F controller usable 性 overnight
+
+当前最重要的新增实现修复：
+
+1. `run_phase_e_processbench_hybrid_suite.sh` 的目录解析不再被 `pipefail + head` 误伤
+2. `gated_mlp` 不再错误复用 `mlp` warm-start checkpoint
+
+## 2026-03-13 单卡 Overnight 新包
+
+为了避免拥挤服务器上的多任务互相抢 VRAM，新增了一套更保守、也更适合真实 overnight 的顺序包：
+
+1. 文档：
+   - `docs/phase_e_phase_f_overnight_bestpractice_20260313.md`
+2. launcher：
+   - `scripts/run_phase_e_phase_f_single_gpu_overnight.sh`
+3. preflight：
+   - `scripts/run_phase_f_modern_preflight_suite.sh`
+
+设计原则：
+
+1. `Phase E` 继续沿 benchmark-oriented + selective judge relabel 路线推进；
+2. `Phase F` 先审 `PBR26 / PBR31` 的 threshold-shift 与 reward-hacking 面；
+3. 暂不把 verifier 直接提升为 RL 主奖励。
+
+推荐启动方式：
+
+```bash
+RUN_PREFIX=phase_e_phase_f_overnight_$(date +%m%d_%H%M) \
+GPU_ID=3 \
+bash scripts/run_phase_e_phase_f_single_gpu_overnight.sh
+```
+
+## 2026-03-13 Overnight Frontier 最新结论
+
+1. `F2_DUAL_HEAD_PBR10` 是负结果：
+   - dual-head 没修好 terminal blind spot，反而把 same-family 与 benchmark 几何都拉坏了
+2. `PH2_PRM_LOCAL_TA10_MSGRID10_ARCH_SWEEP_SMOKE` 说明：
+   - held-out 很高不等于 benchmark-facing trustworthiness
+   - 该混合配方达到 `held-out 0.9318 / 0.9040`，但 256-sample ProcessBench AUC 仍只有：
+     - GSM `0.5224`
+     - Math `0.5321`
+3. `CR1_CURATED_CENTER_GATE_SMOKE` 被 recipe guard 正确拦截
+4. `F3_LORA_PBR10` 仍在跑，当前还不能下最终结论
+
+
+## 2026-03-13 A-F 审计补充
+
+这一轮补充审计没有发现新的 A-F 主链路高危实现 bug。
+
+新确认并修掉的风险只有一类：
+
+1. 夜间 frontier launcher 的链式依赖以前只看 `final_summary.md` 是否出现；
+2. 这会让下游实验在上游 `status: failed` 时也被错误启动；
+3. 现在已经改成必须等待 `- status: ok`。
+
+对应文件：
+
+1. `scripts/wait_for_summary_status.py`
+2. `scripts/run_phase_e_overnight_frontier_suite.sh`
+
+这说明当前仓库的主要瓶颈已经更偏向：
+
+1. 监督几何与 benchmark 不对齐
+2. controller / reward 设计问题
+3. 不是新的实现层面 silent corruption
+
+## 2026-03-13 Overnight Frontier Package
+
+最新夜间实验协调说明：
+
+1. `docs/phase_e_overnight_frontier_plan_20260313.md`
+
+一键 launcher：
+
+```bash
+RUN_PREFIX=phase_e_overnight_$(date +%m%d_%H%M) \
+bash scripts/run_phase_e_overnight_frontier_suite.sh
+```
+
+这一包实验只做五件高价值的事：
+
+1. `dual-head` 修 terminal blind spot
+2. 最小 `LoRA` probe 测 frozen-backbone ceiling
+3. benchmark-oriented hybrid supervision
+4. 一个 curated + centering 后续修复
+5. 一个 terminal-anchor ratio sweep
 
 ## 2026-03-13 最新突破复核
 
@@ -27,6 +221,51 @@
 4. 所以现在不能把 repo 结论表述成：
    - "`PBR26` 可以直接做 RL verifier"
    - 或 "`PBR31` 已经干净超越 frozen"
+
+## 2026-03-13 Phase F robust / ensemble 更新
+
+在 controller family sweep 之外，又补做了两类更接近部署的问题：
+
+1. worst-generator robust policy 搜索
+2. weak-verifier score ensemble
+
+关键结果：
+
+1. `Math` 上，`guarded_drop` 是当前最稳的 robust family
+2. `GSM` 上，`delayed_drop / drop_needs_low` 更合适
+3. `pbr26+pbr31` 或 `pbr19+pbr31` 的弱集成还能继续提升 offline controller 指标
+   - `Math` 可到 `balanced_f1≈0.876`
+   - `GSM` 可到 `balanced_f1≈0.913-0.914`
+
+这进一步支持：
+
+1. 当前 verifier 已经足够支撑 heuristic controller 试运行；
+2. 下一步优先级应是 live heuristic controller，而不是立刻上 RL；
+3. RL 仍需等 live validation、reward-hacking、threshold stability 全部复核后再推进。
+
+## 2026-03-12 Phase F RL-like 学习更新
+
+这轮又进一步验证了一个关键判断：
+
+1. trainable controller 不是做不到；
+2. 但“从随机初始化直接做 RL”目前很不稳；
+3. `behavior cloning` warm-start 明显更靠谱。
+
+关键结果：
+
+1. `pbr26_math` 纯 REINFORCE 两种 reward 都塌到 `balanced_f1 = 0.0000`
+2. `pbr31_math` robust RL from scratch 只有 `0.3493`
+3. `bc_only` 却能直接做到：
+   - `pbr26_math = 0.8502`
+   - `pbr31_math = 0.8552`
+   - `pbr31_gsm = 0.9045`
+4. `BC -> robust RL` 目前没有再带来提升，反而略降
+
+这说明当前最合理的 Phase F 下一步仍然是：
+
+1. heuristic controller live 验证
+2. 或 BC-distilled controller live 验证
+3. 而不是把 RL 作为默认第一步
 
 ## 2026-03-13 Phase F controller 新结论
 

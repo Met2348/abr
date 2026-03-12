@@ -234,14 +234,20 @@ def _build_case_row(
             "good_vs_laterbad_accuracy": float(
                 scored_summary["aggregate_metrics"]["good_vs_laterbad"]["accuracy"]
             ),
-            "gap1_accuracy": float(scored_summary["gap_bucket_metrics"]["gap1"]["accuracy"]),
-            "gap2_accuracy": float(scored_summary["gap_bucket_metrics"]["gap2"]["accuracy"]),
-            "gap3_4_accuracy": float(scored_summary["gap_bucket_metrics"]["gap3_4"]["accuracy"]),
-            "gap5p_accuracy": float(scored_summary["gap_bucket_metrics"]["gap5p"]["accuracy"]),
+            "gap1_accuracy": _safe_gap_bucket_accuracy(scored_summary, "gap1"),
+            "gap2_accuracy": _safe_gap_bucket_accuracy(scored_summary, "gap2"),
+            "gap3_4_accuracy": _safe_gap_bucket_accuracy(scored_summary, "gap3_4"),
+            "gap5p_accuracy": _safe_gap_bucket_accuracy(scored_summary, "gap5p"),
         },
         "all_correct_metrics": all_correct_metrics,
         "prefix_bucket_means": prefix_bucket_means,
     }
+
+
+def _safe_gap_bucket_accuracy(scored_summary: dict[str, Any], bucket_name: str) -> float:
+    bucket_metrics = dict(scored_summary.get("gap_bucket_metrics", {}))
+    bucket_row = dict(bucket_metrics.get(bucket_name, {}))
+    return float(bucket_row.get("accuracy", 0.0))
 
 
 def _load_joined_processbench_rows(

@@ -1,5 +1,28 @@
 # Phase E Pipeline Redesign (2026-03-11)
 
+## 2026-03-12 更新：加入 cheap->strong gate 结果后的主线修正
+
+本轮新增一个重要结论：
+
+1. `cheap -> strong verifier` 门控在方向上成立；
+2. 但现有 weak verifier 还不够强，无法显著减少 strong verifier 覆盖率。
+
+直接证据：
+
+1. `prm_e46 -> pbr26`
+   - 要接近 strong verifier，本仓库需要 `95%-97%` 的 strong usage
+2. `ms_e43 -> pbr26`
+   - 略好，但仍需 `86%-91%` 的 strong usage
+
+这会直接改变 pipeline 设计：
+
+1. 不应把“cheap verifier + 少量强 verifier 升级”当作当前默认部署路线；
+2. 更合理的是先把 verifier 功能拆开：
+   - `local/process verifier`
+   - `terminal/answer verifier`
+   - `abstain / escalate gate`
+3. gate 仍然保留，但应当服务于“已拆开的 verifier system”，而不是试图挽救一个单一 scalar verifier。
+
 ## Purpose
 
 This note consolidates:

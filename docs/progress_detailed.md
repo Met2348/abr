@@ -1,6 +1,412 @@
+## 2026-03-12 16:47:00 +0800
+
+- Type: Phase E/F research refresh + GRPO proxy repair + focused controller experiments
+- Code changes:
+  - updated `scripts/phase_f_grpo_feasibility.py`
+  - updated `scripts/run_phase_e_lora_overnight_suite.sh`
+  - added `tests/unit/test_phase_f_grpo_feasibility.py`
+  - added `docs/phase_e_phase_f_web_research_refresh_20260312.md`
+  - updated `docs/result_records.md`
+  - updated `docs/readme_full.md`
+  - updated `docs/readme.md`
+- Main findings:
+  - the old offline GRPO feasibility proxy silently forced outcome reward variance to zero by grouping only same-label traces
+  - selective cheap -> strong verification helps on current GSM slices but not on current Math slices
+  - warm-started `bc_then_rl` can still beat `bc_only` modestly, while from-scratch RL-like collapses completely on the tested `p31` slices
+- Fixes:
+  - defaulted `phase_f_grpo_feasibility.py` to `mixed_pool` grouping and removed the stale hardcoded scorer recommendation
+  - added unit coverage so mixed-pool outcome reward can no longer silently regress back to the degenerate zero-variance path
+  - hardened `run_phase_e_lora_overnight_suite.sh` so heavy command logging no longer rides on `tee` pipelines and latest-artifact resolution requires completion markers
+- Runtime follow-up:
+  - completed the cheap -> strong gate sweep
+  - completed focused `bc_only`, `bc_then_rl`, and from-scratch RL-like controller experiments
+  - completed corrected `Phase F modern preflight`
+  - launched live `Phase E L2` gated LoRA training on GPU2
+- Validation:
+  - `python -m pytest tests/unit/test_phase_f_grpo_feasibility.py tests/unit/test_phase_f_trainable_controller.py`
+  - `bash -n scripts/run_phase_e_lora_overnight_suite.sh`
+
+## 2026-03-12 16:36:00 +0800
+
+- Type: Phase E/F overnight pivot to PRM-backbone hybrid + modern preflight repair
+- Code changes:
+  - updated `scripts/run_phase_f_modern_preflight_suite.sh`
+  - updated `scripts/run_phase_e_phase_f_single_gpu_overnight.sh`
+- Main findings:
+  - `selected-relabel` kept only about `1%` of low-margin PRMBench pairs after judge filtering, so it was consuming GPU time without materially changing the training distribution
+  - direct foreground verification showed `Math-PRM-7B` can train inside `PH1/PH2` without interface issues, making PRM-backbone hybrid the higher-value overnight direction
+  - `Phase F modern preflight` had a second real contract bug: after fixing the stale `PBR31` path, the reward-hacking probe still assumed all candidates shared one backbone signature, which is false for frozen `PBR26` vs LoRA `PBR31`
+- Fixes:
+  - switched the single-GPU overnight package from `selected-relabel` to sequential `PH1` + `PH2` runs on `Qwen2.5-Math-PRM-7B`
+  - added `E_MODEL_PATH` to the launcher so the new path is explicit and overrideable
+  - repaired modern preflight so `PBR26` and `PBR31` are probed separately and then summarized together
+  - updated the default `PBR31` run dir to the latest valid checkpoint-bearing artifact
+- Runtime follow-up:
+  - launched live `PH1` / `PH2` PRM-backbone hybrid runs
+  - relaunched `Phase F modern preflight` on the corrected probe path
+
 # Progress Detailed Changelog
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
+
+## 2026-03-12 16:21:35 +0800
+
+- Type: Phase E overnight suite hardening + related paper mirror sync
+- Code changes:
+  - updated `scripts/run_phase_e_lora_overnight_suite.sh`
+  - refreshed `docs/relatedPapers/index.json` via downloader
+- Main findings:
+  - `Phase E` LoRA overnight wrapper still had one high-risk failure mode: heavy train/eval commands were piped through `tee`, so log-path issues could flip a completed run into a suite-level failure
+  - the same wrapper also duplicated every GPU wait message because `log_line()` already appended to the suite log before another `tee -a "$SUITE_LOG_FILE"`
+  - the repo paper mirror was not stale in principle, but the latest `GRPO` literature doc had added five papers that had not yet been materialized into `docs/relatedPapers/`
+- Fixes:
+  - moved heavy per-case stdout/stderr capture to case-log redirection instead of `tee` pipelines
+  - added completed-artifact resolution that requires marker files such as `manifest.json` / `metrics.json` before a run is accepted as the latest artifact
+  - removed duplicate suite-log writes in the GPU idle wait loop
+  - synced all currently referenced papers into `docs/relatedPapers/` and regenerated `index.json`
+- Validation:
+  - `python -u scripts/download_related_papers.py --docs-root docs --output-dir docs/relatedPapers --include-root-readme --download --run-name related_papers_sync_0312_1618`
+  - `python -m pytest tests/unit/test_phase_f_trainable_controller.py tests/unit/test_wait_for_summary_status.py tests/unit/test_phase_e_select_candidate.py tests/unit/test_phase_e_select_intradataset_candidate.py`
+
+## 2026-03-12 16:18:00 +0800
+
+- Type: Phase E/F overnight recovery + hybrid wrapper hardening
+- Code changes:
+  - updated `scripts/run_phase_e_phase_f_single_gpu_overnight.sh`
+  - updated `scripts/run_phase_e_processbench_hybrid_suite.sh`
+- Main findings:
+  - the first single-GPU overnight launch really started, but the launcher plan heredoc still contained shell backticks, which triggered command substitution at runtime
+  - `run_phase_e_processbench_hybrid_suite.sh` still had a true implementation bug: `latest_dir_by_prefix()` used `ls | head` under `pipefail`, so successful pair artifacts could be misread as failed via `SIGPIPE`
+  - the hybrid wrapper also tried to warm-start `gated_mlp` from an `mlp` checkpoint, which the training script correctly rejected as a config mismatch
+- Fixes:
+  - removed shell-sensitive backticks from the overnight launcher plan rendering
+  - changed the hybrid wrapper artifact resolver to a Python-based directory resolver
+  - added an architecture compatibility guard so warm-start checkpoints are only reused when the stored head architecture matches the current requested head
+  - kept `CR1` optional in the single-GPU overnight package because current recipe guard still blocks it by design
+- Runtime follow-up:
+  - relaunched `phase_e_phase_f_overnight_0312_1621` after the fixes
+  - launched `phase_e_selrel_wide_0312_1615` on GPU2
+  - launched `phase_e_selrel_strict_0312_1615` on GPU1
+  - launched `phase_f_usability_0312_1615` on CPU
+- Validation:
+  - `bash -n scripts/run_phase_e_phase_f_single_gpu_overnight.sh`
+  - `bash -n scripts/run_phase_e_processbench_hybrid_suite.sh`
+  - verified `PH2` now reaches `artifact_dir` and enters training instead of failing in `prepare_pairs`
+
+## 2026-03-12 12:10:00 +0800
+
+- Type: Phase F complete — all experiments done, strategic pivot documented
+- Session: overnight monitoring wrap-up
+
+### Experiments completed this session
+
+**PBR37 GSM eval** (10:00): MATH F1=0.657, GSM F1=0.768. Contrastive=0.2 = zero benefit vs PBR35 (no contrastive). Full LoRA ceiling confirmed at 0.654-0.657 for all PBR26-data variants.
+
+**BoN v4 r2 PBR26** (10:10): greedy=91.0%, prm@4=92.5%, prm_vs_random=+1.0%, phase_f3_gate=FAIL.
+Earlier log-recovered v4 result (0.0% delta) was wrong; authoritative r2 shows +1.5% vs greedy but fails the +2% vs random threshold. LoRA scorer (PBR32) passes; frozen (PBR26) fails.
+
+**GRPO+PRM v4 r2** (11:42): Clip+Delta reward, PBR26 PRM, 250 steps. pre=0.955, post=0.955, delta=0.0, phase_f4_gate=FAIL. GSM8K ceiling (95.5%) prevents any GRPO improvement. Same outcome as all prior GRPO runs.
+
+**L1 overnight LoRA** (12:04): r=8 all-28, contrastive=0.05, center_mlp, PBR26 data. MATH F1=0.654, GSM F1=0.762. Slightly below PBR35/37 (0.657/0.768). center_mlp + low contrastive = no benefit.
+
+### Infrastructure fixes
+
+`phase_f_grpo_lite.py`: Added `save_total_limit=1` to GRPOConfig (prevents disk overflow from accumulating checkpoints).
+
+### Strategic conclusion
+
+All Phase F experiments complete. Both LoRA (PBR34-37, L1) and GRPO (v2-v4) variants fail.
+Root causes documented. Next step: PBR38A — repeat PBR32 configuration with contrastive=0.2.
+See `docs/result_records.md` entry 0AAARCBD for complete analysis.
+
+---
+
+## 2026-03-12 09:25:00 +0800
+
+- Type: Phase F infrastructure fix (checkpoint disk overflow prevention)
+- Session: monitoring overnight experiments
+
+### Fix: `scripts/phase_f_grpo_lite.py` — `save_total_limit=1` added to GRPOConfig
+
+Root cause: GRPO v4 (PBR32, λ=0.3) crashed at step 150/250 when saving checkpoint-150 (`optimizer.pt`).
+The disk was at 100% because 5 checkpoint directories × ~43GB each = ~215GB had accumulated.
+With `save_total_limit` unset (default = keep all), HuggingFace Trainer keeps every `save_steps`
+checkpoint indefinitely. Changed to `save_total_limit=1` so only the most recent checkpoint is kept.
+
+Change: `GRPOConfig(... save_total_limit=1 ...)` at `scripts/phase_f_grpo_lite.py:488`.
+
+The new GRPO+PRM v4 r2 (Clip+Delta, PBR26) will now use only 1 checkpoint directory × ~43GB = ~43GB.
+
+---
+
+## 2026-03-13 05:30:00 +0800
+
+- Type: Phase E LoRA bug fix + Phase F infrastructure fix + Clip+Delta GRPO
+- Session: resumed from context compaction
+
+### Bug Fixes Applied
+
+**1. LoRA PRM Loading Bug (Critical)**
+
+`attach_peft_adapter_for_inference()` in `src/ours/phase_e/runtime.py` crashed when loading
+LoRA adapters trained with `task_type=CAUSAL_LM` onto `Qwen2ForProcessRewardModel`. PEFT tried to
+wrap the model as `PeftModelForCausalLM` which requires `prepare_inputs_for_generation`.
+
+Fix: bypass PEFT model class mapping by using `get_peft_model()` + manual safetensors loading.
+Also changed `apply_lora_to_backbone()` to use `task_type=None` for new adapters.
+Phase F scripts (BoN eval, GRPO) updated to use the fixed function.
+
+**2. GRPO Reward Shaping (Clip+Delta)**
+
+Based on Zeng et al. 2024: raw PRM scores as reward → model generates many tiny steps to accumulate
+scores (reward hacking). Added `PRMScorer.score_clip_delta()` with clipped step-to-step deltas:
+`r = (1/T) Σ_t clip(s_t - s_{t-1}, ±0.3)`.
+New default `--reward-shaping clip_delta` in `phase_f_grpo_lite.py`.
+
+**3. Auto-eval watchers (wrong Python, wrong args)**
+
+Fixed PBR34/35/36/37 auto-eval watchers to use bcr env Python and correct `--value-run-dir` arg.
+New watchers: PIDs 3812435 (PBR34), 3812158 (PBR35), 3812707 (PBR36), 3812987 (PBR37).
+
+### Current Experiment Status
+
+| Experiment | GPU | Status | Notes |
+|---|---|---|---|
+| PBR34 (r=16 top-4 PBR26) | 2 | Epoch 3/5, step 280 | ~2h to eval |
+| PBR35 (r=8 all-28 PBR26) | 1 | Epoch 2/5, step 200 | ~4h to eval |
+| PBR36 (r=32 all-28 PBR26) | 3† | Epoch 1/5, step 80 | ~12h to eval |
+| PBR37 (r=8 all-28 contrastive) | 0 | Epoch 0, step 20 | ~12h to eval |
+| GRPO v2 (outcome-only) | 3 | Step 26/250 | ~2h to finish |
+| BoN eval | 3 | Waiting for GRPO v2 | — |
+| GRPO+PRM (Clip+Delta) | 3 | Waiting for BoN | — |
+
+† PBR36 and GRPO v2 share GPU 3 (79/80GB total) — tight but functional.
+
+### Literature Research
+
+- Comprehensive synthesis doc: `docs/phase_f_rl_research_update_20260312.md`
+- Fresh literature research agent (a3debd12a5a7d7359) still running in background
+- Key findings: Clip+Delta required for PRM-guided GRPO; PRIME is best for RL; heuristic threshold
+  beats offline REINFORCE controller on MATH domain.
+
+## 2026-03-12 13:25:00 +0800
+
+- Type: Phase E/F silent-risk audit hardening
+- Code changes:
+  - updated `scripts/phase_e_train_value_lora.py`
+  - updated `scripts/phase_f_train_trainable_controller.py`
+  - updated `scripts/phase_f_behavior_clone_controller.py`
+- Main findings:
+  - `phase_e_train_value_lora.py` still kept legacy-dangerous defaults (`logit` + semantic-style weighting), which could silently reproduce already-audited collapse modes when users bypassed wrappers and called the trainer directly
+  - `phase_f_train_trainable_controller.py` and `phase_f_behavior_clone_controller.py` reported main controller quality on the full benchmark trace pool after only a train/dev split, which risks overstating controller quality by mixing training-family traces back into the headline metric
+- Fixes:
+  - LoRA value-head trainer now defaults to the repository-safe recipe (`score` target space, `pair_weight_mode=none`, `checkpoint_selection_metric=pair_acc`)
+  - Phase F trainable-controller and behavior-cloning controllers now use explicit train/dev/test splits and expose `test_eval` as the main summary metric
+  - both Phase F summaries now mark `full_eval` as an in-benchmark upper-bound diagnostic only, not external generalization evidence
+- Validation:
+  - `python -m py_compile scripts/phase_e_train_value_lora.py scripts/phase_f_train_trainable_controller.py scripts/phase_f_behavior_clone_controller.py`
+  - `python -u scripts/phase_e_audit_suite_recipes.py --run-name phase_e_suite_recipe_audit_postfix_0312c`
+
+## 2026-03-13 06:34:00 +0800
+
+- Type: Phase E/F single-GPU overnight packaging + modern preflight hardening
+- Code changes:
+  - updated `scripts/run_phase_e_prmbench_selected_relabel_suite.sh`
+  - added `scripts/run_phase_f_modern_preflight_suite.sh`
+  - added `scripts/run_phase_e_phase_f_single_gpu_overnight.sh`
+  - added `scripts/wait_for_gpu_idle_and_launch.py`
+- Main findings:
+  - all four GPUs are currently busy, so the safest overnight strategy is no longer a parallel frontier batch but a single-GPU sequential package that can wait for one card to free up
+  - `PRMBench` selected-relabel had become too rigid for crowded servers because slice/train memory knobs were effectively hard-coded
+  - `Phase F` preflight needed to move from older `PBR12/PBR21/PRX1` candidates to the current stronger `PBR26/PBR31` pair
+- Fixes / packaging:
+  - `run_phase_e_prmbench_selected_relabel_suite.sh` now exposes source-aware GPU/memory/batch/length overrides so low-margin judge relabel can run safely under tighter VRAM budgets
+  - added `run_phase_f_modern_preflight_suite.sh` to audit `PBR26/PBR31` for threshold-shift and reward-hacking readiness before any RL promotion
+  - added `run_phase_e_phase_f_single_gpu_overnight.sh` to run `PH2` -> `selected relabel` -> `CR1` -> `modern preflight` sequentially on one GPU with conservative memory caps
+  - added `wait_for_gpu_idle_and_launch.py` so overnight launch can be safely deferred until a target GPU is actually idle, instead of racing active jobs on a crowded server
+- Validation:
+  - `bash -n scripts/run_phase_e_prmbench_selected_relabel_suite.sh`
+  - `bash -n scripts/run_phase_f_modern_preflight_suite.sh`
+  - `bash -n scripts/run_phase_e_phase_f_single_gpu_overnight.sh`
+  - `python -m py_compile scripts/wait_for_gpu_idle_and_launch.py`
+
+## 2026-03-12 04:44:25 +0800
+
+- Type: Phase E/F audit hardening + related paper mirror completion
+- Code changes:
+  - updated `scripts/download_related_papers.py`
+  - updated `scripts/run_phase_e_dual_head_smoke.sh`
+- Main findings:
+  - `docs/relatedPapers` sync still missed one paper because the downloader only recognized `arxiv.org/pdf/<id>.pdf`, not bare `arxiv.org/pdf/<id>`
+  - `run_phase_e_dual_head_smoke.sh` still defaulted to a known-dangerous recipe (`logit + confidence_semantic + ranking_score`) under `RECIPE_RISK_POLICY=warn`, which could silently reintroduce already-audited collapse settings into fresh experiments
+- Fixes:
+  - paper downloader now normalizes bare arXiv PDF links to canonical `.pdf` endpoints
+  - dual-head smoke wrapper now defaults to safe recipe settings:
+    - `RECIPE_RISK_POLICY=error`
+    - `ranking_target_space=score`
+    - `pair_weight_mode=none`
+    - `checkpoint_selection_metric=pair_acc`
+  - wrapper header comments now explicitly state that unsafe combinations must be opt-in overrides for controlled diagnostics only
+- Validation:
+  - reran related paper sync and reduced unresolved paper count to zero
+  - `bash -n scripts/run_phase_e_dual_head_smoke.sh`
+  - reran `python -u scripts/phase_e_audit_suite_recipes.py --run-name phase_e_suite_recipe_audit_postfix_0312b`
+
+## 2026-03-12 04:35:35 +0800
+
+- Type: Phase E / F overnight usability packaging + LoRA launcher fail-fast repair
+- Code changes:
+  - updated `scripts/run_pbr33_lora_mathprm_pbr26data.sh`
+  - updated `scripts/run_pbr34_lora_mathprm_r16_pbr26data.sh`
+  - updated `scripts/run_pbr35_lora_contrastive.sh`
+  - updated `scripts/run_lora_auto_eval.sh`
+  - added `scripts/run_phase_e_lora_overnight_suite.sh`
+  - added `scripts/run_phase_f_usability_overnight_suite.sh`
+- Documentation:
+  - added `docs/phase_e_phase_f_best_practice_refresh_20260312.md`
+  - updated `docs/readme.md`
+  - updated `docs/readme_full.md`
+  - updated `docs/result_records.md`
+- Main findings:
+  - the current repo already has usable LoRA `contrastive / reward-centering / gated_mlp / dual_head` knobs in `phase_e_train_value_lora.py`; several local notes are stale about that capability
+  - the hand-written `PBR33/34/35` LoRA launchers used `set -e` without `pipefail`, so crashed training could still fall through into eval and create false "training done" narratives around incomplete run dirs
+  - Phase F already has strong offline controller research components, but it lacked one overnight-friendly entrypoint that packages stronger verifier slices with BC / RL-like usability checks
+- Fixes / new packaging:
+  - manual LoRA launchers and the LoRA auto-eval watcher now fail fast on pipeline errors and only resolve completed run dirs with `manifest.json`
+  - added a single-GPU Phase E overnight suite centered on stronger `PBR26`-data LoRA frontier attempts instead of older `PBR10` smoke directions
+  - added a CPU-friendly Phase F overnight suite that bundles controller sweep, generator robustness, weak-verifier ensembling, BC warm-start, BC->RL, and robust-from-scratch checks
+- Validation:
+  - `bash -n scripts/run_pbr33_lora_mathprm_pbr26data.sh`
+  - `bash -n scripts/run_pbr34_lora_mathprm_r16_pbr26data.sh`
+  - `bash -n scripts/run_pbr35_lora_contrastive.sh`
+  - `bash -n scripts/run_lora_auto_eval.sh`
+  - `bash -n scripts/run_phase_e_lora_overnight_suite.sh`
+  - `bash -n scripts/run_phase_f_usability_overnight_suite.sh`
+
+## 2026-03-12 04:32:34 +0800
+
+- [CAUTION] tightened Phase E default experiment safety after a fresh audit found two silent conclusion-risk patterns:
+  1. many `run_phase_e_suite.sh` groups still defaulted to `checkpoint_selection_metric=ranking_score`,
+  2. `phase_e_select_candidate.py` / `phase_e_select_intradataset_candidate.py` silently resolved missing `best_value_head.pt` to `final_value_head.pt`.
+- Updated `scripts/run_phase_e_suite.sh` so group-local defaults now prefer `pair_acc`; `ranking_score` remains available only through explicit override for controlled diagnostics.
+- Updated `scripts/run_phase_e_newdataset_suite.sh` so ad-hoc new-dataset experiments also default to `pair_acc` instead of `ranking_score`.
+- Updated `scripts/phase_e_select_candidate.py` and `scripts/phase_e_select_intradataset_candidate.py` to add explicit `--checkpoint-missing-policy {fail,fallback_final}` with `fail` as the safe default.
+- Updated selector-calling wrappers:
+  - `scripts/run_phase_e_mathshepherd_trust_suite.sh`
+  - `scripts/run_phase_e_intradataset_suite.sh`
+  so candidate promotion now runs in explicit strict mode.
+- Added / updated unit coverage to lock the new strict candidate-resolution behavior and prevent future silent best→final fallback regressions.
+
+## 2026-03-13 04:35:00 +0800
+- Type: Phase E overnight frontier result integrity repair
+- Code changes:
+  - updated `scripts/run_phase_e_frontier_suite.sh`
+  - updated `scripts/run_phase_e_processbench_hybrid_suite.sh`
+- Main findings:
+  - `F2_DUAL_HEAD_PBR10` had valid train + eval artifacts, but the wrapper summary was falsely marked failed because the collector expected an outdated same-family JSON schema
+  - `PH2_PRM_LOCAL_TA10_MSGRID10_ARCH_SWEEP_SMOKE` completed training, but the wrapper resolved run/eval directories with the wrong suffix pattern and stopped before benchmark eval
+- Fixes:
+  - frontier collector now supports flattened same-family fields and both `list` / legacy `dict` rejection-curve layouts
+  - hybrid wrapper now resolves both `__fingerprint` and `_timestamp` artifact suffixes so successful runs are not mislabeled
+- Runtime follow-up:
+  - launched post-hoc `processbench_gsm8k` / `processbench_math` eval repair for the completed PH2 MLP run on GPU 3
+- Validation:
+  - `bash -n scripts/run_phase_e_frontier_suite.sh`
+  - `bash -n scripts/run_phase_e_processbench_hybrid_suite.sh`
+
+## 2026-03-13 03:40:00 +0800
+- Type: A-F audit follow-up + overnight launcher safety fix
+- Code changes:
+  - added `scripts/wait_for_summary_status.py`
+  - updated `scripts/run_phase_e_overnight_frontier_suite.sh`
+  - added `tests/unit/test_wait_for_summary_status.py`
+- Main audit conclusion:
+  - no new cross-phase implementation bug was found in the A-F critical path beyond one new launcher-level risk
+  - the confirmed risk was in chained overnight execution: downstream jobs could start as soon as `final_summary.md` appeared, even if upstream finished with `status: failed`
+- Fix:
+  - chained frontier jobs now wait for `final_summary.md` to report `- status: ok`
+  - `failed` or timed-out upstream runs now block dependent jobs instead of silently cascading bad experiments
+- Validation:
+  - targeted regression tests: `PYTHONPATH=src pytest -q tests/unit/test_phase_f_trainable_controller.py tests/unit/test_wait_for_summary_status.py`
+  - broader smoke regression: `PYTHONPATH=src pytest -q tests/unit/test_phase_a_prepare_script.py tests/unit/test_phase_b_eval_faithfulness_script.py tests/unit/test_phase_c_eval_pik_script.py tests/unit/test_phase_d_eval_external_pairs_script.py tests/unit/test_phase_e_runtime.py tests/unit/test_phase_f_trainable_controller.py`
+  - `python -m py_compile scripts/wait_for_summary_status.py scripts/phase_f_train_trainable_controller.py scripts/phase_f_behavior_clone_controller.py`
+  - `bash -n scripts/run_phase_e_overnight_frontier_suite.sh`
+
+## 2026-03-12 04:15:00 +0800
+- Type: Phase F RL-like controller exploration (offline, CPU-only)
+- Code changes:
+  - added `scripts/phase_f_train_trainable_controller.py`
+  - added `scripts/phase_f_behavior_clone_controller.py`
+- Main experiments:
+  - `reinforce_mean` from scratch on `pbr26_math`
+  - `reinforce_mean_balanced` from scratch on `pbr26_math`
+  - `bc_only` on `pbr26_math`, `pbr31_math`, `pbr31_gsm`
+  - `bc_then_rl` with robust fine-tune on `pbr31_math`, `pbr31_gsm`
+  - `reinforce_robust_balanced` from scratch on `pbr31_math`, `pbr31_gsm`
+- Key findings:
+  - from-scratch policy-gradient is unstable and can collapse to `all-stop`
+    - `pbr26_math` naive/balanced REINFORCE both reached `balanced_f1 = 0.0000`
+  - behavior cloning from a good heuristic teacher is strong immediately:
+    - `pbr26_math bc_only = 0.8502`
+    - `pbr31_math bc_only = 0.8552`
+    - `pbr31_gsm bc_only = 0.9045`
+  - adding robust RL after BC did not improve the controller:
+    - `pbr31_math`: `0.8552 -> 0.8415`
+    - `pbr31_gsm`: `0.9045 -> 0.9001`
+  - robust RL from scratch remains unreliable:
+    - `pbr31_math = 0.3493`
+    - `pbr31_gsm = 0.8289`
+- Updated interpretation:
+  - current Phase F should prefer `heuristic / BC-warm-start controller` over pure RL-from-scratch
+  - RL fine-tuning is not yet justified as a default next step
+- Validation:
+  - `python -m py_compile scripts/phase_f_train_trainable_controller.py`
+  - `python -m py_compile scripts/phase_f_behavior_clone_controller.py`
+  - runtime validation via new artifacts under:
+    - `assets/artifacts/phase_f_rl_like/`
+    - `assets/artifacts/phase_f_bc/`
+
+
+## 2026-03-12 04:07:26 +0800
+- Type: Phase F robust-controller gradient fix
+- Code changes:
+  - updated `scripts/phase_f_train_trainable_controller.py`
+  - added `tests/unit/test_phase_f_trainable_controller.py`
+- Main fix:
+  - `robust_lambda` no longer adds a constant no-gradient penalty
+  - worst-generator emphasis is now applied through a differentiable policy-gradient term
+  - training curves now record the epoch's worst-generator slice for auditability
+- Why this matters:
+  - previous "robust RL-like controller" runs could look different in logs while actually taking the same gradient steps as non-robust runs
+  - this directly weakens any claim about worst-generator-aware controller optimization
+- Validation:
+  - `PYTHONPATH=src pytest -q tests/unit/test_phase_f_trainable_controller.py`
+
+## 2026-03-13 02:55:00 +0800
+- Type: Phase E overnight frontier launcher + literature-aligned experiment packaging
+- Code changes:
+  - added `scripts/run_phase_e_overnight_frontier_suite.sh`
+- New docs:
+  - `docs/phase_e_overnight_frontier_plan_20260313.md`
+- Main design:
+  - package one overnight run around five coordinated jobs:
+    - `F2_DUAL_HEAD_PBR10`
+    - `F3_LORA_PBR10`
+    - `PH2_PRM_LOCAL_TA10_MSGRID10_ARCH_SWEEP_SMOKE`
+    - queued `CR1_CURATED_CENTER_GATE_SMOKE`
+    - queued terminal-anchor ratio sweep
+  - launcher implementation writes per-job shell scripts under the run log
+    directory before `nohup`, avoiding brittle nested-quote backgrounding
+- Why this package:
+  - recent verifier literature increasingly points to:
+    - factorized local vs terminal scoring,
+    - conservative judge / curation use,
+    - benchmark-aligned hybrid supervision,
+    - explicit terminal-completion repair,
+    - and representation-ceiling probes
+  - this launcher turns those ideas into one sleep-safe manifest-backed run
+- Validation:
+  - `bash -n scripts/run_phase_e_overnight_frontier_suite.sh`
 
 ## 2026-03-13 02:18:00 +0800
 - Type: Phase F Controller Sweep — offline controller redesign validated across multiple candidates
@@ -1498,6 +1904,49 @@ This file is prepend-only: newest entries must be added at the top (right below 
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
 
+## 2026-03-12 16:18:00 +0800
+
+- Type: Phase E/F overnight recovery + hybrid wrapper hardening
+- Code changes:
+  - updated `scripts/run_phase_e_phase_f_single_gpu_overnight.sh`
+  - updated `scripts/run_phase_e_processbench_hybrid_suite.sh`
+- Main findings:
+  - the first single-GPU overnight launch really started, but the launcher plan heredoc still contained shell backticks, which triggered command substitution at runtime
+  - `run_phase_e_processbench_hybrid_suite.sh` still had a true implementation bug: `latest_dir_by_prefix()` used `ls | head` under `pipefail`, so successful pair artifacts could be misread as failed via `SIGPIPE`
+  - the hybrid wrapper also tried to warm-start `gated_mlp` from an `mlp` checkpoint, which the training script correctly rejected as a config mismatch
+- Fixes:
+  - removed shell-sensitive backticks from the overnight launcher plan rendering
+  - changed the hybrid wrapper artifact resolver to a Python-based directory resolver
+  - added an architecture compatibility guard so warm-start checkpoints are only reused when the stored head architecture matches the current requested head
+  - kept `CR1` optional in the single-GPU overnight package because current recipe guard still blocks it by design
+- Runtime follow-up:
+  - relaunched `phase_e_phase_f_overnight_0312_1621` after the fixes
+  - launched `phase_e_selrel_wide_0312_1615` on GPU2
+  - launched `phase_e_selrel_strict_0312_1615` on GPU1
+  - launched `phase_f_usability_0312_1615` on CPU
+- Validation:
+  - `bash -n scripts/run_phase_e_phase_f_single_gpu_overnight.sh`
+  - `bash -n scripts/run_phase_e_processbench_hybrid_suite.sh`
+  - verified `PH2` now reaches `artifact_dir` and enters training instead of failing in `prepare_pairs`
+
+## 2026-03-13 03:40:00 +0800
+- Type: A-F audit follow-up + overnight launcher safety fix
+- Code changes:
+  - added `scripts/wait_for_summary_status.py`
+  - updated `scripts/run_phase_e_overnight_frontier_suite.sh`
+  - added `tests/unit/test_wait_for_summary_status.py`
+- Main audit conclusion:
+  - no new cross-phase implementation bug was found in the A-F critical path beyond one new launcher-level risk
+  - the confirmed risk was in chained overnight execution: downstream jobs could start as soon as `final_summary.md` appeared, even if upstream finished with `status: failed`
+- Fix:
+  - chained frontier jobs now wait for `final_summary.md` to report `- status: ok`
+  - `failed` or timed-out upstream runs now block dependent jobs instead of silently cascading bad experiments
+- Validation:
+  - targeted regression tests: `PYTHONPATH=src pytest -q tests/unit/test_phase_f_trainable_controller.py tests/unit/test_wait_for_summary_status.py`
+  - broader smoke regression: `PYTHONPATH=src pytest -q tests/unit/test_phase_a_prepare_script.py tests/unit/test_phase_b_eval_faithfulness_script.py tests/unit/test_phase_c_eval_pik_script.py tests/unit/test_phase_d_eval_external_pairs_script.py tests/unit/test_phase_e_runtime.py tests/unit/test_phase_f_trainable_controller.py`
+  - `python -m py_compile scripts/wait_for_summary_status.py scripts/phase_f_train_trainable_controller.py scripts/phase_f_behavior_clone_controller.py`
+  - `bash -n scripts/run_phase_e_overnight_frontier_suite.sh`
+
 ## 2026-03-11 13:30:00 +0800
 - Type: Verified Internet Research + Dual-Head Semantic-Routing Smoke
 - Summary: Re-checked the most relevant ProcessBench / PRM papers and official community tooling on the internet, implemented a lightweight `dual_head` value head plus semantic-routed training loss inside the existing frozen-feature Phase E stack, and verified that this decomposition improves `first_edge` / terminal behavior somewhat but still fails overall transfer and RL-promotion gates.
@@ -2879,6 +3328,49 @@ This file is prepend-only: newest entries must be added at the top (right below 
   - None.
 
 This file is prepend-only: newest entries must be added at the top (right below this header).
+
+## 2026-03-12 16:18:00 +0800
+
+- Type: Phase E/F overnight recovery + hybrid wrapper hardening
+- Code changes:
+  - updated `scripts/run_phase_e_phase_f_single_gpu_overnight.sh`
+  - updated `scripts/run_phase_e_processbench_hybrid_suite.sh`
+- Main findings:
+  - the first single-GPU overnight launch really started, but the launcher plan heredoc still contained shell backticks, which triggered command substitution at runtime
+  - `run_phase_e_processbench_hybrid_suite.sh` still had a true implementation bug: `latest_dir_by_prefix()` used `ls | head` under `pipefail`, so successful pair artifacts could be misread as failed via `SIGPIPE`
+  - the hybrid wrapper also tried to warm-start `gated_mlp` from an `mlp` checkpoint, which the training script correctly rejected as a config mismatch
+- Fixes:
+  - removed shell-sensitive backticks from the overnight launcher plan rendering
+  - changed the hybrid wrapper artifact resolver to a Python-based directory resolver
+  - added an architecture compatibility guard so warm-start checkpoints are only reused when the stored head architecture matches the current requested head
+  - kept `CR1` optional in the single-GPU overnight package because current recipe guard still blocks it by design
+- Runtime follow-up:
+  - relaunched `phase_e_phase_f_overnight_0312_1621` after the fixes
+  - launched `phase_e_selrel_wide_0312_1615` on GPU2
+  - launched `phase_e_selrel_strict_0312_1615` on GPU1
+  - launched `phase_f_usability_0312_1615` on CPU
+- Validation:
+  - `bash -n scripts/run_phase_e_phase_f_single_gpu_overnight.sh`
+  - `bash -n scripts/run_phase_e_processbench_hybrid_suite.sh`
+  - verified `PH2` now reaches `artifact_dir` and enters training instead of failing in `prepare_pairs`
+
+## 2026-03-13 03:40:00 +0800
+- Type: A-F audit follow-up + overnight launcher safety fix
+- Code changes:
+  - added `scripts/wait_for_summary_status.py`
+  - updated `scripts/run_phase_e_overnight_frontier_suite.sh`
+  - added `tests/unit/test_wait_for_summary_status.py`
+- Main audit conclusion:
+  - no new cross-phase implementation bug was found in the A-F critical path beyond one new launcher-level risk
+  - the confirmed risk was in chained overnight execution: downstream jobs could start as soon as `final_summary.md` appeared, even if upstream finished with `status: failed`
+- Fix:
+  - chained frontier jobs now wait for `final_summary.md` to report `- status: ok`
+  - `failed` or timed-out upstream runs now block dependent jobs instead of silently cascading bad experiments
+- Validation:
+  - targeted regression tests: `PYTHONPATH=src pytest -q tests/unit/test_phase_f_trainable_controller.py tests/unit/test_wait_for_summary_status.py`
+  - broader smoke regression: `PYTHONPATH=src pytest -q tests/unit/test_phase_a_prepare_script.py tests/unit/test_phase_b_eval_faithfulness_script.py tests/unit/test_phase_c_eval_pik_script.py tests/unit/test_phase_d_eval_external_pairs_script.py tests/unit/test_phase_e_runtime.py tests/unit/test_phase_f_trainable_controller.py`
+  - `python -m py_compile scripts/wait_for_summary_status.py scripts/phase_f_train_trainable_controller.py scripts/phase_f_behavior_clone_controller.py`
+  - `bash -n scripts/run_phase_e_overnight_frontier_suite.sh`
 
 ## 2026-03-11 01:20:00 +08 (+0800)
 - Type: Cache Provenance Hardening / CPU-Cache Refactor / OOM Risk Repair

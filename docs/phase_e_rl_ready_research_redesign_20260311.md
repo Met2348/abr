@@ -1,5 +1,45 @@
 # Phase E RL-Ready Research, Redesign, And Smoke Results (2026-03-11)
 
+## 2026-03-12 再补充：cheap->strong verifier gate 与 paper mirror 已落地
+
+新增基础设施：
+
+1. `docs/relatedPapers/`
+   - 现已作为本仓库论文 PDF 镜像目录；
+   - 目前文档中提到且能稳定解析的论文，已全部同步到本地。
+2. `scripts/phase_e_sweep_weak_strong_gate.py`
+   - 用现有 `ProcessBench scored_rows` 直接做 cheap/strong verifier 门控 sweep，
+   - 不需要再训练新模型。
+
+新增直接证据：
+
+1. `prm_e46 -> pbr26`
+   - 想把 benchmark AUC 拉到接近 `pbr26`，需要：
+     - `Math strong usage ≈ 95%`
+     - `GSM strong usage ≈ 97%`
+2. `ms_e43 -> pbr26`
+   - 情况略好，但仍然需要：
+     - `Math strong usage ≈ 91%`
+     - `GSM strong usage ≈ 87%`
+
+这条结果非常关键，因为它说明：
+
+1. `cheap verifier + 少量升级给 strong verifier`
+   - 在当前仓库还不能成立；
+2. `cheap verifier + 大量升级`
+   - 可以工作，但这更接近“直接用 strong verifier”，而不是一个真正节省成本的两级系统。
+
+因此后文关于 RL-ready redesign 的建议，需要再进一步收紧：
+
+1. 不是只做 `weak/strong routing` 就够；
+2. 还需要先提升 weak verifier 本体，或者把问题拆成：
+   - local/process verifier
+   - terminal/answer verifier
+   - abstain/escalate gate
+3. `When to Trust the Cheap Check` 这类思路在本仓库当前更像：
+   - 未来结构目标，
+   - 不是现阶段已可直接依赖的部署方案。
+
 ## 2026-03-11 21:40 补充更新
 
 在本文成稿后，又完成了一轮 `Phase E` 基础设施安全收口：

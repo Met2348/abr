@@ -506,6 +506,7 @@ selector_args=(
   python -u scripts/phase_e_select_intradataset_candidate.py
   --run-name "${RUN_PREFIX}_candidate"
   --output-root assets/artifacts/phase_e_candidates
+  --checkpoint-missing-policy fail
 )
 for group_id in "${MATRIX_GROUPS[@]}"; do
   selector_args+=(--suite-log-dirs "assets/artifacts/phase_e_logs/${RUN_PREFIX}_${group_id,,}")

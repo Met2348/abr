@@ -18,7 +18,7 @@
 #   POLL_INTERVAL   -- seconds between manifest checks (default: 60)
 #   MAX_WAIT_SEC    -- give up after this many seconds (default: 14400 = 4h)
 
-set -e
+set -euo pipefail
 
 CUDA_DEVICE="${CUDA_DEVICE:-0}"
 RUN_DIR="${RUN_DIR:?RUN_DIR must be set}"

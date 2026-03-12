@@ -1,6 +1,401 @@
 # OURS Research Project (Independent from external BCR code)
 
+## 2026-03-12 Midday E/F Audit Refresh
+
+This round added one new research note and several fresh experiment artifacts:
+
+1. `docs/phase_e_phase_f_web_research_refresh_20260312.md`
+2. `assets/artifacts/phase_e_gate_sweeps/phase_e_gate_phasef_0312_1630_20260312T083206Z/`
+3. `assets/artifacts/phase_f_grpo_feasibility/strong_mixedpool_0312_1635/`
+4. `assets/artifacts/phase_f_bc/phase_f_focus_bc_0312_1638_20260312T083525Z/`
+5. `assets/artifacts/phase_f_bc/phase_f_focus_bc_then_rl_0312_1638_20260312T083525Z/`
+6. `assets/artifacts/phase_f_rl_like/phase_f_focus_rl_0312_1643_20260312T083645Z/`
+7. `assets/artifacts/phase_f_logs/phase_f_preflight_wait_0312_1641/`
+8. `assets/artifacts/phase_e_logs/phase_e_l2_wait_0312_1641/`
+
+Commands run this round:
+
+```bash
+python -u scripts/download_related_papers.py   --docs-root docs   --output-dir docs/relatedPapers   --include-root-readme   --download   --run-name related_papers_sync_$(date +%m%d_%H%M)
+
+python -m pytest   tests/unit/test_phase_f_grpo_feasibility.py   tests/unit/test_phase_f_trainable_controller.py   tests/unit/test_wait_for_summary_status.py   tests/unit/test_phase_e_select_candidate.py   tests/unit/test_phase_e_select_intradataset_candidate.py
+
+python -u scripts/phase_e_sweep_weak_strong_gate.py   --run-name phase_e_gate_phasef_$(date +%m%d_%H%M)   --output-root assets/artifacts/phase_e_gate_sweeps   --case 'math_p26_to_p32=assets/external_datasets/qwen_processbench/math.json::assets/artifacts/phase_e_eval/pbr26_dpo_ms_full_math_fulleval_0312_20260311T140557Z/scored_rows.jsonl::assets/artifacts/phase_e_eval/pbr32_lora_mathprm_alllayers_pb_math_20260311T171442Z/scored_rows.jsonl'   --case 'math_p31_to_p32=assets/external_datasets/qwen_processbench/math.json::assets/artifacts/phase_e_eval/pbr31_verify_math_0312_20260311T170630Z/scored_rows.jsonl::assets/artifacts/phase_e_eval/pbr32_lora_mathprm_alllayers_pb_math_20260311T171442Z/scored_rows.jsonl'   --case 'gsm_p19_to_p31=assets/external_datasets/qwen_processbench/gsm8k.json::assets/artifacts/phase_e_eval/pbr19_dpo_mathms_joint_gsm_fulleval_20260311T123421Z/scored_rows.jsonl::assets/artifacts/phase_e_eval/pbr31_verify_gsm_0312_20260311T170309Z/scored_rows.jsonl'   --case 'gsm_p19_to_p33=assets/external_datasets/qwen_processbench/gsm8k.json::assets/artifacts/phase_e_eval/pbr19_dpo_mathms_joint_gsm_fulleval_20260311T123421Z/scored_rows.jsonl::assets/artifacts/phase_e_eval/phase_e_pbr33_lora_mathprm_top4_pbr26data_s42_20260311T162439Z_pb_gsm_20260311T184356Z/scored_rows.jsonl'
+
+python -u scripts/phase_f_grpo_feasibility.py   --scored-rows-math assets/artifacts/phase_e_eval/pbr32_lora_mathprm_alllayers_pb_math_20260311T171442Z/scored_rows.jsonl   --scored-rows-gsm assets/artifacts/phase_e_eval/phase_e_pbr33_lora_mathprm_top4_pbr26data_s42_20260311T162439Z_pb_gsm_20260311T184356Z/scored_rows.jsonl   --output-dir assets/artifacts/phase_f_grpo_feasibility/strong_mixedpool_$(date +%m%d_%H%M)   --n-bootstrap 8   --group-sampling mixed_pool
+
+python -u scripts/phase_f_behavior_clone_controller.py   --run-name phase_f_focus_bc_$(date +%m%d_%H%M)   --case 'p31_math|assets/artifacts/phase_e_eval/pbr31_verify_math_0312_20260311T170630Z/scored_rows.jsonl|assets/external_datasets/qwen_processbench/math.json|threshold_only|{"tau": 0.35}'   --case 'p32_math|assets/artifacts/phase_e_eval/pbr32_lora_mathprm_alllayers_pb_math_20260311T171442Z/scored_rows.jsonl|assets/external_datasets/qwen_processbench/math.json|threshold_only|{"tau": 0.32}'   --case 'p31_gsm|assets/artifacts/phase_e_eval/pbr31_verify_gsm_0312_20260311T170309Z/scored_rows.jsonl|assets/external_datasets/qwen_processbench/gsm8k.json|threshold_only|{"tau": 0.32}'   --seed 42   --hidden-dim 32   --bc-epochs 80   --bc-learning-rate 0.002
+
+python -u scripts/phase_f_behavior_clone_controller.py   --run-name phase_f_focus_bc_then_rl_$(date +%m%d_%H%M)   --case 'p31_math|assets/artifacts/phase_e_eval/pbr31_verify_math_0312_20260311T170630Z/scored_rows.jsonl|assets/external_datasets/qwen_processbench/math.json|threshold_only|{"tau": 0.35}'   --case 'p32_math|assets/artifacts/phase_e_eval/pbr32_lora_mathprm_alllayers_pb_math_20260311T171442Z/scored_rows.jsonl|assets/external_datasets/qwen_processbench/math.json|threshold_only|{"tau": 0.32}'   --case 'p31_gsm|assets/artifacts/phase_e_eval/pbr31_verify_gsm_0312_20260311T170309Z/scored_rows.jsonl|assets/external_datasets/qwen_processbench/gsm8k.json|threshold_only|{"tau": 0.32}'   --seed 42   --hidden-dim 32   --bc-epochs 80   --bc-learning-rate 0.002   --do-rl-finetune   --rl-epochs 60   --rl-learning-rate 0.0005   --robust-lambda 0.2
+
+python -u scripts/phase_f_train_trainable_controller.py   --run-name phase_f_focus_rl_$(date +%m%d_%H%M)   --case 'p31_math|assets/artifacts/phase_e_eval/pbr31_verify_math_0312_20260311T170630Z/scored_rows.jsonl|assets/external_datasets/qwen_processbench/math.json'   --case 'p31_gsm|assets/artifacts/phase_e_eval/pbr31_verify_gsm_0312_20260311T170309Z/scored_rows.jsonl|assets/external_datasets/qwen_processbench/gsm8k.json'   --seed 42   --epochs 100   --learning-rate 0.0007   --hidden-dim 32   --robust-lambda 0.2   --selection-metric worst_generator_balanced_f1   --reward-mode balanced
+
+python -u scripts/wait_for_gpu_idle_and_launch.py   --gpu-id 2   --max-used-mib 4096   --max-util 10   --poll-seconds 180   --log-file assets/artifacts/phase_e_logs/phase_e_l2_wait_$(date +%m%d_%H%M)/watch.log   --workdir /home/zling/y/bcr/ref   --command 'RUN_PREFIX=phase_e_l2_wait_$(date +%m%d_%H%M) ACTIVE_PHASE_E_LORA_OVERNIGHT_GROUP=L2_ALL28_CTR010_CENTER_GATED CUDA_DEVICE=2 WAIT_FOR_GPU_FREE=0 bash scripts/run_phase_e_lora_overnight_suite.sh'
+
+python -u scripts/wait_for_gpu_idle_and_launch.py   --gpu-id 1   --max-used-mib 8192   --max-util 15   --poll-seconds 180   --log-file assets/artifacts/phase_f_logs/phase_f_preflight_wait_$(date +%m%d_%H%M)/watch.log   --workdir /home/zling/y/bcr/ref   --command 'RUN_PREFIX=phase_f_preflight_wait_$(date +%m%d_%H%M) GPU_DEVICE=1 FIXED_THRESHOLD=0.5 THRESHOLD_BATCH_SIZE=48 PROBE_MAX_ERROR=64 PROBE_MAX_CORRECT=64 bash scripts/run_phase_f_modern_preflight_suite.sh'
+```
+
+Current short conclusions:
+
+1. `cheap -> strong` gate is worthwhile on GSM-like slices, but not on current Math slices.
+2. corrected mixed-pool GRPO proxy says reward signal exists; benchmark saturation is the more serious blocker.
+3. `bc_then_rl` can still beat `bc_only` modestly on held-out splits; from-scratch RL-like still collapses.
+4. `Phase E L2` gated LoRA frontier started successfully on GPU2 at `2026-03-12 16:36 +0800`.
+
 This repository is building an in-house reasoning-faithfulness pipeline from scratch.
+
+## 2026-03-12 Audit Refresh: LoRA Safe Defaults + Phase F Test-Split Fix
+
+Two additional silent-risk fixes landed in active E/F code:
+
+1. `scripts/phase_e_train_value_lora.py`
+   - default recipe is now the repository-safe path:
+     - `--ranking-target-space score`
+     - `--pair-weight-mode none`
+     - `--checkpoint-selection-metric pair_acc`
+   - reason:
+     - direct LoRA trainer calls previously retained legacy-dangerous defaults and could silently reproduce already-audited collapse settings outside wrappers
+
+2. `scripts/phase_f_train_trainable_controller.py`
+   - `scripts/phase_f_behavior_clone_controller.py`
+   - both now use explicit `train/dev/test` splits
+   - main reported controller quality is `test_eval`
+   - `full_eval` remains in artifacts but is explicitly marked as:
+     - in-benchmark only
+     - not external generalization evidence
+
+Validation commands:
+
+```bash
+python -m py_compile \
+  scripts/phase_e_train_value_lora.py \
+  scripts/phase_f_train_trainable_controller.py \
+  scripts/phase_f_behavior_clone_controller.py
+
+PYTHONPATH=src pytest -q \
+  tests/unit/test_phase_f_trainable_controller.py \
+  tests/unit/test_phase_e_train_script.py \
+  tests/unit/test_phase_e_recipe_safety.py
+
+python -u scripts/phase_e_audit_suite_recipes.py \
+  --run-name phase_e_suite_recipe_audit_$(date +%m%d_%H%M)
+```
+
+Current reading rule after this fix:
+
+1. `Phase F` controller summaries before this change may still contain `eval` on the full benchmark trace pool.
+2. New summaries should be read with this order:
+   - `best_dev_eval` for model selection only
+   - `test_eval` for main controller quality
+   - `full_eval` only as in-benchmark ceiling / debugging reference
+
+## 2026-03-12 Phase E / F Overnight Packaging
+
+这一轮把“repo 里已经有、但比较分散的能力”整理成了两条可直接长跑的入口，并修掉了一个会误导结论的 LoRA launcher 问题。
+
+### 新增最佳实践笔记
+
+文档：
+
+1. `docs/phase_e_phase_f_best_practice_refresh_20260312.md`
+
+这份笔记把两类信息对齐了：
+
+1. 当前仓库真实已实现的 LoRA / Phase F 能力
+2. 最新 verifier / verifier-guided RL 文献对当前项目最有用的部分
+
+核心更正：
+
+1. `phase_e_train_value_lora.py` 里的：
+   - `contrastive`
+   - `reward centering`
+   - `gated_mlp`
+   - `dual_head`
+   已经能用，不该再按“未实现”来规划优先级。
+
+### LoRA launcher fail-fast 修复
+
+修复对象：
+
+1. `scripts/run_pbr33_lora_mathprm_pbr26data.sh`
+2. `scripts/run_pbr34_lora_mathprm_r16_pbr26data.sh`
+3. `scripts/run_pbr35_lora_contrastive.sh`
+4. `scripts/run_lora_auto_eval.sh`
+
+修复点：
+
+1. 改成 `set -euo pipefail`
+2. 训练完成后只接受已经写出 `manifest.json` 的 run dir
+
+原因：
+
+1. 旧写法是 `python ... | tee log`
+2. 一旦训练中途挂掉，`tee` 仍可能让 shell 继续走到 eval
+3. 这会制造“训练似乎完成、但 artifact 实际不完整”的假象
+
+### 新增一键长跑入口
+
+#### Phase E: stronger LoRA frontier
+
+脚本：
+
+1. `scripts/run_phase_e_lora_overnight_suite.sh`
+
+推荐命令：
+
+```bash
+RUN_PREFIX=phase_e_lora_overnight_$(date +%m%d_%H%M) \
+ACTIVE_PHASE_E_LORA_OVERNIGHT_GROUP=LALL_CURATED_LORA_FRONTIER \
+CUDA_DEVICE=3 \
+WAIT_FOR_GPU_FREE=1 \
+GPU_FREE_MAX_USED_MIB=2048 \
+GPU_FREE_POLL_SEC=120 \
+bash scripts/run_phase_e_lora_overnight_suite.sh
+```
+
+说明：
+
+1. 默认围绕 `PBR26` pair pool 连续跑三组更强的 LoRA 组合
+2. 现在会在目标 GPU 忙时自动等待，不会因为当前环境拥挤而立即 OOM 退出
+3. 每组训练后自动补：
+   - same-family trust
+   - ProcessBench Math
+   - ProcessBench GSM8K
+
+#### Phase F: usability chain
+
+脚本：
+
+1. `scripts/run_phase_f_usability_overnight_suite.sh`
+
+推荐命令：
+
+```bash
+RUN_PREFIX=phase_f_usability_overnight_$(date +%m%d_%H%M) \
+ACTIVE_PHASE_F_USABILITY_GROUP=UALL_PHASEF_USABILITY \
+bash scripts/run_phase_f_usability_overnight_suite.sh
+```
+
+说明：
+
+1. 这条链路把 stronger verifier slices 上的 controller 研究、BC distill、RL-like 对照串起来
+2. 目标是直接回答：
+   - 当前 heuristic 是否已经可用
+   - BC 是否足够
+   - RL 是否还该继续当主线
+
+## 2026-03-12 Phase E/F Safety Refresh + Verifier-System Redesign
+
+Newest repository-wide updates:
+
+1. `docs/relatedPapers/` is now the local paper mirror.
+   - all paper links currently referenced by repo docs have been synced to local PDFs
+   - sync command:
+
+```bash
+python -u scripts/download_related_papers.py \
+  --docs-root docs \
+  --output-dir docs/relatedPapers \
+  --include-root-readme \
+  --download \
+  --run-name related_papers_sync_$(date +%m%d_%H%M)
+```
+
+2. `Phase E` active safety defaults tightened again:
+   - direct candidate selectors now default to strict `best_value_head.pt` resolution
+   - `run_phase_e_dual_head_smoke.sh` no longer defaults to the audited-dangerous
+     combo `logit + confidence_semantic + ranking_score`
+   - paper sync and active wrapper audit are now part of the reproducibility floor
+
+3. New verifier-system diagnostic:
+   - `scripts/phase_e_sweep_weak_strong_gate.py`
+   - this tests whether a cheap verifier can safely handle high-confidence
+     prefixes while deferring ambiguous ones to a stronger verifier
+
+Representative runs:
+
+```bash
+python -u scripts/phase_e_sweep_weak_strong_gate.py \
+  --case prm_e46_to_pbr26_math=assets/external_datasets/qwen_processbench/math.json::assets/artifacts/phase_e_eval/phase_e_rltops_0311_1124_prm_e46_processbench_math_20260311T032713Z/scored_rows.jsonl::assets/artifacts/phase_e_eval/pbr26_dpo_ms_full_math_fulleval_0312_20260311T140557Z/scored_rows.jsonl \
+  --case prm_e46_to_pbr26_gsm=assets/external_datasets/qwen_processbench/gsm8k.json::assets/artifacts/phase_e_eval/phase_e_rltops_0311_1124_prm_e46_processbench_gsm8k_20260311T032704Z/scored_rows.jsonl::assets/artifacts/phase_e_eval/pbr26_dpo_ms_full_gsm8k_eval_20260311T140510Z/scored_rows.jsonl \
+  --run-name phase_e_cheap_strong_gate_$(date +%m%d_%H%M)
+
+python -u scripts/phase_e_sweep_weak_strong_gate.py \
+  --case ms_e43_to_pbr26_math=assets/external_datasets/qwen_processbench/math.json::assets/artifacts/phase_e_eval/phase_e_rltops_0311_1124_ms_e43_processbench_math_20260311T032646Z/scored_rows.jsonl::assets/artifacts/phase_e_eval/pbr26_dpo_ms_full_math_fulleval_0312_20260311T140557Z/scored_rows.jsonl \
+  --case ms_e43_to_pbr26_gsm=assets/external_datasets/qwen_processbench/gsm8k.json::assets/artifacts/phase_e_eval/phase_e_rltops_0311_1124_ms_e43_processbench_gsm8k_20260311T032638Z/scored_rows.jsonl::assets/artifacts/phase_e_eval/pbr26_dpo_ms_full_gsm8k_eval_20260311T140510Z/scored_rows.jsonl \
+  --run-name phase_e_cheap_strong_gate_ms_$(date +%m%d_%H%M)
+```
+
+Current interpretation:
+
+1. cheap-to-strong gating is directionally valid,
+2. but current weak verifiers are not strong enough to save much strong-verifier
+   budget:
+   - `prm_e46 -> pbr26` needed about `95%-97%` strong usage to nearly match the strong verifier
+   - `ms_e43 -> pbr26` still needed about `86%-91%` strong usage
+3. therefore the next architecture target should be:
+   - local/process verifier
+   - terminal/answer verifier
+   - abstain/escalate gate
+   rather than a single scalar verifier asked to do all jobs.
+
+## 2026-03-13 Single-GPU Overnight Package For Phase E/F
+
+Newest execution packaging note:
+
+1. [phase_e_phase_f_overnight_bestpractice_20260313.md](/home/zling/y/bcr/ref/docs/phase_e_phase_f_overnight_bestpractice_20260313.md)
+   - consolidates the latest literature refresh and the current local decision:
+     do not spend another crowded night on multi-job VRAM contention when a
+     sequential single-GPU package is enough to test the next Phase E and Phase F
+     hypotheses.
+
+New launchers:
+
+1. [run_phase_e_phase_f_single_gpu_overnight.sh](/home/zling/y/bcr/ref/scripts/run_phase_e_phase_f_single_gpu_overnight.sh)
+   - sequentially runs:
+     - `PH2_PRM_LOCAL_TA10_MSGRID10_ARCH_SWEEP_SMOKE`
+     - `PRMBench selected relabel`
+     - `CR1_CURATED_CENTER_GATE_SMOKE`
+     - `Phase F modern preflight`
+2. [run_phase_f_modern_preflight_suite.sh](/home/zling/y/bcr/ref/scripts/run_phase_f_modern_preflight_suite.sh)
+   - audits the current stronger controller candidates `PBR26 / PBR31` on:
+     - threshold / generator-shift stability
+     - reward-hacking surface
+
+Why this matters:
+
+1. the next useful overnight questions are no longer "can we fit one more
+   frontier verifier run?" but:
+   - can a benchmark-oriented hybrid actually beat the old frontier on
+     ProcessBench,
+   - can narrow `selected relabel` improve `PRMBench_Preview` without broad
+     relabel noise,
+   - which of `PBR26 / PBR31` is the safer pre-RL controller candidate.
+2. this package is designed to answer those questions with one GPU and explicit
+   memory caps instead of relying on fragile parallel scheduling.
+
+Recommended launch:
+
+```bash
+RUN_PREFIX=phase_e_phase_f_overnight_$(date +%m%d_%H%M) \
+GPU_ID=3 \
+bash scripts/run_phase_e_phase_f_single_gpu_overnight.sh
+```
+
+## 2026-03-13 Overnight Frontier Findings
+
+Newest completed findings from the overnight `Phase E` frontier package:
+
+1. `F2_DUAL_HEAD_PBR10` is a negative result.
+   - held-out stayed moderate, but same-family routing and benchmark AUC both
+     regressed badly versus the scalar `PBR10` baseline
+   - summary:
+     - `assets/artifacts/phase_e_logs/phase_e_probe_f2/final_summary.md`
+2. `PH2_PRM_LOCAL_TA10_MSGRID10_ARCH_SWEEP_SMOKE` overfits its own held-out
+   geometry.
+   - held-out pair acc / auc reached `0.9318 / 0.9040`
+   - but ProcessBench stayed weak:
+     - GSM AUC `0.5224`
+     - Math AUC `0.5321`
+   - summary:
+     - `assets/artifacts/phase_e_logs/phase_e_probe_ph2/final_summary.md`
+3. `CR1_CURATED_CENTER_GATE_SMOKE` was blocked on purpose by recipe guard.
+   - mixed local/terminal semantics + semantic weighting was flagged as unsafe
+4. `F3_LORA_PBR10` is still running in the latest overnight batch.
+
+Interpretation:
+
+1. dual-head factorization is not yet a valid fix for the terminal blind spot
+2. naive benchmark-oriented hybrid supervision still produces "trainable but
+   not trustworthy" geometry
+3. the next repair stage should prioritize:
+   - selective audit / disagreement mining
+   - stricter contract redesign
+   - not another broad mixed-source concat
+
+## 2026-03-12 Phase F Robust-Objective Fix + Fresh Audit Note
+
+Newest cross-cutting note:
+
+1. `docs/phase_abcdef_audit_research_redesign_20260312.md`
+   - consolidates fresh A-F code audit, `assets/` original-idea review,
+     verified paper/community refresh, and a new data/pipeline redesign
+
+Critical implementation fix:
+
+1. `scripts/phase_f_train_trainable_controller.py`
+   - `robust_lambda` is now a real differentiable worst-generator objective
+2. `tests/unit/test_phase_f_trainable_controller.py`
+   - guards against the old no-gradient bug
+
+Why it matters:
+
+1. old "robust RL" artifacts understated the real effect of worst-generator-aware
+   optimization
+2. after the fix, from-scratch robust controller learning improves materially
+   over the mean baseline on `pbr31_math` and `pbr31_gsm`
+
+Commands used in this pass:
+
+```bash
+PYTHONPATH=src pytest -q tests/unit/test_phase_f_trainable_controller.py
+
+python -u scripts/phase_f_train_trainable_controller.py \
+  --run-name phase_f_rl_like_robust_fixed_0312 \
+  --case 'pbr31_math|assets/artifacts/phase_e_eval/pbr31_verify_math_0312_20260311T170630Z/scored_rows.jsonl|assets/external_datasets/qwen_processbench/math.json' \
+  --case 'pbr31_gsm|assets/artifacts/phase_e_eval/pbr31_verify_gsm_0312_20260311T170309Z/scored_rows.jsonl|assets/external_datasets/qwen_processbench/gsm8k.json' \
+  --seed 42 \
+  --epochs 80 \
+  --learning-rate 0.001 \
+  --hidden-dim 16 \
+  --robust-lambda 0.5 \
+  --selection-metric worst_generator_balanced_f1 \
+  --reward-mode balanced
+
+python -u scripts/phase_f_train_trainable_controller.py \
+  --run-name phase_f_rl_like_mean_fixed_0312 \
+  --case 'pbr31_math|assets/artifacts/phase_e_eval/pbr31_verify_math_0312_20260311T170630Z/scored_rows.jsonl|assets/external_datasets/qwen_processbench/math.json' \
+  --case 'pbr31_gsm|assets/artifacts/phase_e_eval/pbr31_verify_gsm_0312_20260311T170309Z/scored_rows.jsonl|assets/external_datasets/qwen_processbench/gsm8k.json' \
+  --seed 42 \
+  --epochs 80 \
+  --learning-rate 0.001 \
+  --hidden-dim 16 \
+  --selection-metric balanced_f1 \
+  --reward-mode balanced
+
+python -u scripts/phase_f_behavior_clone_controller.py \
+  --run-name phase_f_bc_then_rl_robust_fixed_0312 \
+  --case 'pbr31_math|assets/artifacts/phase_e_eval/pbr31_verify_math_0312_20260311T170630Z/scored_rows.jsonl|assets/external_datasets/qwen_processbench/math.json|guarded_drop|{"delta": 0.2, "min_step": 3, "tau_guard": 0.5, "tau_low": 0.3}' \
+  --case 'pbr31_gsm|assets/artifacts/phase_e_eval/pbr31_verify_gsm_0312_20260311T170309Z/scored_rows.jsonl|assets/external_datasets/qwen_processbench/gsm8k.json|delayed_drop|{"delta": 0.25, "min_step": 4, "tau": 0.42}' \
+  --seed 42 \
+  --hidden-dim 16 \
+  --bc-epochs 50 \
+  --bc-learning-rate 0.003 \
+  --do-rl-finetune \
+  --rl-epochs 40 \
+  --rl-learning-rate 0.001 \
+  --robust-lambda 0.5
+```
+
+## 2026-03-13 A-F Audit Follow-Up
+
+Newest audit correction:
+
+1. no new cross-phase critical implementation bug was found in the A-F core path in this pass;
+2. one real overnight provenance bug was fixed:
+   - downstream frontier jobs previously waited only for `final_summary.md` to exist;
+   - now they wait for `- status: ok` explicitly.
+
+Files:
+
+1. [wait_for_summary_status.py](/home/zling/y/bcr/ref/scripts/wait_for_summary_status.py)
+2. [run_phase_e_overnight_frontier_suite.sh](/home/zling/y/bcr/ref/scripts/run_phase_e_overnight_frontier_suite.sh)
+3. [test_wait_for_summary_status.py](/home/zling/y/bcr/ref/tests/unit/test_wait_for_summary_status.py)
+
+Interpretation:
+
+1. current repo risk is less about silent implementation corruption;
+2. it is more about research geometry, controller design, and reward-policy mismatch.
 
 ## 2026-03-13 Breakthrough Verification
 
@@ -11,6 +406,131 @@ Newest verification report:
    - corrected status:
      - `PBR26` = best verified frozen benchmark candidate, not RL-ready
      - `PBR31` = best verified LoRA balance so far, not Math-AUC SOTA, not RL-ready
+
+## 2026-03-13 Overnight Frontier Package
+
+Newest overnight coordination note:
+
+1. `docs/phase_e_overnight_frontier_plan_20260313.md`
+   - maps the latest verifier / PRM literature to one coordinated overnight run
+   - purpose:
+     - attack terminal blind spot,
+     - probe frozen-backbone ceiling,
+     - test benchmark-oriented hybrid supervision,
+     - queue one curated repair,
+     - queue one terminal-anchor ratio sweep
+
+Launcher:
+
+```bash
+RUN_PREFIX=phase_e_overnight_$(date +%m%d_%H%M) \
+bash scripts/run_phase_e_overnight_frontier_suite.sh
+```
+
+What it launches:
+
+1. `F2_DUAL_HEAD_PBR10`
+2. `F3_LORA_PBR10`
+3. `PH2_PRM_LOCAL_TA10_MSGRID10_ARCH_SWEEP_SMOKE`
+4. queued `CR1_CURATED_CENTER_GATE_SMOKE`
+5. queued terminal ratio sweep
+
+Top-level outputs:
+
+1. `assets/artifacts/phase_e_logs/<RUN_PREFIX>/overnight_plan.md`
+2. `assets/artifacts/phase_e_logs/<RUN_PREFIX>/launch_manifest.jsonl`
+3. per-job logs under the same directory
+
+## 2026-03-12 Phase F RL-like Learning Update: Pure RL Is Not The Best Next Step
+
+We added one more layer beyond heuristic policy sweeps: trainable small controller policies.
+
+New scripts:
+
+1. `scripts/phase_f_train_trainable_controller.py`
+2. `scripts/phase_f_behavior_clone_controller.py`
+
+What we tested:
+
+1. from-scratch `REINFORCE` / policy-gradient
+2. class-balanced reward shaping
+3. behavior cloning from strong heuristic teachers
+4. BC warm start followed by robust RL fine-tuning
+
+Key artifacts:
+
+1. [bc_only](/home/zling/y/bcr/ref/assets/artifacts/phase_f_bc/phase_f_bc_only_0312_20260311T200307Z/summary.md)
+2. [bc_then_rl_robust](/home/zling/y/bcr/ref/assets/artifacts/phase_f_bc/phase_f_bc_then_rl_robust_0312_20260311T200451Z/summary.md)
+3. [robust from scratch](/home/zling/y/bcr/ref/assets/artifacts/phase_f_rl_like/phase_f_rl_like_robust_fromscratch_0312_20260311T200645Z/summary.md)
+4. [naive mean debug](/home/zling/y/bcr/ref/assets/artifacts/phase_f_rl_like/debug_phase_f_rl_like_20260311T195946Z/summary.md)
+5. [balanced mean debug](/home/zling/y/bcr/ref/assets/artifacts/phase_f_rl_like/debug_phase_f_rl_like_balanced_20260311T200131Z/summary.md)
+
+Results:
+
+1. `pbr26_math` from-scratch REINFORCE collapsed twice
+   - `balanced_f1 = 0.0000` for both naive and class-balanced reward
+2. `pbr31_math` robust RL from scratch remained weak
+   - `balanced_f1 = 0.3493`
+   - `worst_generator = 0.1404`
+3. behavior cloning was strong immediately
+   - `pbr26_math bc_only = 0.8502`
+   - `pbr31_math bc_only = 0.8552`
+   - `pbr31_gsm bc_only = 0.9045`
+4. `BC -> robust RL` did not improve the controller
+   - `pbr31_math: 0.8552 -> 0.8415`
+   - `pbr31_gsm: 0.9045 -> 0.9001`
+
+Interpretation:
+
+1. the repo now has evidence that trainable controller policies are feasible;
+2. but pure RL-from-scratch is currently the wrong optimization path;
+3. a BC-warm-start controller is a much more plausible next live experiment than immediate RL.
+
+## 2026-03-13 Phase F Robust-Controller + Ensemble Follow-Up
+
+This round added two missing pieces on top of the controller-family sweep:
+
+1. worst-generator robust policy search
+2. weak-verifier score-level ensembling
+
+New artifacts:
+
+1. [generator robustness summary](/home/zling/y/bcr/ref/assets/artifacts/phase_f_controller_robustness/phase_f_controller_research_0312_generator_robustness_20260311T194732Z/summary.md)
+2. [ensemble summary](/home/zling/y/bcr/ref/assets/artifacts/phase_f_controller_ensemble/phase_f_controller_research_0312_ensemble_eval_20260311T194735Z/summary.md)
+
+Key updates:
+
+1. `Math` robust winners:
+   - `pbr26_math`: `guarded_drop`, overall `0.8391`, worst-generator `0.7604`
+   - `pbr31_math`: `guarded_drop`, overall `0.8460`, worst-generator `0.7744`
+2. `GSM` robust winners:
+   - `pbr26_gsm`: `drop_needs_low`, overall `0.8769`, worst-generator `0.7575`
+   - `pbr31_gsm`: `delayed_drop`, overall `0.9027`, worst-generator `0.7668`
+3. best ensemble wins:
+   - `pbr26_pbr31_math`: `min + threshold_only = 0.8765`
+   - `pbr26_pbr31_gsm`: `min + guarded_drop = 0.9126`
+   - `pbr19_pbr31_math`: `mean_50 + guarded_drop = 0.8774`
+   - `pbr19_pbr31_gsm`: `mean_50 + threshold_only = 0.9144`
+
+Interpretation:
+
+1. the repo now has strong offline evidence that controller quality is recoverable without RL;
+2. generator-shift is still real, but it can be handled better with robust policy selection;
+3. weak-verifier ensembling is now a practical next step, not just a literature idea.
+
+Literature refresh for this conclusion:
+
+1. [VerifyBench](https://arxiv.org/abs/2507.09884): verifier input-structure sensitivity supports slice-specific controller rules.
+2. [AbstentionBench](https://arxiv.org/abs/2506.09038): abstention remains hard, so controller evaluation must explicitly reward `do not continue blindly`.
+3. [ThinkPRM](https://arxiv.org/abs/2504.16828) and [GenPRM](https://arxiv.org/abs/2504.00891): frontier verifiers increasingly behave like explicit critics, not single scalar oracles.
+4. [PURE / Stop Summation](https://arxiv.org/abs/2504.15275): naive PRM-based RL remains reward-hack-prone, reinforcing a heuristic-controller stage before RL.
+5. [MASH](https://arxiv.org/abs/2510.01152): selective help-seeking provides a clean conceptual match to the current `continue / backtrack / abstain` controller frame.
+
+Correct next step:
+
+1. live heuristic controller validation
+2. optional weak-verifier ensemble mode
+3. only then reconsider controller-only RL
 
 ## 2026-03-13 Phase F Controller Sweep
 
@@ -5782,7 +6302,7 @@ Current interpretation:
   - Tree-PLV (EMNLP 2024): https://aclanthology.org/2024.emnlp-main.125/
 - Outcome-only labels often underdetermine step quality:
   - Do We Need to Verify Step by Step? (ICML 2025): https://proceedings.mlr.press/v267/jia25f.html
-  - Rewarding Progress: Scaling Automated Process Verifiers for LLM Reasoning: https://openreview.net/pdf?id=QerCdAGjyl
+  - Rewarding Progress: Scaling Automated Process Verifiers for LLM Reasoning: https://arxiv.org/abs/2410.08146
 - Confidence/value calibration is non-trivial:
   - Language Models (Mostly) Know What They Know: https://arxiv.org/abs/2207.05221
   - On Calibration of Modern Neural Networks: https://proceedings.mlr.press/v70/guo17a.html

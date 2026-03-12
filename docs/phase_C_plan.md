@@ -429,7 +429,7 @@ These references are used as practical guidance for C2 design choices:
    - Tree-PLV (margin-filtered pairwise verifier construction):
      https://aclanthology.org/2024.emnlp-main.125/
    - Rewarding Progress (automated process verifier scaling):
-     https://openreview.net/pdf?id=QerCdAGjyl
+     https://arxiv.org/abs/2410.08146
    - Theory result on outcome-vs-process verification:
      https://proceedings.mlr.press/v267/jia25f.html
 2. Calibration fundamentals for probabilistic value heads:

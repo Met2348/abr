@@ -1,6 +1,1460 @@
 # Result Records
 
-Last updated: 2026-03-13 01:25:00 +0800
+Last updated: 2026-03-12 16:45:00 +0800
+
+## 0AAARCBE. Phase E/F Midday Audit Refresh: Gate Sweep + GRPO Proxy Fix + Focused Controller Distill (2026-03-12)
+
+### Infra / Audit Fixes
+
+1. `docs/relatedPapers/` has now been resynced against current docs: `106/106` referenced paper URLs are mirrored locally, with `5` new PDFs added this round.
+2. `scripts/run_phase_e_lora_overnight_suite.sh` no longer routes heavy train/eval stdout through `tee`; the suite now resolves only completed artifacts with marker files such as `manifest.json` / `metrics.json`.
+3. `scripts/phase_f_grpo_feasibility.py` fixed a real methodology bug: the old default grouped traces only within the same label family, which forced outcome reward variance to collapse to zero. Default sampling is now `mixed_pool`, and `tests/unit/test_phase_f_grpo_feasibility.py` locks that behavior.
+
+### Web-backed Design Direction
+
+Detailed synthesis: `docs/phase_e_phase_f_web_research_refresh_20260312.md`
+
+Primary sources checked this round:
+
+1. VerifyBench (`2507.09884`)
+2. Hard2Verify (`2510.13744`)
+3. When to Trust the Cheap Check (`2602.17633`)
+4. DeepSeekMath / GRPO (`2402.03300`)
+5. RL reward design / Clip+Delta (`2410.15115`)
+6. DeepSeek-R1 (`2501.12948`)
+7. PRIME (`2502.01456`)
+8. ThinkPRM (`2504.16828`)
+9. GenPRM (`2504.00891`)
+10. VPRM (`2601.17223`)
+11. MASH (`2510.01152`)
+12. TRL `GRPOTrainer` docs
+13. DAPO / Dr. GRPO / VAPO / Is PRM Necessary? (`2503.14476`, `2503.20783`, `2504.05118`, `2505.11227`)
+
+Cross-source conclusion:
+
+1. `Phase E` should move toward selective escalation and hybrid verifier systems, not one universal scalar head.
+2. `Phase F` should remain `heuristic/BC first, RL second`.
+3. Future live RL runs should leave `GSM8K` and move to a harder benchmark before burning more overnight GPU.
+
+### New Experiment Results
+
+#### 1. Cheap -> strong gate sweep
+
+Artifact: `assets/artifacts/phase_e_gate_sweeps/phase_e_gate_phasef_0312_1630_20260312T083206Z/summary.json`
+
+| Case | weak_auc | strong_auc | best_tau | best_auc | best_f1 | strong_usage |
+|-----|-----:|-----:|-----:|-----:|-----:|-----:|
+| math_p26_to_p32 | 0.8882 | 0.8685 | 0.00 | 0.8882 | 0.6700 | 0.0000 |
+| math_p31_to_p32 | 0.8823 | 0.8685 | 0.00 | 0.8823 | 0.6762 | 0.0000 |
+| gsm_p19_to_p31 | 0.9148 | 0.9006 | 0.10 | 0.9170 | 0.7822 | 0.0908 |
+| gsm_p19_to_p33 | 0.9148 | 0.9026 | 0.15 | 0.9175 | 0.7924 | 0.1633 |
+
+Interpretation:
+
+1. selective escalation is real on GSM-like slices,
+2. but the current `PBR32` Math scorer is not strong enough to justify escalation over `PBR26/PBR31` on Math.
+
+#### 2. Mixed-pool GRPO feasibility on stronger verifier slices
+
+Artifact: `assets/artifacts/phase_f_grpo_feasibility/strong_mixedpool_0312_1635/grpo_feasibility_20260312T083443Z.json`
+
+| Domain | process |adv| | outcome |adv| | max_beta | verdict |
+|-----|-----:|-----:|-----:|-----|
+| math (`PBR32`) | 0.811 | 0.864 | 0.200 | FEASIBLE |
+| gsm8k (`PBR33`) | 0.805 | 0.872 | 0.500 | FEASIBLE |
+
+Interpretation:
+
+1. after fixing the proxy, outcome reward is no longer degenerate,
+2. the current RL blocker is more likely benchmark saturation / optimization stability than raw reward variance absence,
+3. if live GRPO continues, beta should start around `0.05`, but on a harder benchmark than current `GSM8K`.
+
+#### 3. Focused controller distill / RL experiments
+
+Artifacts:
+
+1. `assets/artifacts/phase_f_bc/phase_f_focus_bc_0312_1638_20260312T083525Z/summary.json`
+2. `assets/artifacts/phase_f_bc/phase_f_focus_bc_then_rl_0312_1638_20260312T083525Z/summary.json`
+3. `assets/artifacts/phase_f_rl_like/phase_f_focus_rl_0312_1643_20260312T083645Z/summary.json`
+
+Held-out `test_eval` results:
+
+| Case | bc_only | bc_then_rl | rl_from_scratch |
+|-----|-----:|-----:|-----:|
+| p31_math | 0.7987 | 0.8171 | 0.0000 |
+| p32_math | 0.8309 | 0.8395 | n/a |
+| p31_gsm | 0.9000 | 0.9082 | 0.0000 |
+
+Interpretation:
+
+1. mild RL fine-tuning on top of BC can still help,
+2. but the gains are modest and remain teacher-dependent,
+3. from-scratch RL-like controller training is still unusable.
+
+#### 4. Modern preflight on `PBR26/PBR31`
+
+Artifact: `assets/artifacts/phase_f_logs/phase_f_preflight_wait_0312_1641/final_summary.md`
+
+Key findings:
+
+1. `p31_gsm` has wider threshold tolerance than `p26_gsm`, but worst-generator logo F1 is still `0.0000`.
+2. `p31_math` lifts worst-generator logo F1 to `0.4251`, but `confidence_tail` reward-hacking risk is still `high`.
+3. `PBR31` is a useful controller research slice, not a safe blind deployment verifier.
+
+### Active Overnight Follow-up
+
+Queued / running now:
+
+1. `Phase E L2` gated LoRA frontier
+   - watcher log: `assets/artifacts/phase_e_logs/phase_e_l2_wait_0312_1641/watch.log`
+   - active run dir: `assets/artifacts/phase_e_runs/phase_e_l2_wait_0312_1641_L2_all28_ctr010_center_gated_20260312T083609Z`
+
+### Decision Update
+
+1. `Phase E`: keep `L2` running; prioritize `gated_mlp + all-layer LoRA` over more Math-side cheap->strong gate work.
+2. `Phase F`: keep `preflight -> heuristic/BC -> mild RL` as the only promotion path.
+3. `RL`: do not promote from-scratch controller RL; move any future live GRPO off saturated `GSM8K`.
+
+---
+
+## 0AAARCBD. Phase E+F Full Summary: All Experiments Complete — Strategic Pivot (2026-03-12)
+
+### Complete Experiment Inventory (as of 2026-03-12 12:05 local)
+
+All planned Phase E+F experiments have now completed. This entry summarizes the full picture.
+
+#### Phase E LoRA Sweep — Final Results (all PBR26 data unless noted)
+
+| Run | Config | MATH F1 | GSM F1 | vs Frozen |
+|-----|--------|---------|--------|-----------|
+| **Frozen PBR26** | — | **0.686** | 0.768 | **baseline** |
+| Frozen PBR19 | — | 0.683 | **0.778** | -0.003 |
+| **PBR32 ★** | LoRA r=8 all-28, PBR12 data | **0.689** | 0.776 | **+0.003** |
+| PBR33 | LoRA r=8 top-4, PBR26 data | 0.666 | **0.797** | -0.020 |
+| PBR34 | LoRA r=16 top-4, PBR26 data | 0.657 | 0.766 | -0.029 |
+| PBR35 | LoRA r=8 all-28, PBR26 data | 0.657 | 0.768 | -0.029 |
+| PBR36 | LoRA r=32 all-28, PBR26 data | 0.656 | 0.739 | -0.030 |
+| PBR37 | LoRA r=8 all-28, ctr=0.2, PBR26 | 0.657 | 0.768 | -0.029 |
+| L1 | LoRA r=8 all-28, ctr=0.05, center, PBR26 | 0.654 | 0.762 | -0.032 |
+
+**Finding**: All PBR26-data LoRA variants converge to MATH F1 = 0.654-0.657, uniformly BELOW frozen PBR26 (0.686). PBR32 is the exception: it uses PBR12 data (smaller, higher-quality MS pairs) and beats frozen by +0.003.
+
+**Root cause**: PBR26 MS data (math_shepherd full, 4968 pairs) has more noise than PBR12 MS data (3307 pairs). LoRA amplifies the training distribution noise while frozen MLP can learn a cleaner signal.
+
+#### Phase F GRPO Experiments — Complete Table
+
+| Run | PRM | reward | pre | post | delta | gate | outcome |
+|-----|-----|--------|-----|------|-------|------|---------|
+| v1 (PBR32) | LoRA | raw_score | 0.950 | — | — | CRASH | disk full |
+| v2 outcome-only | none | outcome | 0.955 | 0.950 | -0.005 | FAIL | noise degradation |
+| v3 (PBR32) | LoRA | clip_delta | 0.955 | — | — | CRASH | disk full |
+| v4 (PBR32) | LoRA | clip_delta | 0.955 | — | — | CRASH | disk full at step 150 |
+| **v4 r2 (PBR26)** | Frozen | clip_delta | **0.955** | **0.955** | **0.000** | **FAIL** | **saturated** |
+
+**Finding**: GSM8K with 95.5% pre-training accuracy is unsuitable for GRPO. No variant can improve.
+
+#### Phase F BoN K=4 Results
+
+| Scorer | greedy | random@4 | prm@4 | vs_greedy | vs_random | phase_f3 |
+|--------|--------|----------|-------|-----------|-----------|---------|
+| PBR32 (LoRA) | 0.905 | 0.900 | **0.920** | **+1.5%** | **+2.0%** | **PASS** |
+| PBR26 (frozen) | 0.910 | 0.915 | 0.925 | +1.5% | +1.0% | **FAIL** |
+
+LoRA training (PBR32) makes scores more discriminative for BoN than frozen PBR26.
+
+### Strategic Pivot: Why All Experiments Failed
+
+1. **LoRA on PBR26 data** → overfits to noisy MS labels, MATH F1 = 0.654-0.657 (below frozen 0.686)
+2. **GRPO on GSM8K** → 95.5% ceiling means no room to improve
+3. **BoN with PBR26** → random@4 > greedy baseline neutralizes PRM gain
+
+The core bottleneck is **training data quality**. PBR12 data (better) gives PBR32=0.689. PBR26 data (more but noisier) gives everything below 0.660 with LoRA.
+
+### Next Step: PBR38 — Data Quality Improvement
+
+Based on the analysis: switching from PBR26 data to higher-quality data should break the ceiling.
+
+**Hypothesis 1 (PBR38A)**: Use PBR12 data (DPO 2398 + MS strict 3307) for LoRA r=8 all-28 + contrastive=0.2
+- This is the same data as PBR32, but with contrastive loss added
+- PBR32 without contrastive = 0.689 → PBR38A expected 0.690-0.695?
+
+**Hypothesis 2 (PBR38B)**: Consensus filtering on PBR26 data
+- Keep only MS pairs where MC estimate confidence ≥ 0.80 (top 50% by confidence)
+- Reduces ~4968 MS pairs to ~2500 high-confidence pairs
+- The idea: high-confidence MC pairs are more likely to have correct labels
+
+**Hypothesis 3 (PBR38C)**: Harder GRPO benchmark (MATH500 at ~45% instead of GSM8K at 95.5%)
+- Use MATH500 as GRPO training benchmark
+- Requires a different generator checkpoint that's ~70% on MATH (e.g., different model or prompt)
+
+**Recommended next run**: PBR38A (PBR12 data + LoRA r=8 + contrastive=0.2) — lowest risk, directly extends PBR32 result
+
+---
+
+## 0AAARCBC. Phase F GRPO+PRM v4 r2 (Clip+Delta, PBR26) + L1 LoRA Training Complete (2026-03-12)
+
+### GRPO+PRM v4 r2 (Clip+Delta, PBR26) — COMPLETE: phase_f4_gate=FAIL
+
+| Metric | Value |
+|--------|-------|
+| pre_training_accuracy | **0.955 (95.5%)** |
+| post_training_accuracy | **0.955 (95.5%)** |
+| accuracy_delta | **0.000** (±0.0%) |
+| train_elapsed | 4649s (~77 min, 250 steps × ~18.6s/step) |
+| **phase_f4_gate** | **FAIL** |
+
+Config: Qwen2.5-Math-7B-Instruct, PRM=PBR26 (frozen, MATH F1=0.686), λ_process=0.3, reward_shaping=clip_delta.
+Output: `assets/artifacts/phase_f_grpo/grpo_pbr26_process_clipdelta_v4_r2_20260312T020814Z/summary.json`
+
+### Root Cause: GSM8K Ceiling Problem
+
+The generator (Qwen2.5-Math-7B-Instruct) already achieves **95.5% accuracy on GSM8K** before GRPO training.
+GRPO cannot improve accuracy when most k=4 solution groups are all-correct — the outcome reward variance
+within groups is near-zero, and the process reward (Clip+Delta from PBR26) fails to shift probability
+mass toward meaningfully better solutions because "good enough" is already achieved.
+
+Reward trajectory: steps 10-250 oscillate 0.54-0.87 with high std (0.32-0.61), no upward trend.
+Entropy oscillates 0.47-1.94, indicating policy instability rather than improvement.
+
+**To achieve GRPO improvement, need a harder benchmark where generator is ~70-80% (not 95%).**
+Candidates: MATH500 (~45%), AMC/AIME (~15-30%), or self-generated harder problem sets.
+
+### Pattern Across All Phase F GRPO Attempts
+
+| Run | PRM | reward_shaping | pre-acc | post-acc | delta | gate |
+|-----|-----|----------------|---------|----------|-------|------|
+| GRPO v1 (PBR32) | LoRA | raw_score | 0.950 | unknown | unknown | CRASH (disk) |
+| GRPO v2 outcome-only | none | outcome | 0.955 | 0.950 | -0.005 | FAIL |
+| GRPO v3 (PBR32) | LoRA | clip_delta | 0.955 | unknown | unknown | CRASH (disk) |
+| GRPO v4 (PBR32) | LoRA | clip_delta | 0.955 | unknown | unknown | CRASH (step 150) |
+| **GRPO v4 r2 (PBR26)** | Frozen | **clip_delta** | **0.955** | **0.955** | **0.000** | **FAIL** |
+
+**Conclusion**: All GRPO experiments on GSM8K fail because the generator is already saturated at 95.5%.
+The process reward adds stability (no further decline unlike outcome-only v2), but cannot improve accuracy.
+
+### L1 Overnight LoRA Training + Eval — COMPLETE
+
+- Config: Math-PRM-7B + LoRA r=8, all-28 layers, contrastive=0.05 (margin=0.15), center_mlp, reward_centering=0.01, PBR26 data
+- Training: 5 epochs, best at **epoch 3** (pair_acc=0.8792, AUC=0.8378)
+- **MATH F1 = 0.654** (acc_err=0.524, acc_cor=0.872) — below PBR35/37 (0.657)
+- **GSM F1 = 0.762** (acc_err=0.633, acc_cor=0.959) — below PBR35/37 (0.768)
+
+**Conclusion**: contrastive=0.05 + center_mlp + reward_centering does NOT improve over baseline.
+All 5 PBR26-data LoRA variants (PBR34, 35, 36, 37, L1) plateau at MATH F1 = 0.654-0.657.
+
+Artifact: `assets/artifacts/phase_e_runs/phase_e_lora_overnight_0312_0452_L1_all28_ctr005_center_mlp_20260311T225358Z/`
+
+---
+
+## 0AAARCB. Phase F BoN v4 r2 (PBR26): FAIL Gate + GRPO+PRM v4 r2 Running (2026-03-12)
+
+### BoN K=4 v4 r2 — PBR26 Frozen Scorer — COMPLETE: phase_f3_gate=**FAIL**
+
+**Confirmed authoritative result** (fresh run, seed=42, 200 GSM8K problems, k=4):
+
+| Metric | Value |
+|--------|-------|
+| greedy_accuracy | 0.910 (91.0%) |
+| random@4_accuracy | 0.915 (91.5%) |
+| prm_reranked_accuracy | **0.925 (92.5%)** |
+| oracle_accuracy | 0.950 (95.0%) |
+| prm_vs_greedy_delta | **+0.015 (+1.5%)** |
+| prm_vs_random_delta | **+0.010 (+1.0%)** |
+| **phase_f3_gate** | **FAIL** (need ≥+2% vs random) |
+
+Scorer: PBR26 (frozen Qwen2.5-Math-PRM-7B + MLP value head, MATH F1=0.686).
+Output: `assets/artifacts/phase_f_bon/pbr26_bon4_gsm8k_v4_r2_20260312T003638Z/summary.json`
+
+### Why FAIL despite +1.5% vs greedy?
+
+The random@4 accuracy (0.915) is HIGHER than greedy (0.910). This means:
+- The generator is so strong (91% greedy) that random selection from k=4 already outperforms greedy
+- The PRM gains +1.5% vs greedy but only +1.0% vs this strong random baseline
+- Phase_f3 gate requires `prm@4 ≥ random + 2%` = `0.925 ≥ 0.935` → FAIL (0.010 < 0.020 threshold)
+
+This contrasts with PBR32 (LoRA scorer):
+- PBR32: random@4=0.900 (lower than greedy 0.905), prm@4=0.920, prm_vs_random=+2.0% → PASS
+- PBR26: random@4=0.915 (higher than greedy 0.910), prm@4=0.925, prm_vs_random=+1.0% → FAIL
+
+**Key insight**: PBR26 adds absolute accuracy (+1.5pp over greedy) but not enough relative to the high random baseline. LoRA training (PBR32) makes scores more discriminative — better at distinguishing the best solution among similar-difficulty candidates.
+
+### Note: Earlier log-recovered v4 was slightly wrong
+The `phase_f_bon/pbr26_bon4_gsm8k_v4_20260311T225703Z/summary.json` was recovered from partial logs
+and showed `prm@4=0.910, delta=0.0%`. The authoritative v4_r2 shows `prm@4=0.925, delta=+1.5%`.
+The log-recovery missed the late batch improvements and underestimated PBR26's BoN performance.
+
+### GRPO+PRM v4 r2 (Clip+Delta, PBR26) — STARTED (10:10)
+- Run: `grpo_pbr26_process_clipdelta_v4_r2_20260312T020814Z`
+- Config: Qwen2.5-Math-7B-Instruct, PRM=PBR26, λ_process=0.3, reward_shaping=clip_delta
+- 500 train + 200 eval problems, 250 steps, GPU 3 (CUDA_VISIBLE_DEVICES=3)
+- Disk fix: `save_total_limit=1` → only 1 checkpoint kept (no disk overflow)
+- Log: `assets/artifacts/phase_e_logs/phase_f_grpo_process_v4_r2.log`
+- ETA: ~75 min (250 steps × ~18s/step)
+
+---
+
+## 0AAARC. Phase F Morning Results: GRPO Crash, BoN PBR26 Final, PBR34-37 LoRA Complete (2026-03-13)
+
+### GRPO PRM-Guided v4 (λ=0.3) — CRASHED at step 150
+
+- Run: `grpo_pbr32_process_lambda03_v4_20260311T225806Z`
+- Policy: Qwen2.5-Math-7B-Instruct, PRM: PBR32 (LoRA, MATH F1=0.689)
+- **pre_training_accuracy: 0.955** (from log)
+- **post_training_accuracy: UNKNOWN** (process crashed at step 150 checkpoint save)
+- Cause: `OSError: [Errno 28] No space left on device` during `optimizer.pt` write in checkpoint-150
+- checkpoint-150: COMPLETE (36GB, all safetensors shards present, optimizer.pt saved after disk freed)
+- **phase_f4_gate: INCONCLUSIVE_CRASH** — no post-training eval possible
+- Reward trajectory at crash: steps 10-150 show oscillation 0.46–0.82, no upward trend; pre-training 95.5% ceiling
+- Decision: Do NOT resume (all prior GRPO runs failed, reward trend unclear, disk risk)
+
+### BoN K=4 — PBR26 Secondary Scorer — COMPLETE: phase_f3_gate=PASS (barely)
+
+| Metric | Value |
+|--------|-------|
+| greedy_accuracy | 0.910 (91.0%) |
+| random@4 accuracy | 0.890 (89.0%) |
+| prm_reranked_accuracy | **0.910 (91.0%)** |
+| prm_vs_greedy_delta | **0.000 (0.0%)** — ties greedy, no improvement |
+| prm_vs_random_delta | **+0.020 (+2.0%)** |
+| **phase_f3_gate** | **PASS** (threshold ≥+2% vs random — exactly met) |
+
+Scorer: PBR26 (frozen backbone + MLP head, MATH F1=0.686). Note: `filler_outrank_rate=0.208` (HIGH).
+Artifact: `assets/artifacts/phase_f_bon/pbr26_bon4_gsm8k_v4_20260311T225703Z/summary.json` (recovered from log — disk was full during original write)
+
+**BoN scorer comparison** (same eval set, k=4, 200 GSM8K problems):
+| Scorer | Type | MATH F1 | prm@4 | Δ vs greedy | phase_f3 |
+|--------|------|---------|-------|------------|---------|
+| PBR32 | LoRA r=8 all-28 | 0.689 | 92.0% | **+1.5%** | PASS |
+| PBR26 | Frozen backbone | 0.686 | 91.0% | **+0.0%** | PASS (barely) |
+
+**Key insight**: LoRA training improves generation-time discriminability even with minimal ProcessBench F1 difference (+0.003). PBR26's high filler_outrank_rate exactly neutralizes any greedy improvement.
+
+### PBR34-37 LoRA Series — All Training Complete
+
+| Run | Config | Best pair_acc | Best AUC | MATH F1 | GSM F1 | vs PBR26 frozen |
+|-----|--------|--------------|---------|---------|--------|----------------|
+| **PBR32 ★** | r=8 all-28, PBR12 data | 0.898 | 0.880 | **0.689** | 0.776 | **+0.003** |
+| PBR34 | r=16 top-4, PBR26 data | 0.882 | — | 0.657 | 0.766 | **-0.029** |
+| PBR35 | r=8 all-28, PBR26 data | 0.879 | — | 0.657 | 0.768 | **-0.029** |
+| PBR36 | r=32 all-28, PBR26 data | 0.869 | — | 0.656 | 0.739 | **-0.030** |
+| PBR37 | r=8 all-28, ctr=0.2, PBR26 | **0.878** | 0.834 | **0.657** | **0.768** | **-0.029** (contrastive=0.2 gives zero benefit) |
+
+PBR37 DONE: MATH F1=0.657, GSM F1=0.768 — identical to PBR35 (no contrastive). Contrastive loss (weight=0.2) provides zero improvement with current PBR26 training data.
+
+**LoRA ceiling CONFIRMED**: All PBR26-data LoRA variants (PBR33-37) plateau at MATH F1 ≈ 0.656-0.657. Only PBR32 (different data = PBR12) breaks above. Data quality, not model capacity, is the bottleneck.
+
+### ta_sweep — Instruct Backbone — All Results (r000/005/010/020 running)
+
+| Variant | MATH F1 | GSM F1 | pair_acc | Status |
+|---------|---------|--------|---------|--------|
+| r000 (0% terminal) | 0.141 | 0.183 | 0.691 | DONE |
+| r005 (5% terminal) | 0.219 | 0.262 | 0.606 | DONE |
+| r010 (10% terminal) | 0.220 | 0.229 | 0.558 | DONE |
+| r020 (20% terminal) | **0.236** | **0.258** | 0.846 | ✅ DONE |
+
+All < 0.25 MATH F1. Instruct backbone universally inadequate (MATH F1 0.686 from Math-PRM-7B).
+
+### Artifacts
+- GRPO v4 checkpoint-150: `assets/artifacts/phase_f_grpo/grpo_pbr32_process_lambda03_v4_20260311T225806Z/grpo_checkpoints/checkpoint-150/`
+- PBR26 BoN summary: `assets/artifacts/phase_f_bon/pbr26_bon4_gsm8k_v4_20260311T225703Z/summary.json`
+- PBR37 run dir: `assets/artifacts/phase_e_runs/phase_e_pbr37_lora_r8_contrastive02_pbr26data_s42_20260311T204010Z/`
+
+---
+
+## 0AAARARB. Phase F4: GRPO Outcome-Only Result + PRM-Guided GRPO + BoN v4 Running (2026-03-13)
+
+### GRPO v2 Outcome-Only — COMPLETE (completed 06:51, 06:52 summary saved)
+- Run: `grpo_outcome_only_gsm8k_v2_20260311T204720Z`
+- Policy: Qwen2.5-Math-7B-Instruct (λ_process=0, outcome-only GRPO, 250 steps, 1h48m)
+- PRM: PBR32 (r=8 all-28, value head only for scoring — not used in training since λ=0)
+- **pre_training_accuracy: 0.955** (GSM8K, greedy on 200 problems)
+- **post_training_accuracy: 0.950** (delta = **-0.005**)
+- **phase_f4_gate: FAIL** — accuracy DECREASED
+
+### Interpretation
+Outcome-only GRPO on a 95.5%-baseline model decreases performance by -0.5%. This matches the offline feasibility analysis: outcome reward |advantage|=0.000 (all k=4 samples in a group have same correct/incorrect label). Without grade variance within groups, GRPO updates are noise-only → slight policy degradation.
+
+Key confirmation: **process reward is required** (offline analysis showed process |advantage|=0.796 >> 0.3 threshold for GRPO viability).
+
+### Bug Fix Applied (2026-03-13)
+`scripts/phase_f_grpo_lite.py` (PRMScorer class, line 160 OLD): `load_value_head_checkpoint` called as
+`load_value_head_checkpoint(vh, path)` (WRONG — 2 positional args), but function signature is
+`load_value_head_checkpoint(path) → (vh, config, extra)`. Fixed to `vh, _, _ = load_value_head_checkpoint(path)`.
+
+### PRM-Guided GRPO v4 (λ=0.3) — Running (06:57)
+- PID: 3894900, CUDA_VISIBLE_DEVICES=1
+- run-name: `grpo_pbr32_process_lambda03_v4`
+- PRM: PBR32 (r=8 all-28, MATH F1=0.689), λ_process=0.3
+- Log: `assets/artifacts/phase_e_logs/phase_f_grpo_process_v4.log`
+- Expected: accuracy INCREASE via process reward (|advantage|=0.796)
+
+### BoN K=4 v4 — COMPLETE: phase_f3_gate=PASS ✓
+
+| Metric | Value |
+|--------|-------|
+| greedy_accuracy | 0.905 (90.5%) |
+| prm_reranked_accuracy | **0.920 (92.0%)** |
+| oracle_accuracy | 0.950 (95.0%) |
+| prm_vs_greedy_delta | **+0.015 (+1.5%)** |
+| prm_vs_random_delta | **+0.020 (+2.0%)** |
+| **phase_f3_gate** | **PASS** (threshold ≥0.02) |
+
+Scorer: PBR32 (r=8 all-28 LoRA + MLP head, MATH F1=0.689)
+Reranker captures 73% of oracle-greedy gap (1.5/2.05%). Confirms PRM adds value for Best-of-N.
+Output: `assets/artifacts/phase_f_bon/pbr32_bon4_gsm8k_v4_20260311T225813Z/summary.json`
+
+### Artifacts
+- GRPO v2 result: `assets/artifacts/phase_f_grpo/grpo_outcome_only_gsm8k_v2_20260311T204720Z/summary.json`
+- GRPO v4 output: `assets/artifacts/phase_f_grpo/grpo_pbr32_process_lambda03_v4_20260311T225806Z/`
+- BoN v4 output: `assets/artifacts/phase_f_bon/pbr32_bon4_gsm8k_v4_20260311T225813Z/`
+
+---
+
+## 0AAAQX. Phase E/F Audit Fix: LoRA Safe Defaults + Phase F Controller Evaluation Scope (2026-03-12)
+
+### What was wrong
+
+Two interpretation-risk issues were confirmed:
+
+1. `phase_e_train_value_lora.py`
+   - direct trainer defaults still kept legacy-dangerous settings:
+     - `ranking_target_space=logit`
+     - `pair_weight_mode=confidence_semantic`
+   - this meant wrapper-safe runs and direct LoRA runs did not share the same default safety floor.
+
+2. `phase_f_train_trainable_controller.py`
+   - `phase_f_behavior_clone_controller.py`
+   - both selected models on `dev`, but then reported the headline controller score on the full benchmark trace pool.
+   - this mixed train/dev traces back into the final metric and could overstate controller quality.
+
+### Fix
+
+1. LoRA trainer defaults are now:
+   - `score`
+   - `none`
+   - `pair_acc`
+2. Phase F controllers now use explicit:
+   - `train`
+   - `dev`
+   - `test`
+   splits
+3. Main summary metric is now `test_eval`.
+4. `full_eval` is preserved only as:
+   - in-benchmark upper-bound reference
+   - not valid external generalization evidence
+
+### Validation
+
+- `python -m py_compile scripts/phase_e_train_value_lora.py scripts/phase_f_train_trainable_controller.py scripts/phase_f_behavior_clone_controller.py`
+- `PYTHONPATH=src pytest -q tests/unit/test_phase_f_trainable_controller.py tests/unit/test_phase_e_train_script.py tests/unit/test_phase_e_recipe_safety.py`
+- result: `12 passed`
+
+### Interpretation impact
+
+After this fix:
+
+1. new LoRA runs are less likely to silently fall into already-audited collapse defaults,
+2. new Phase F controller summaries are methodologically cleaner,
+3. older controller summaries should be re-read carefully if they only expose one `eval` block and do not distinguish `test_eval` from `full_eval`.
+
+## 0AAARA. PBR36 LoRA r=32 all-28 Results: Rank Sweep Confirms LoRA Ceiling (2026-03-13)
+
+### Setup
+- Backbone: Qwen2.5-Math-PRM-7B + LoRA rank=32, alpha=64, q+v proj, **all 28 layers**
+- Data: PBR26 data (DPO+MS full)
+- Epochs completed: 2/5 (training stopped early — GPU 3 blocked by GRPO v2)
+- Best checkpoint: epoch 1, pair_acc=0.8688, AUC=0.826
+
+### Results: ProcessBench MATH
+- **MATH F1: 0.656** (acc_err=0.519, acc_cor=0.892)
+- pair_acc_good_vs_bad: 0.867, pair_AUC: 0.874
+
+### Results: ProcessBench GSM8K
+- **GSM F1: 0.739** (acc_err=0.647, acc_cor=0.860)
+
+### Interpretation
+PBR36 (r=32) matches PBR35 (r=8) within 0.001 MATH F1 (both 0.656-0.657).
+Increasing LoRA rank from 8 → 32 on all-28-layers provides NO improvement over r=8.
+The LoRA ceiling on this data is ~0.656 MATH F1 regardless of rank.
+
+Frozen PBR26 (0.686) remains MATH SOTA by +3 F1 points.
+
+### Leaderboard update
+| Run | Rank | Layers | MATH F1 |
+|-----|------|--------|---------|
+| PBR26 frozen | — | — | **0.686** |
+| PBR35 all-28 | 8 | all | 0.657 |
+| PBR36 all-28 | **32** | all | 0.656 |
+| PBR34 top-4 | 16 | top-4 | 0.657 |
+| PBR33 all-28 | 8 | all | ~0.660 |
+
+Rank sweep: r=8, r=16, r=32 all land in 0.656-0.660. Confirmed diminishing returns.
+
+### Artifacts
+- Run dir: `assets/artifacts/phase_e_runs/phase_e_pbr36_lora_r32_all28_pbr26data_s42_20260311T203151Z`
+- Eval dir: `assets/artifacts/phase_e_eval/phase_e_pbr36_lora_r32_all28_pbr26data_s42_20260311T203151Z_pb_math_20260311T220742Z`
+
+---
+
+## 0AAAQZ. PBR35 LoRA r=8 all-28 Results + LoRA Strategy Pivot (2026-03-13)
+
+### Results
+
+- Run: `phase_e_pbr35_lora_mathprm_all28_pbr26data_s42_20260311T200442Z`
+- Config: Math-PRM-7B + LoRA r=8, q+v, **all-28 layers**, PBR26 data (7366 pairs), 3 epochs
+- Best checkpoint: epoch 2, pair_acc=0.8792, AUC=0.8336
+- **MATH F1 = 0.657** (same as PBR34 r=16 top-4!)
+- acc_erroneous = 0.525, acc_correct = 0.877
+- Threshold = 0.365
+
+### LoRA vs Frozen Backbone Summary (critical finding)
+
+| Config | MATH F1 | GSM F1 | pair_acc | acc_err | acc_cor |
+|--------|---------|--------|----------|---------|---------|
+| **Frozen PBR26** | **0.686** | 0.768 | — | — | — |
+| Frozen PBR19 | 0.683 | **0.778** | — | — | — |
+| PBR33: LoRA r=8 top-4 | 0.666 | **0.797** | 0.879 | 0.557 | 0.828 |
+| PBR34: LoRA r=16 top-4 | 0.657 | 0.766 | 0.882 | 0.527 | 0.872 |
+| PBR35: LoRA r=8 all-28 | 0.657 | **0.768** | 0.884 | 0.525 | 0.877 |
+
+**CONCLUSION: LoRA DOES NOT BREAK THE FROZEN CEILING.**
+
+All LoRA variants underperform the frozen backbone on MATH F1 (0.657-0.666 < 0.686).
+The frozen backbone acts as a regularizer — preventing the backbone from overfitting to
+the training pair distribution, which differs from ProcessBench.
+
+Three consistent patterns across all LoRA variants:
+1. Higher pair_acc on training eval (0.879-0.884) than frozen baseline
+2. Lower acc_erroneous (0.525-0.557) than frozen baseline — worse at detecting errors
+3. Higher acc_correct (0.828-0.877) — more conservative (says "correct" more often)
+
+This is classic overfitting: the LoRA backbone fine-tunes to match the training data
+distribution but loses ability to detect errors in the ProcessBench distribution.
+
+### Strategic Implication
+
+**Stop LoRA architecture experiments.** The bottleneck is NOT model capacity — it's
+**training data quality**. The frozen backbone with high-quality data already achieves
+0.686 F1. To break through, we need:
+1. **Consensus filtering** (MC estimate + LLM judge agreement) — addresses distribution shift
+2. **More diverse training pairs** — reduces overfitting to pair distribution
+3. **Better step boundaries** — EDU-PRM entropy boundaries instead of `\n\n`
+
+PBR36 (r=32 all-28) and PBR37 (r=8 all-28+contrastive) are still running but
+expected to show similar or worse results. Contrastive loss (PBR37) is the only
+remaining LoRA hypothesis that might help.
+
+---
+
+## 0AAAQY. PBR34 LoRA r=16 top-4 Results (2026-03-13)
+
+### Result
+
+- Run: `phase_e_pbr34_lora_mathprm_r16_top4_pbr26data_s42_20260311T194426Z`
+- Config: Math-PRM-7B + LoRA r=16, q+v, top-4 layers, PBR26 data (7366 pairs), ~4 epochs (crashed ep4)
+- Best checkpoint: epoch 3, pair_acc=0.882, AUC=0.838
+- **MATH F1 = 0.657** (WORSE than PBR33 r=8 which got 0.666!)
+- acc_erroneous = 0.527 (dropped from 0.557), acc_correct = 0.872 (improved from 0.828)
+- Threshold = 0.435
+
+### Key Finding: Higher rank LoRA ≠ better ProcessBench F1
+
+Despite higher pair_accuracy (0.882 vs 0.879) and AUC (0.886 vs 0.887) on training eval pairs,
+r=16 achieves LOWER ProcessBench F1. The pattern is the same as the frozen backbone plateau:
+more capacity → overfits to training distribution → worse generalization.
+
+| Config | pair_acc | AUC | MATH F1 | acc_err | acc_cor |
+|--------|----------|-----|---------|---------|---------|
+| PBR33 r=8 top-4 | 0.879 | 0.887 | **0.666** | 0.557 | 0.828 |
+| PBR34 r=16 top-4 | 0.882 | 0.886 | 0.657 | 0.527 | 0.872 |
+
+The model with r=16 has MORE capacity and better pair discrimination but WORSE error detection.
+Higher acc_correct with lower acc_erroneous = model says "correct" more often = threshold shift.
+This suggests r=8 is near-optimal for top-4 layer LoRA with this training set size.
+
+---
+
+## 0AAAQW. Phase E/F Overnight Session: LoRA Code Fixes + Phase F BoN/GRPO Setup (2026-03-13)
+
+### PBR33 Final Results
+
+- Run: `phase_e_pbr33_lora_mathprm_top4_pbr26data_s42`
+- Config: Math-PRM-7B + LoRA r=8, q+v, top-4 layers, PBR26 data (7366 pairs), 5 epochs
+- **MATH F1 = 0.666**, GSM F1 = **0.797** (NEW GSM SOTA, beats PBR27's 0.784)
+- Pattern: top-4 layers = better GSM, all-28 layers = better MATH (confirmed again)
+
+### LoRA PRM Loading Bug Fix
+
+**Bug**: `PeftModel.from_pretrained()` fails on `Qwen2ForProcessRewardModel` because LoRA adapters
+saved with `task_type=CAUSAL_LM` cause PEFT to wrap as `PeftModelForCausalLM`, which requires
+`prepare_inputs_for_generation` (absent on PRM).
+
+**Fix**: `attach_peft_adapter_for_inference()` in `src/ours/phase_e/runtime.py` now uses
+`get_peft_model()` + manual safetensors loading, bypassing the PEFT model class mapping.
+Also changed `apply_lora_to_backbone()` to use `task_type=None` for future adapters.
+
+Files fixed:
+- `src/ours/phase_e/runtime.py` — `attach_peft_adapter_for_inference()` and `apply_lora_to_backbone()`
+- `scripts/phase_f_best_of_n_eval.py` — use `attach_peft_adapter_for_inference()`
+- `scripts/phase_f_grpo_lite.py` — use `attach_peft_adapter_for_inference()`
+
+### GRPO Reward Shaping: Clip+Delta Added
+
+Based on Zeng et al. 2024: naive PRM reward shaping causes reward hacking (model generates
+many tiny steps to accumulate scores). Fix: use clipped step-to-step deltas.
+
+Added to `phase_f_grpo_lite.py`:
+- `PRMScorer.score_clip_delta()` method
+- `--reward-shaping clip_delta` (default) / `mean_centered` (legacy)
+- GPU3 watcher updated to use `--reward-shaping clip_delta` for GRPO+PRM run
+
+### Phase F Status (GPU 3 overnight)
+
+| Experiment | Status | Notes |
+|---|---|---|
+| GRPO outcome-only v2 | 🔄 running | PID 3787823, pre-eval in progress |
+| BoN eval v3 | ⏳ waiting | starts after GRPO v2 finishes |
+| GRPO+PRM (Clip+Delta) | ⏳ waiting | starts after BoN finishes |
+
+Expected: GPU3 watcher PID 3806070 will run chain sequentially.
+
+### Offline ABR RL Controller: All Variants HEURISTIC WINS on MATH
+
+All 10 variants tested (linear, mlp-64, mlp-128, gru-32, BC warmstart, REINFORCE):
+- Best RL: F1 = 0.779 (pbr32_math_mlp_bcwarmstart)
+- Heuristic: F1 = 0.822 (τ=0.35)
+- **Conclusion**: Fixed threshold beats neural controller on MATH with current data scale
+- **ABR production setting**: use τ ≈ 0.35-0.40 for MATH domain
+
+Note: different from GSM8K results (see entry 0AAAQV) where RL won.
+
+### In-Flight LoRA Training
+
+| Run | Config | Status | ETA |
+|---|---|---|---|
+| PBR34 | r=16 top-4 + PBR26, 5ep | epoch 3/5 | ~2h |
+| PBR35 | r=8 all-28 + PBR26, 5ep | epoch 2/5 | ~4h |
+| PBR36 | r=32 all-28 + PBR26, 5ep | epoch 0/5 | ~12h |
+| PBR37 | r=8 all-28 + contrastive 0.2 | epoch 0/5 | ~12h |
+
+---
+
+## 0AAAQV. Phase F RL Controller Full Sweep + Analysis (2026-03-13)
+
+### Main Finding (revised after full sweep analysis)
+
+**MATH**: Heuristic threshold universally wins (0/10 RL wins). Root cause: 84.3% of erroneous MATH trajectories have score oscillations (avg 1.42 per example) → RL policy can't learn stable patterns.
+
+**GSM8K**: RL "wins" at seed=42 but is a **split artifact**. Seed controls train/test split; RL policy is consistent (F1≈0.79-0.84), but heuristic F1 varies widely by split composition.
+
+### Cross-Seed GSM8K Analysis (22 configs)
+
+| Seed | RL F1 | Heuristic F1 | ΔF1 | Verdict |
+|------|-------|-------------|-----|---------|
+| 42 (×15 configs) | 0.837 | **0.793** | **+0.044** | RL WINS |
+| 1 (×2 configs) | 0.839 | **0.916** | -0.077 | HEURISTIC WINS |
+| 7 (×2 configs) | 0.796 | **0.900** | -0.104 | HEURISTIC WINS |
+| 123 (×1 config) | 0.787 | **0.903** | -0.116 | HEURISTIC WINS |
+
+- RL F1 std = **0.021** (stable across splits)
+- Heuristic F1 std = **0.057** (varies by test split composition, 15%×400 ≈ 60 examples)
+- Non-seed-42 combined: RL=0.812, Heuristic=0.907, **Δ=-0.095 (heuristic wins)**
+
+### MATH Score Trajectory Analysis (PBR19 scored_rows, 1000 examples)
+
+| Metric | MATH | GSM8K |
+|--------|------|-------|
+| Heuristic τ=0.38 detection rate (erroneous) | 86.5% | 55.1% |
+| Score trajectory std (erroneous) | 0.219 | 0.173 |
+| Oscillation rate (erroneous) | **84.3%** | 68.6% |
+| Avg oscillations per erroneous example | 1.42 | 0.87 |
+| Last-step separation (correct vs erroneous) | 0.391 | 0.331 |
+
+**Why MATH RL fails**: High oscillation (84.3%) means every example the RL policy tries to learn "wait after dip" has different oscillation patterns. Heuristic tau=0.38 (fire on any dip) achieves 86.5% detection and is near-optimal.
+
+### Full Dataset Evaluation (definitive)
+
+Running heuristic on ALL 400 GSM8K examples (not a 15% test split):
+
+```
+Full-dataset GSM8K heuristic (tau=0.38): F1 = 0.8998
+Full-dataset GSM8K heuristic (oracle tau=0.44): F1 = 0.9003
+Erroneous detected: 179/207 (86.5%)  Correct preserved: 181/193 (93.8%)
+```
+
+This confirms:
+- RL max on biased seed=42 test split: F1=0.844 (only 60 examples)
+- Full dataset heuristic: F1=0.900
+- **Heuristic wins by ~0.056 on full dataset**
+
+The seed=42 test split heuristic (F1=0.793) was an outlier — that specific 60-example subset happened to contain near-threshold examples where the heuristic underperformed.
+
+### ABR Implications (final)
+
+1. For **ABR production**: Use heuristic threshold tau=0.38-0.44 for both MATH and GSM. **No RL controller needed.**
+2. For **future RL research**: Needs full-dataset training and evaluation (not 15% splits), or online RL with ProcessBench as a live environment
+3. MATH hard ceiling: 13.5% erroneous examples never drop below 0.38 → only PRM quality improvement helps
+
+### Artifacts
+
+- Full sweep results: `assets/artifacts/phase_e_logs/phase_f_gsm_full_sweep.log`
+- RL policy checkpoints: `assets/artifacts/phase_f_rl_controller/gsm_*/`
+- Log: `assets/artifacts/phase_e_logs/phase_f_rl_sweep_v2.log`
+
+---
+
+## 0AAAQU. Phase E/F Overnight Packaging: LoRA Fail-Fast Repair + Phase F Usability Refresh (2026-03-12)
+
+### Context
+
+This pass had two operational goals:
+
+1. stop Phase E overnight LoRA work from being corrupted by launcher-level false-success behavior,
+2. package the strongest currently available Phase F verifier slices into one overnight usability chain.
+
+### Diagnosis: older LoRA launchers could produce false "training done" stories
+
+Confirmed risk:
+
+1. `scripts/run_pbr33_lora_mathprm_pbr26data.sh`
+2. `scripts/run_pbr34_lora_mathprm_r16_pbr26data.sh`
+3. `scripts/run_pbr35_lora_contrastive.sh`
+
+all used:
+
+1. `set -e`
+2. `python ... | tee log`
+
+without `pipefail`.
+
+That means:
+
+1. a LoRA train crash could still let the shell continue into eval,
+2. the wrapper could then point at the newest timestamped run dir,
+3. and the resulting narrative looked like "training done" even when
+   `manifest.json` never existed.
+
+### Fix
+
+The launchers above now:
+
+1. use `set -euo pipefail`
+2. resolve only completed run dirs that already contain `manifest.json`
+
+`scripts/run_lora_auto_eval.sh` was also tightened to use `set -euo pipefail`.
+
+### New overnight entrypoints
+
+Added:
+
+1. `scripts/run_phase_e_lora_overnight_suite.sh`
+2. `scripts/run_phase_f_usability_overnight_suite.sh`
+
+Supporting design note:
+
+1. `docs/phase_e_phase_f_best_practice_refresh_20260312.md`
+
+### Phase E runtime status
+
+Current status:
+
+1. the new Phase E suite was launched as:
+   - `RUN_PREFIX=phase_e_lora_overnight_0312_0452`
+2. but all 4 GPUs were already occupied by live LoRA runs (`PBR34/35/36/37`)
+3. the suite therefore now waits for GPU 3 to free up instead of trying to
+   force-start and OOM
+
+This is the correct behavior in the current environment.
+
+### Phase F results
+
+Main artifact bundle:
+
+1. `assets/artifacts/phase_f_logs/phase_f_usability_overnight_0312_0452_UALL_PHASEF_USABILITY/final_summary.md`
+
+#### 1. Controller sweep on refreshed verifier slices
+
+Artifacts:
+
+1. `assets/artifacts/phase_f_controller_sweep/phase_f_usability_overnight_0312_0452_controller_sweep_20260311T204944Z`
+
+Best policies:
+
+1. Math:
+   - `pbr26_math`: `threshold_only = 0.8639`
+   - `pbr31_math`: `threshold_only = 0.8697`
+   - `pbr32_math`: `threshold_only = 0.8616`
+   - `pbr33_math`: `threshold_only = 0.8529`
+2. GSM:
+   - `pbr19_gsm`: `delayed_drop = 0.9052`
+   - `pbr31_gsm`: `threshold_only = 0.9134`
+   - `pbr32_gsm`: `delayed_drop = 0.9101`
+   - `pbr33_gsm`: `threshold_only = 0.9053`
+
+Interpretation:
+
+1. stronger verifier slices do not overturn the basic controller story
+2. Math still prefers simpler threshold-like stopping
+3. GSM still supports either `threshold_only` or `delayed_drop`, depending on
+   the score geometry of the verifier slice
+
+#### 2. Worst-generator robust policy search
+
+Artifacts:
+
+1. `assets/artifacts/phase_f_controller_robustness/phase_f_usability_overnight_0312_0452_generator_robustness_20260311T204947Z`
+
+Best robust families:
+
+1. Math:
+   - `pbr26_math`: `guarded_drop`, worst-gen `0.7604`
+   - `pbr31_math`: `guarded_drop`, worst-gen `0.7744`
+   - `pbr32_math`: `delayed_drop`, worst-gen `0.7397`
+   - `pbr33_math`: `guarded_drop`, worst-gen `0.7801`
+2. GSM:
+   - `pbr19_gsm`: `delayed_drop`, worst-gen `0.7347`
+   - `pbr31_gsm`: `delayed_drop`, worst-gen `0.7668`
+   - `pbr32_gsm`: `delayed_drop`, worst-gen `0.7692`
+   - `pbr33_gsm`: `delayed_drop`, worst-gen `0.7416`
+
+Interpretation:
+
+1. robust selection sharpens the Math-vs-GSM split:
+   - Math leans `guarded_drop`
+   - GSM leans `delayed_drop`
+2. `pbr32_math` remains somewhat unusual and prefers `delayed_drop`
+
+#### 3. Weak-verifier ensemble still helps
+
+Artifacts:
+
+1. `assets/artifacts/phase_f_controller_ensemble/phase_f_usability_overnight_0312_0452_ensemble_eval_20260311T204954Z`
+
+Best ensemble cases:
+
+1. Math:
+   - `p31+p32`: `mean_50 + guarded_drop = 0.8699`
+   - `p26+p33`: `mean_50 + threshold_only = 0.8687`
+2. GSM:
+   - `p19+p31`: `mean_50 + threshold_only = 0.9144`
+   - `p19+p33`: `mean_75a + delayed_drop = 0.9127`
+
+Interpretation:
+
+1. score-level ensembling still buys controller quality
+2. the gain is incremental, not a reason to postpone single-model controller use
+
+#### 4. BC vs BC->RL vs robust-from-scratch
+
+Artifacts:
+
+1. `assets/artifacts/phase_f_bc/phase_f_usability_overnight_0312_0452_bc_only_20260311T205007Z`
+2. `assets/artifacts/phase_f_bc/phase_f_usability_overnight_0312_0452_bc_then_rl_20260311T205055Z`
+3. `assets/artifacts/phase_f_rl_like/phase_f_usability_overnight_0312_0452_rl_like_robust_20260311T205412Z`
+
+Results:
+
+1. `bc_only`
+   - `pbr26_math = 0.8547`
+   - `pbr32_math = 0.8381`
+   - `pbr31_gsm = 0.8819`
+   - `pbr33_gsm = 0.9053`
+2. `bc_then_rl`
+   - `pbr26_math = 0.8562`
+   - `pbr32_math = 0.8678`
+   - `pbr31_gsm = 0.8874`
+   - `pbr33_gsm = 0.8775`
+3. robust from scratch
+   - `pbr32_math = 0.6398`, worst-gen `0.4291`
+   - `pbr33_gsm = 0.9001`, worst-gen `0.6557`
+
+Interpretation:
+
+1. `BC -> RL` is no longer a uniformly negative result:
+   - it helped `pbr32_math`
+   - it helped `pbr31_gsm` slightly
+2. but it is still not a safe default:
+   - `pbr33_gsm` degraded badly under RL fine-tune
+3. robust-from-scratch still loses clearly on Math and remains fragile
+
+### Updated reading
+
+The current strongest practical Phase F story is now:
+
+1. heuristic controller is already usable
+2. BC distillation is also usable
+3. BC->RL is a case-by-case optional upgrade, not a default promotion path
+4. robust-from-scratch RL remains a stress-test branch
+
+### Next steps
+
+1. let the queued Phase E LoRA suite start automatically once GPU 3 is free
+2. compare `L1/L2/L3` directly against:
+   - `PBR26` frozen
+   - `PBR32` Math LoRA
+   - `PBR33` GSM LoRA
+3. keep Phase F default recommendation as:
+   - heuristic / BC first
+   - RL second
+
+## 0AAAQT. Phase E/F Safety Hardening + Cheap→Strong Gate Sweep (2026-03-12)
+
+### Infrastructure fixes completed
+
+This round closed two remaining high-risk `Phase E` pitfalls:
+
+1. `docs/relatedPapers/` is now fully synced against currently referenced repo papers.
+   - downloader:
+     - `scripts/download_related_papers.py`
+   - `index.json` now reports:
+     - `failed = 0`
+     - `unresolved = 0`
+2. `Phase E` candidate promotion is now strict by default.
+   - `scripts/phase_e_select_candidate.py`
+   - `scripts/phase_e_select_intradataset_candidate.py`
+   - both now require `best_value_head.pt` unless the caller explicitly opts into
+     `--checkpoint-missing-policy fallback_final`
+3. `run_phase_e_dual_head_smoke.sh` no longer defaults to the audited-dangerous
+   recipe:
+   - `ranking_target_space = logit`
+   - `pair_weight_mode = confidence_semantic`
+   - `checkpoint_selection_metric = ranking_score`
+
+Interpretation:
+
+1. active `Phase E` wrappers are now less likely to silently reintroduce
+   previously-audited collapse settings;
+2. historical `dual-head smoke` results remain valid as *diagnostic history*,
+   but new runs will no longer accidentally reproduce that unsafe default.
+
+### New experiment: cheap→strong verifier gate sweep
+
+New script:
+
+1. `scripts/phase_e_sweep_weak_strong_gate.py`
+
+Purpose:
+
+1. test a current community direction:
+   - let a cheap verifier handle only high-confidence prefixes,
+   - escalate low-confidence prefixes to a stronger verifier,
+   - measure how much benchmark quality improves as strong-verifier usage grows.
+
+#### A. `prm_e46 -> pbr26`
+
+Artifact:
+
+1. `assets/artifacts/phase_e_gate_sweeps/phase_e_cheap_strong_gate_0312_20260311T204929Z/summary.md`
+
+Main results:
+
+1. Math:
+   - weak AUC `0.6053`
+   - strong AUC `0.8882`
+   - best mixed AUC `0.8790`
+   - but required `strong_usage_rate = 0.9507`
+2. GSM:
+   - weak AUC `0.6264`
+   - strong AUC `0.9148`
+   - best mixed AUC `0.9103`
+   - but required `strong_usage_rate = 0.9736`
+
+Intermediate thresholds were smoother but still expensive:
+
+1. Math at `tau=0.30`
+   - AUC `0.6842`
+   - strong usage `0.429`
+2. GSM at `tau=0.30`
+   - AUC `0.7402`
+   - strong usage `0.493`
+
+Interpretation:
+
+1. the gate works directionally;
+2. but this weak verifier is not strong enough to save much strong-verifier cost.
+
+#### B. `ms_e43 -> pbr26`
+
+Artifact:
+
+1. `assets/artifacts/phase_e_gate_sweeps/phase_e_cheap_strong_gate_ms_0312_20260311T204937Z/summary.md`
+
+Main results:
+
+1. Math:
+   - weak AUC `0.6341`
+   - strong AUC `0.8882`
+   - best mixed AUC `0.8521`
+   - strong usage `0.9139`
+2. GSM:
+   - weak AUC `0.6245`
+   - strong AUC `0.9148`
+   - best mixed AUC `0.8495`
+   - strong usage `0.8655`
+
+At lower strong usage the gains were modest:
+
+1. Math at `tau=0.40`
+   - AUC `0.6734`
+   - strong usage `0.352`
+2. GSM at `tau=0.40`
+   - AUC `0.6563`
+   - strong usage `0.275`
+
+Interpretation:
+
+1. `ms_e43` is a somewhat better cheap verifier than `prm_e46` for this gate,
+2. but it still does not justify a "cheap handles most, strong handles few" system yet.
+
+### Overall conclusion
+
+1. cheap-to-strong verifier routing is a valid systems direction;
+2. however, current weak verifiers still require too much strong coverage to get
+   close to `pbr26`;
+3. therefore the repository should now prioritize:
+   - separate local/process verifier,
+   - separate terminal/answer verifier,
+   - explicit abstain/escalate gate,
+   instead of asking one scalar verifier to solve all roles.
+
+## 0AAAQT. Active Overnight Recovery / Expansion Runs (2026-03-12 16:18 +0800)
+
+### Active runs launched after fresh wrapper fixes
+
+1. `phase_e_phase_f_overnight_0312_1621`
+   - repaired single-GPU package
+   - scope: `PH2` hybrid + default `selected relabel` + `PBR26/PBR31` modern preflight
+2. `phase_e_selrel_wide_0312_1615`
+   - wider low-margin `PRMBench` selected relabel (`selection_size=192`, `min_conf=0.65`)
+3. `phase_e_selrel_strict_0312_1615`
+   - stricter consensus-filter variant (`selection_size=96`, `min_conf=0.72`)
+4. `phase_f_usability_0312_1615`
+   - controller sweep + generator robustness + ensemble + BC / BC->RL
+
+### Important implementation corrections that apply to these runs
+
+1. `run_phase_e_processbench_hybrid_suite.sh`
+   - fixed artifact directory resolution so successful `PH2` runs are no longer mislabeled as failed under `pipefail`
+2. `run_phase_e_phase_f_single_gpu_overnight.sh`
+   - fixed heredoc rendering so its plan markdown no longer executes shell substitutions
+3. hybrid warm-start contract
+   - `gated_mlp` now skips incompatible `mlp` init checkpoints instead of crashing mid-suite
+
+### Early partial signal
+
+1. repaired `PH2` now enters training and benchmark eval correctly
+2. `phase_f_usability_0312_1615` has already reproduced the strong offline controller pattern:
+   - `pbr31_gsm` threshold-only / delayed-drop family remains around `balanced_f1≈0.90+`
+   - `pbr32_math` BC-only is already above `0.84` on test
+3. both `selected relabel` variants have moved past low-margin slicing and are currently in judge scoring
+
+## 0AAAQS. Phase E/F Single-GPU Overnight Packaging + Modern Preflight Refresh (2026-03-13)
+
+### Context
+
+All four GPUs were already heavily utilized, so the old style of parallel
+overnight frontier batches had become the wrong default. The immediate need was:
+
+1. one safer `Phase E` overnight package that can still move benchmark-facing
+   verifier work forward,
+2. one updated `Phase F` preflight that audits the current stronger candidates
+   `PBR26 / PBR31`, not older legacy checkpoints.
+
+### New packaging
+
+1. [run_phase_e_phase_f_single_gpu_overnight.sh](/home/zling/y/bcr/ref/scripts/run_phase_e_phase_f_single_gpu_overnight.sh)
+   - sequential one-GPU launcher
+2. [run_phase_f_modern_preflight_suite.sh](/home/zling/y/bcr/ref/scripts/run_phase_f_modern_preflight_suite.sh)
+   - `PBR26 / PBR31` threshold-shift + reward-hacking audit
+3. [phase_e_phase_f_overnight_bestpractice_20260313.md](/home/zling/y/bcr/ref/docs/phase_e_phase_f_overnight_bestpractice_20260313.md)
+   - literature-backed rationale for why this is the next overnight package
+
+### What the overnight package is meant to answer
+
+1. whether `PH2` style benchmark-oriented hybrid supervision can beat prior
+   weak benchmark-facing results,
+2. whether `PRMBench selected relabel` can improve a narrow ambiguous slice
+   without broad relabel noise,
+3. whether `CR1` style curated reward-centered gating is worth re-testing under
+   controlled memory settings,
+4. whether `PBR26` or `PBR31` is currently the safer pre-RL controller
+   candidate.
+
+## 0AAAQ. Phase E LoRA Expansion + RL Controller + Literature Synthesis (2026-03-13)
+
+### Context
+
+Night session continuing from PBR32 MATH F1=0.689 SOTA. Objectives:
+1. Expand LoRA series: PBR33 final, PBR34/35/36 training, PBR37 contrastive loss queued
+2. RL controller evaluation: offline REINFORCE on PBR32 scored traces
+3. Literature synthesis: top methods for closing community F1 gap
+
+### PBR33 Final Results (PBR26 data + top-4 r=8)
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| MATH F1 | 0.666 | Below PBR32 (0.689) — top-4 layers insufficient for MATH |
+| GSM F1 | **0.797** | **NEW GSM SOTA** — best all-time |
+
+Key finding: **top-4 + PBR26 data = best GSM but weakest MATH**. All-28 layers needed for MATH.
+
+### RL Controller Training Results (phase_f_train_rl_controller.py on PBR32 MATH)
+
+| Method | Val F1 | Notes |
+|--------|--------|-------|
+| **Heuristic tau=0.35** | **0.848** | **BEST — simple threshold wins** |
+| MLP BC warmstart (fp=5) | 0.818 (after BC) | BC alone nearly matches heuristic |
+| MLP REINFORCE (after BC) | 0.750-0.781 | REINFORCE degrades BC policy |
+| GRU REINFORCE | 0.72-0.75 | Slow convergence, local optima |
+
+**Key finding**: heuristic tau=0.35 at F1=0.848 is the optimal offline error-detection controller.
+BC warmstart gets close (0.818) but REINFORCE consistently hurts. Confirms previous session.
+
+### Literature Synthesis: Top Methods to Close Community F1 Gap
+
+Based on comprehensive literature survey (2026-03-13):
+
+| Method | Evidence | Expected MATH F1 Gain | Effort | Priority |
+|--------|----------|----------------------|--------|---------|
+| Contrastive loss (Scale AI arXiv:2407.13887) | +0.09 AUROC | +2-3 F1 | Medium | **1** |
+| LoRA rank r=32 | 4× params vs r=8 | +1-3 F1 | Low | **2** |
+| EDU-PRM entropy step boundaries (arXiv:2503.22233) | 7K queries = 72B PRM | +1-2 F1 | Medium-High | 3 |
+| Implicit PRM / PRIME log-ratio (arXiv:2502.01456) | No step labels | Unknown | High | 4 |
+| GenPRM generative verification (arXiv:2504.00891) | ~80.5 F1 target | +5+ F1 | Very High | 5 |
+
+Contrastive loss already implemented in `phase_e_train_value_lora.py` (`--contrastive-loss-weight`).
+
+### Active Experiments (as of 2026-03-13 06:00 +0800)
+
+| Exp | GPU | Config | Status |
+|-----|-----|--------|--------|
+| PBR35 | 1 | r=8 all-28 + PBR26 data | Training (ep1) |
+| PBR34 | 2 | r=16 top-4 + PBR26 data | Training (ep1) |
+| PBR36 | 3 | r=32 all-28 + PBR26 data | Training (ep0) |
+| PBR37 | 0 | r=8 all-28 + contrastive 0.2 | Queued |
+
+All evals auto-queued in background on respective GPUs.
+
+---
+
+## 0AAAP. Phase E Overnight Frontier: Dual-Head Regresses, Hybrid Still Overfits Held-Out Geometry (2026-03-13)
+
+### Artifacts
+
+1. [F2 summary](/home/zling/y/bcr/ref/assets/artifacts/phase_e_logs/phase_e_probe_f2/final_summary.md)
+2. [F2 same-family](/home/zling/y/bcr/ref/assets/artifacts/phase_e_samefamily_eval/phase_e_probe_f2_dual_head_samefamily_20260311T195659Z/summary.md)
+3. [F2 ProcessBench GSM8K](/home/zling/y/bcr/ref/assets/artifacts/phase_e_eval/phase_e_probe_f2_dual_head_processbench_gsm8k_20260311T195708Z/summary.md)
+4. [F2 ProcessBench Math](/home/zling/y/bcr/ref/assets/artifacts/phase_e_eval/phase_e_probe_f2_dual_head_processbench_math_20260311T195717Z/summary.md)
+5. [PH2 summary](/home/zling/y/bcr/ref/assets/artifacts/phase_e_logs/phase_e_probe_ph2/final_summary.md)
+6. [PH2 value run](/home/zling/y/bcr/ref/assets/artifacts/phase_e_runs/phase_e_probe_ph2_ph2_prm_local_ta10_msgrid10_arch_sweep_smoke_mlp_20260311T195358Z/summary.md)
+7. [PH2 ProcessBench GSM8K](/home/zling/y/bcr/ref/assets/artifacts/phase_e_eval/phase_e_probe_ph2_ph2_prm_local_ta10_msgrid10_arch_sweep_smoke_mlp_processbench_gsm8k_20260311T201904Z/summary.md)
+8. [PH2 ProcessBench Math](/home/zling/y/bcr/ref/assets/artifacts/phase_e_eval/phase_e_probe_ph2_ph2_prm_local_ta10_msgrid10_arch_sweep_smoke_mlp_processbench_math_20260311T201904Z/summary.md)
+9. [CR1 suite log](/home/zling/y/bcr/ref/assets/artifacts/phase_e_logs/phase_e_probe_cr1/suite.log)
+
+### Main outcomes
+
+#### 1. `F2_DUAL_HEAD_PBR10` is a clear negative result
+
+Compared with the strong `PBR10` scalar baseline, dual-head factorization
+damaged the geometry that actually mattered:
+
+1. held-out remained only moderate:
+   - pair acc `0.6384`
+   - auc `0.5792`
+2. same-family routing collapsed:
+   - prompt-pool top1 `0.6706`
+   - local first-bad `0.4352`
+3. benchmark metrics dropped hard versus `PBR10`
+   - GSM AUC `0.7254` vs baseline `0.8730`
+   - Math AUC `0.7063` vs baseline `0.8631`
+
+Interpretation:
+
+1. current dual-head implementation does **not** solve the terminal blind spot;
+2. instead it destroys the already-good local ranking geometry;
+3. this direction should be treated as a failed repair, not a new mainline.
+
+#### 2. `PH2_PRM_LOCAL_TA10_MSGRID10` shows a classic held-out / benchmark split
+
+The hybrid data contract trains very well on its own held-out split:
+
+1. held-out pair acc `0.9318`
+2. held-out auc `0.9040`
+
+But benchmark utility stays weak even after a repaired 256-sample benchmark eval:
+
+1. ProcessBench GSM8K
+   - pair acc `0.4625`
+   - auc `0.5224`
+   - first-edge `0.5849`
+2. ProcessBench Math
+   - pair acc `0.4360`
+   - auc `0.5321`
+   - first-edge `0.4922`
+
+Interpretation:
+
+1. the hybrid artifact is easy to fit;
+2. but it still does **not** produce a trustworthy benchmark-facing verifier;
+3. this is strong evidence that benchmark-aligned mixture needs stricter
+   contract design, not just "more local + a little terminal + a little grid".
+
+#### 3. `CR1_CURATED_CENTER_GATE_SMOKE` was correctly blocked by recipe guard
+
+The curated centered mix used:
+
+1. mixed local + terminal semantics
+2. `pair_weight_mode=confidence_group_balance`
+
+The guard raised:
+
+1. `SEMANTIC_WEIGHT_MIXED_TERMINAL`
+
+Interpretation:
+
+1. the failure is desirable;
+2. without the guard, this run would have added another ambiguous result to the
+   queue.
+
+### Infrastructure note
+
+Two wrapper bugs were found and fixed while auditing these results:
+
+1. `run_phase_e_frontier_suite.sh`
+   - expected an outdated same-family JSON schema and misreported finished runs
+     as failed
+2. `run_phase_e_processbench_hybrid_suite.sh`
+   - resolved run/eval dirs with the wrong suffix pattern and stopped after
+     training
+
+These were **wrapper bookkeeping bugs**, not model-learning bugs.
+
+## 0AAAO. Phase F Robust Objective Bug Fix: Old "Robust RL" Was Understated (2026-03-12)
+
+### Diagnosis
+
+This round re-audited the new `Phase F` controller-RL code and found one
+research-critical implementation bug:
+
+1. `scripts/phase_f_train_trainable_controller.py`
+2. `robust_lambda` previously added a constant scalar penalty
+3. that penalty did **not** depend on policy log-probs
+4. so the "robust" objective changed logs, but not gradients
+
+Implication:
+
+1. historical `robust-from-scratch` artifacts were underestimating the real
+   effect of worst-generator-aware optimization
+2. any claim that "robust RL does not help at all" was too strong
+
+### Code Fix
+
+Files:
+
+1. `scripts/phase_f_train_trainable_controller.py`
+2. `tests/unit/test_phase_f_trainable_controller.py`
+
+What changed:
+
+1. `robust_lambda` now adds a differentiable extra policy-gradient term on the
+   current worst-generator slice
+2. training curves now record the epoch's worst-generator slice for audit
+
+Validation:
+
+1. `PYTHONPATH=src pytest -q tests/unit/test_phase_f_trainable_controller.py`
+
+### New Experiment Results
+
+Artifacts:
+
+1. [robust_fixed](/home/zling/y/bcr/ref/assets/artifacts/phase_f_rl_like/phase_f_rl_like_robust_fixed_0312_20260311T201229Z/summary.md)
+2. [mean_fixed](/home/zling/y/bcr/ref/assets/artifacts/phase_f_rl_like/phase_f_rl_like_mean_fixed_0312_20260311T201515Z/summary.md)
+3. [bc_then_rl_robust_fixed](/home/zling/y/bcr/ref/assets/artifacts/phase_f_bc/phase_f_bc_then_rl_robust_fixed_0312_20260311T201229Z/summary.md)
+4. historical [robust_fromscratch](/home/zling/y/bcr/ref/assets/artifacts/phase_f_rl_like/phase_f_rl_like_robust_fromscratch_0312_20260311T200645Z/summary.md)
+5. historical [bc_then_rl_robust](/home/zling/y/bcr/ref/assets/artifacts/phase_f_bc/phase_f_bc_then_rl_robust_0312_20260311T200451Z/summary.md)
+6. historical [bc_only](/home/zling/y/bcr/ref/assets/artifacts/phase_f_bc/phase_f_bc_only_0312_20260311T200307Z/summary.md)
+
+Key comparisons:
+
+1. from-scratch `mean` vs fixed `robust`
+   - `pbr31_math`: `0.3493 -> 0.6623`
+   - `pbr31_gsm`: `0.7680 -> 0.8935`
+2. historical broken `robust` vs fixed `robust`
+   - `pbr31_math`: `0.3493 -> 0.6623`
+   - `pbr31_gsm`: `0.8289 -> 0.8935`
+3. `BC -> RL`
+   - `pbr31_math`: `bc_only 0.8552`, old broken `0.8415`, fixed `0.8351`
+   - `pbr31_gsm`: `bc_only 0.9045`, old broken `0.9001`, fixed `0.9012`
+
+### Updated Interpretation
+
+1. the old claim "robust RL-from-scratch is basically useless" is false
+2. the corrected claim is:
+   - robust objective meaningfully rescues from-scratch RL-like controller learning
+   - but still does not beat strong heuristic / BC teachers
+3. BC warm start remains the safer Phase F mainline
+4. robust RL should now be treated as a real secondary research branch, not a
+   no-op artifact
+
+### Explicit Next-Step Plans
+
+1. keep heuristic / BC controller as live-trial priority
+2. keep robust RL-like controller as a secondary branch, but compare against BC
+   teachers only after the objective fix
+3. avoid citing pre-fix "robust" artifacts as evidence against robust
+   optimization
+4. prioritize `Phase E` data-geometry redesign and `Phase F` controller-layer
+   integration over immediate LM-level RL
+5. use `docs/phase_abcdef_audit_research_redesign_20260312.md` as the new
+   repo-level design note for this pivot
+
+
+## 0AAAN. A-F Audit Follow-Up: No New Critical Cross-Phase Bug, One Real Overnight Provenance Bug Fixed (2026-03-13)
+
+### Main result
+
+This follow-up audit did **not** uncover a new high-risk bug in the A-F training/eval critical path.
+The only new confirmed risk was at the overnight launcher layer:
+
+a downstream frontier job could start as soon as `final_summary.md` existed,
+even if the upstream run had already finished with `status: failed`.
+
+### Fix
+
+1. added [wait_for_summary_status.py](/home/zling/y/bcr/ref/scripts/wait_for_summary_status.py)
+2. updated [run_phase_e_overnight_frontier_suite.sh](/home/zling/y/bcr/ref/scripts/run_phase_e_overnight_frontier_suite.sh)
+
+New rule:
+
+1. dependent jobs now wait for `- status: ok`
+2. `failed` summaries abort the chain
+3. timeout is explicit
+
+### Validation
+
+1. targeted tests:
+   - `tests/unit/test_wait_for_summary_status.py`
+   - `tests/unit/test_phase_f_trainable_controller.py`
+2. broader smoke regression:
+   - `tests/unit/test_phase_a_prepare_script.py`
+   - `tests/unit/test_phase_b_eval_faithfulness_script.py`
+   - `tests/unit/test_phase_c_eval_pik_script.py`
+   - `tests/unit/test_phase_d_eval_external_pairs_script.py`
+   - `tests/unit/test_phase_e_runtime.py`
+   - `tests/unit/test_phase_f_trainable_controller.py`
+3. all targeted tests passed in this audit round.
+
+### Interpretation
+
+The current repo state is now better described as:
+
+1. main A-F code path: no new critical implementation issue found in this pass
+2. current bottlenecks: research-design and control-policy issues, not obvious code corruption bugs
+3. overnight experimentation: now safer against silent bad chaining
+
+## 0AAAM. Phase F RL-like Controller Learning: BC Warm Start Beats Pure RL (2026-03-12)
+
+### Artifacts
+
+1. [bc_only](/home/zling/y/bcr/ref/assets/artifacts/phase_f_bc/phase_f_bc_only_0312_20260311T200307Z/summary.md)
+2. [bc_then_rl_robust](/home/zling/y/bcr/ref/assets/artifacts/phase_f_bc/phase_f_bc_then_rl_robust_0312_20260311T200451Z/summary.md)
+3. [robust from scratch](/home/zling/y/bcr/ref/assets/artifacts/phase_f_rl_like/phase_f_rl_like_robust_fromscratch_0312_20260311T200645Z/summary.md)
+4. [naive mean debug](/home/zling/y/bcr/ref/assets/artifacts/phase_f_rl_like/debug_phase_f_rl_like_20260311T195946Z/summary.md)
+5. [balanced mean debug](/home/zling/y/bcr/ref/assets/artifacts/phase_f_rl_like/debug_phase_f_rl_like_balanced_20260311T200131Z/summary.md)
+
+### Main findings
+
+This round tested a more direct RL question: if we stop doing pure heuristic rule search
+and actually train a small controller policy, what happens?
+
+Results:
+
+1. from-scratch policy-gradient is fragile
+   - `pbr26_math` naive and class-balanced REINFORCE both collapsed to `balanced_f1 = 0.0000`
+   - `pbr31_math` robust RL from scratch only reached `0.3493`
+2. behavior cloning from a good heuristic teacher is strong immediately
+   - `pbr26_math bc_only = 0.8502`
+   - `pbr31_math bc_only = 0.8552`
+   - `pbr31_gsm bc_only = 0.9045`
+3. adding RL after BC does not currently help
+   - `pbr31_math`: `0.8552 -> 0.8415`
+   - `pbr31_gsm`: `0.9045 -> 0.9001`
+
+### Interpretation
+
+1. the controller policy class is not the bottleneck;
+2. random-start RL optimization is the bottleneck;
+3. current reward shaping is still too collapse-prone;
+4. Phase F should prefer:
+   - heuristic controller, or
+   - BC-warm-start controller,
+   before trying more RL.
+
+### Research consequence
+
+The repo now has a stronger ordering of priorities:
+
+1. heuristic controller live trial
+2. BC-distilled controller live trial
+3. only then reconsider controller-only RL
+
+## 0AAAL. Phase F Robust-Controller + Ensemble Update (2026-03-13)
+
+### Artifacts
+
+1. policy-family sweep
+   - [summary.md](/home/zling/y/bcr/ref/assets/artifacts/phase_f_controller_sweep/phase_f_controller_sweep_0312_main_20260311T181216Z/summary.md)
+2. worst-generator robustness search
+   - [summary.md](/home/zling/y/bcr/ref/assets/artifacts/phase_f_controller_robustness/phase_f_controller_research_0312_generator_robustness_20260311T194732Z/summary.md)
+3. weak-verifier ensemble evaluation
+   - [summary.md](/home/zling/y/bcr/ref/assets/artifacts/phase_f_controller_ensemble/phase_f_controller_research_0312_ensemble_eval_20260311T194735Z/summary.md)
+
+### Main findings
+
+This round sharpens the `Phase F` diagnosis further:
+
+1. the old `ABR-lite` failure was mostly a controller-design failure;
+2. generator-shift still matters, but good robust policies exist;
+3. weak-verifier score ensembling gives another measurable gain;
+4. therefore the next serious milestone is a **live heuristic controller**, not immediate RL.
+
+### Generator-robust best policies
+
+| case_id | family | overall_balanced_f1 | worst_generator | worst_gen_balanced_f1 |
+|---|---|---:|---|---:|
+| `pbr26_math` | `guarded_drop` | `0.8391` | `Qwen2.5-Math-72B-Instruct` | `0.7604` |
+| `pbr26_gsm` | `drop_needs_low` | `0.8769` | `Llama-3.1-70B-Instruct` | `0.7575` |
+| `pbr31_math` | `guarded_drop` | `0.8460` | `Qwen2.5-Math-72B-Instruct` | `0.7744` |
+| `pbr31_gsm` | `delayed_drop` | `0.9027` | `Meta-Llama-3-70B-Instruct` | `0.7668` |
+
+### Best score-level ensemble results
+
+| case_id | ensemble | best_policy_family | balanced_f1 |
+|---|---|---|---:|
+| `pbr26_pbr31_math` | `min` | `threshold_only` | `0.8765` |
+| `pbr26_pbr31_gsm` | `min` | `guarded_drop` | `0.9126` |
+| `pbr19_pbr31_math` | `mean_50` | `guarded_drop` | `0.8774` |
+| `pbr19_pbr31_gsm` | `mean_50` | `threshold_only` | `0.9144` |
+
+### Literature-aligned reading
+
+Recent literature supports this exact ordering of priorities:
+
+1. [VerifyBench](https://arxiv.org/abs/2507.09884): verifier behavior is highly input-structure-sensitive, so domain-specific controller policies are more plausible than one universal rule.
+2. [AbstentionBench](https://arxiv.org/abs/2506.09038): reasoning models are still weak at abstention, so `continue / backtrack / abstain` must be evaluated directly.
+3. [ThinkPRM](https://arxiv.org/abs/2504.16828) and [GenPRM](https://arxiv.org/abs/2504.00891): the frontier is moving toward explicit critics, not trusting a single scalar score unconditionally.
+4. [PURE / Stop Summation](https://arxiv.org/abs/2504.15275): naive PRM-based RL is reward-hack-prone, so a pre-RL conservative controller stage is justified.
+5. [MASH](https://arxiv.org/abs/2510.01152): selective extra compute behaves like abstention, matching the repo's current controller framing.
+
+### Updated Phase F recommendation
+
+1. implement a live heuristic controller first;
+2. prefer:
+   - `Math`: `threshold_only` or robust `guarded_drop`
+   - `GSM`: `delayed_drop / guarded_drop`
+3. test weak-verifier ensemble as a first-class option;
+4. only after live validation should RL move back to the top of the queue.
 
 ## 0AAAK. Phase F Controller Sweep — Old ABR-lite Rule Was The Main Failure (2026-03-13)
 
@@ -239,8 +1693,10 @@ and the same objective: joint+BCE+terminal_bce=0.25.
 | **PBR32** | Math-PRM-7B | r=8 all-28 (2.52M) | PBR12 (5705) | 0.861 | 0.880 | 0.897 | **0.898** | — | ep3 |
 | PBR30 | Math-7B-Instruct | r=8 top-4 | PBR12 (5705) | 0.780 | 0.816 | 0.824 | 0.826 | — | ep3 |
 | LoRA smoke S4 | 7B-Instruct | r=16 all | flb_0311 (7420) | 0.837 | 0.886 | — | — | — | No adapter saved |
-| PBR33 | Math-PRM-7B | r=8 top-4 (360K) | PBR26 (7366) | — | — | — | — | — | Training... |
-| PBR34 | Math-PRM-7B | r=16 top-4 (720K) | PBR26 (7366) | — | — | — | — | — | Pending smoke |
+| PBR33 | Math-PRM-7B | r=8 top-4 (360K) | PBR26 (7366) | 0.844 | 0.861 | 0.870 | 0.870 | **0.871** | ep4 |
+| PBR34 | Math-PRM-7B | r=16 top-4 (720K) | PBR26 (7366) | 0.856 | — | — | — | — | Training (ep1+) |
+| PBR35 | Math-PRM-7B | r=8 all-28 (2.52M) | PBR26 (7366) | 0.847 | — | — | — | — | Training (ep1+) |
+| PBR36 | Math-PRM-7B | r=32 all-28 (10.1M) | PBR26 (7366) | — | — | — | — | — | Training (ep0) |
 
 ### ProcessBench Results — FINAL (as of 2026-03-12 01:35 +0800)
 
@@ -265,10 +1721,20 @@ and the same objective: joint+BCE+terminal_bce=0.25.
    - Math-PRM-7B backbone is required for ProcessBench step-level quality assessment.
 
 4. **Depth vs MATH F1**: More LoRA layers → better MATH F1. Top-4=0.676, All-28=0.689.
-   PBR33/34 (top-4 + larger data) may close this gap via data quality.
+   PBR33 confirmed: top-4 + larger data → MATH F1=0.666, GSM F1=0.797 (best GSM SOTA).
 
-5. **Community gap**: MATH F1=0.689 vs Qwen2.5-Math-PRM-7B full fine-tune ~0.735. Gap=4.6 pts.
-   Remaining lever: PBR33/34 data scale + PBR34 rank=16.
+5. **PBR33 (top-4 r=8 + PBR26 data)**: MATH F1=0.666 (below PBR32), **GSM F1=0.797** (new SOTA).
+   Shows top-4 LoRA + large data is GSM-optimal, not MATH-optimal.
+
+6. **Community gap**: MATH F1=0.689 vs Qwen2.5-Math-PRM-7B full fine-tune ~0.735. Gap=4.6 pts.
+   Remaining levers: PBR35 (all-28+PBR26), PBR36 (r=32), PBR37 (contrastive loss).
+
+7. **RL controller analysis** (offline REINFORCE on PBR32 scored traces, 2026-03-13):
+   - Best result: heuristic tau=0.35 at **val F1=0.848**
+   - Supervised MLP: F1=0.770 (HEURISTIC WINS)
+   - MLP BC warmstart: BC alone achieves 0.818, REINFORCE degrades to 0.750-0.781
+   - GRU reinforce: 0.72-0.75, stuck in local optima
+   - **Conclusion: heuristic threshold at tau=0.35 is optimal offline controller for PBR32 MATH**
 
 ### Eval Artifacts
 

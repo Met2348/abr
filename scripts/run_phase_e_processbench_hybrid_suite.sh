@@ -133,6 +133,22 @@ resolve_group() {
         "e82=${DEFAULT_E82_RUN}::${DEFAULT_E82_GSM_EVAL}::${DEFAULT_E82_MATH_EVAL}"
       )
       ;;
+    PH3_PRM_LOCAL_TA15_MSGRID5_ARCH_SWEEP_SMOKE)
+      GROUP_TITLE="PH3 PRMBench Local + Terminal15 + MS-Grid5 Bridge Sweep"
+      GROUP_INTENTION="Bridge PH1 and PH2: keep the stronger terminal anchor from PH1 while adding a smaller amount of Math-Shepherd grid support than PH2."
+      GROUP_OBSERVE="Test whether a light grid auxiliary can preserve PH2-style GSM gains without giving up the stronger Math terminal and first-edge behavior seen in PH1."
+      GROUP_EXPECT="If PH1 and PH2 are trading off 'terminal coverage' vs 'broader prefix coverage', this bridge group should sit between them or beat both on at least one benchmark slice."
+      GROUP_ARTIFACT_SPECS=(
+        "prm_local=${PRMBENCH_LOCAL_ARTIFACT}:3072:384:1.00"
+        "prm_terminal=${PRMBENCH_TERMINAL_ARTIFACT}:512:64:0.35"
+        "ms_grid=${MS_GRID_ARTIFACT}:384:48:0.10"
+      )
+      GROUP_HEADS=("mlp" "gated_mlp")
+      GROUP_COMPARE_BASELINES=(
+        "e46=${DEFAULT_E46_RUN}::${DEFAULT_E46_GSM_EVAL}::${DEFAULT_E46_MATH_EVAL}"
+        "e82=${DEFAULT_E82_RUN}::${DEFAULT_E82_GSM_EVAL}::${DEFAULT_E82_MATH_EVAL}"
+      )
+      ;;
     *)
       echo "ERROR: Unknown ACTIVE_PHASE_E_PB_HYBRID_GROUP=$ACTIVE_PHASE_E_PB_HYBRID_GROUP" >&2
       exit 1
@@ -142,7 +158,27 @@ resolve_group() {
 
 latest_dir_by_prefix() {
   local prefix="$1"
-  ls -1dt "${prefix}"__* 2>/dev/null | head -n1
+  # English: pair artifacts use "__fingerprint", while run/eval artifacts use
+  # "_timestamp". Use a Python resolver instead of `ls | head` so `pipefail`
+  # cannot convert successful runs into false failures via SIGPIPE.
+  # 中文：pair artifact 用 "__指纹"，run/eval artifact 用 "_时间戳"。
+  # 这里改成 Python 解析，避免 `pipefail` 下 `ls | head` 因 SIGPIPE 把成功产物误判为失败。
+  python - "$prefix" <<'PY'
+from pathlib import Path
+import sys
+
+prefix = Path(sys.argv[1])
+root = prefix.parent
+name = prefix.name
+matches = sorted(
+    set(root.glob(f"{name}__*")) | set(root.glob(f"{name}_*")),
+    key=lambda path: path.stat().st_mtime,
+    reverse=True,
+)
+if not matches:
+    raise SystemExit(f"No artifact dir found for prefix: {prefix}")
+print(matches[0])
+PY
 }
 
 require_path() {
@@ -153,6 +189,32 @@ require_path() {
     exit 1
   fi
 }
+
+resolve_init_head_architecture() {
+  local checkpoint_path="$1"
+  python - "$checkpoint_path" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+ckpt = Path(sys.argv[1])
+run_dir = ckpt.parent
+for file_name in ('summary.json', 'manifest.json'):
+    path = run_dir / file_name
+    if not path.exists():
+        continue
+    data = json.loads(path.read_text(encoding='utf-8'))
+    if 'head_architecture' in data:
+        print(data['head_architecture'])
+        raise SystemExit(0)
+    train_cfg = data.get('train_config')
+    if isinstance(train_cfg, dict) and 'head_architecture' in train_cfg:
+        print(train_cfg['head_architecture'])
+        raise SystemExit(0)
+print('')
+PY
+}
+
 
 prepare_hybrid_artifact() {
   local run_name="$1"
@@ -177,7 +239,13 @@ train_case() {
   local run_name="${RUN_PREFIX}_${case_tag}"
   local init_args=()
   if [[ -n "${INIT_VALUE_HEAD_PATH:-}" && -f "${INIT_VALUE_HEAD_PATH:-}" ]]; then
-    init_args+=(--init-value-head-path "$INIT_VALUE_HEAD_PATH")
+    local init_head_arch
+    init_head_arch="$(resolve_init_head_architecture "$INIT_VALUE_HEAD_PATH")"
+    if [[ -z "$init_head_arch" || "$init_head_arch" == "$head_arch" ]]; then
+      init_args+=(--init-value-head-path "$INIT_VALUE_HEAD_PATH")
+    else
+      log_line "SKIP init checkpoint for ${run_name}: init_head_arch=${init_head_arch} current_head_arch=${head_arch}" | tee -a "$SUITE_LOG_FILE" >&2
+    fi
   fi
   log_line "TRAIN: ${run_name} head=${head_arch}" | tee -a "$SUITE_LOG_FILE" >&2
   CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" "$PYTHON_BIN" -u scripts/phase_e_train_value.py \
@@ -276,15 +344,17 @@ row = {
     "case_tag": case_tag,
     "artifact_dir": str(artifact_dir),
     "value_run_dir": str(value_run_dir),
+    "gsm_eval_dir": str(gsm_eval_dir),
+    "math_eval_dir": str(math_eval_dir),
     "train_summary": {
         "num_train_rows": int(train_summary.get("num_train_rows", 0)),
         "num_validation_rows": int(train_summary.get("num_validation_rows", 0)),
         "source_rows": train_summary.get("source_rows", []),
     },
     "heldout": {
-        "pair_acc": float(value_eval.get("pair_accuracy", 0.0)),
-        "auc": float(value_eval.get("auc", 0.0)),
-        "ranking_score": float(value_eval.get("ranking_score", 0.0)),
+        "pair_acc": float(value_eval.get("eval_pairs", {}).get("pair_accuracy", 0.0)),
+        "auc": float(value_eval.get("eval_pairs", {}).get("auc", 0.0)),
+        "ranking_score": float(value_eval.get("eval_pairs", {}).get("ranking_score", 0.0)),
     },
     "processbench_gsm8k": {
         "pair_acc": float(gsm_metrics.get("pair_accuracy_good_vs_bad", 0.0)),

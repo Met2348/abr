@@ -96,6 +96,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-benchmark-pair-acc", type=float, default=0.50)
     parser.add_argument("--min-benchmark-auc", type=float, default=0.50)
     parser.add_argument(
+        "--checkpoint-missing-policy",
+        choices=["fail", "fallback_final"],
+        default="fail",
+        help=(
+            "How to handle a missing best_value_head.pt when promoting a candidate. "
+            "`fail` is the safe default; `fallback_final` is only for legacy diagnostics."
+        ),
+    )
+    parser.add_argument(
         "--selection-policy",
         choices=["heldout_only", "hybrid"],
         default="heldout_only",
@@ -233,7 +242,7 @@ def _seed_score(
     )
 
 
-def _resolve_seed_checkpoint_path(value_run_dir: Path) -> tuple[str, list[str]]:
+def _resolve_seed_checkpoint_path(value_run_dir: Path, *, missing_policy: str) -> tuple[str, list[str]]:
     """Resolve the checkpoint path a candidate report should publish.
 
     English
@@ -243,10 +252,16 @@ def _resolve_seed_checkpoint_path(value_run_dir: Path) -> tuple[str, list[str]]:
     2. some only retained `final_value_head.pt`,
     3. and some manifests point at absolute paths outside the run directory.
 
+    The critical policy change is that missing `best` no longer silently
+    resolves to `final` unless the caller explicitly requests
+    `fallback_final`.
+
     Candidate reports must therefore resolve the path explicitly instead of
     blindly concatenating `<run_dir>/best_value_head.pt`.
     """
     notes: list[str] = []
+    if missing_policy not in {"fail", "fallback_final"}:
+        raise ValueError(f"Unsupported --checkpoint-missing-policy: {missing_policy!r}")
     manifest_path = value_run_dir / "manifest.json"
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -257,7 +272,7 @@ def _resolve_seed_checkpoint_path(value_run_dir: Path) -> tuple[str, list[str]]:
             if best_path.exists():
                 return str(best_path), notes
         final_path_text = str(output_files.get("final_value_head") or "").strip()
-        if final_path_text:
+        if final_path_text and missing_policy == "fallback_final":
             final_path = Path(final_path_text)
             if final_path.exists():
                 notes.append("best checkpoint missing; resolved best_checkpoint_path to final_value_head")
@@ -266,11 +281,14 @@ def _resolve_seed_checkpoint_path(value_run_dir: Path) -> tuple[str, list[str]]:
     if best_path.exists():
         return str(best_path), notes
     final_path = value_run_dir / "final_value_head.pt"
-    if final_path.exists():
+    if final_path.exists() and missing_policy == "fallback_final":
         notes.append("best checkpoint missing; resolved best_checkpoint_path to final_value_head")
         return str(final_path), notes
-    notes.append("best checkpoint path unresolved")
-    return str(best_path), notes
+    raise FileNotFoundError(
+        "Missing best_value_head.pt for candidate promotion under strict policy: "
+        f"{value_run_dir}. Rerun with --checkpoint-missing-policy fallback_final "
+        "only for legacy diagnostics."
+    )
 
 
 def _build_group_summary(
@@ -414,7 +432,10 @@ def _build_group_summary(
         )
         best_seed_score, best_row = per_seed_scored[0]
         best_seed = int(best_row.seed)
-        best_checkpoint_path, checkpoint_notes = _resolve_seed_checkpoint_path(Path(best_row.value_run_dir))
+        best_checkpoint_path, checkpoint_notes = _resolve_seed_checkpoint_path(
+            Path(best_row.value_run_dir),
+            missing_policy=str(args.checkpoint_missing_policy),
+        )
         notes.extend(f"best_seed={best_seed}: {note}" for note in checkpoint_notes)
 
     return GroupCandidateSummary(

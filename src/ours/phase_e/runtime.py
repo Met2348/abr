@@ -144,14 +144,48 @@ def resolve_tokenizer_load_path(model_path: str, adapter_path: Path | None) -> s
 
 
 def attach_peft_adapter_for_inference(model: Any, adapter_path: Path):
-    """Attach one PEFT adapter to a loaded base model."""
+    """Attach one PEFT adapter to a loaded base model.
+
+    Works for both CausalLM and non-CausalLM models (e.g. Qwen2ForProcessRewardModel).
+    PeftModel.from_pretrained() fails on PRM models when task_type=CAUSAL_LM is saved
+    in the adapter config because it tries to wrap the model as PeftModelForCausalLM,
+    which requires prepare_inputs_for_generation.  This function avoids that by using
+    get_peft_model() + manual weight loading instead.
+    """
+    import dataclasses
+    import json
+
     if not adapter_path.exists():
         raise FileNotFoundError(f"Adapter path not found: {adapter_path}")
     try:
-        from peft import PeftModel  # type: ignore
+        from peft import LoraConfig, get_peft_model  # type: ignore
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError("Failed to import `peft` while attaching adapter") from exc
-    return PeftModel.from_pretrained(model, str(adapter_path))
+
+    config_path = adapter_path / "adapter_config.json"
+    config_dict = json.loads(config_path.read_text())
+    # Strip task_type so get_peft_model does not create a task-specific wrapper
+    # (PeftModelForCausalLM) that requires methods absent on PRM models.
+    config_dict.pop("task_type", None)
+    valid_fields = {f.name for f in dataclasses.fields(LoraConfig)}
+    lora_config = LoraConfig(**{k: v for k, v in config_dict.items() if k in valid_fields})
+    model = get_peft_model(model, lora_config)
+
+    # Load saved weights
+    import torch
+
+    sf_path = adapter_path / "adapter_model.safetensors"
+    bin_path = adapter_path / "adapter_model.bin"
+    if sf_path.exists():
+        from safetensors.torch import load_file  # type: ignore
+
+        weights = load_file(str(sf_path))
+    elif bin_path.exists():
+        weights = torch.load(str(bin_path), map_location="cpu", weights_only=True)
+    else:
+        raise FileNotFoundError(f"No adapter weights found in {adapter_path}")
+    model.load_state_dict(weights, strict=False)
+    return model
 
 
 def apply_lora_to_backbone(
@@ -241,7 +275,7 @@ def apply_lora_to_backbone(
         layers_to_transform = list(range(start, int(num_layers)))
 
     lora_config = LoraConfig(
-        task_type=TaskType.CAUSAL_LM,
+        task_type=None,  # None avoids PeftModelForCausalLM wrapper on PRM backbones
         r=int(lora_rank),
         lora_alpha=float(lora_alpha),
         target_modules=resolved_target_modules,

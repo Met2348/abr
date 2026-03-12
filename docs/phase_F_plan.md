@@ -6,6 +6,119 @@ Date baseline: 2026-03-10.
 
 ---
 
+## 2026-03-13 Night Session: PRM32 GRPO Feasibility + RL Controller + Phase E LoRA Expansion
+
+### PRM32 GRPO Feasibility Assessment: STRONG PASS
+
+Ran `scripts/phase_f_grpo_lite.py` feasibility check using PBR32 (LoRA r=8 all-28 layers) scored
+traces on full ProcessBench MATH (1000 examples) and GSM8K (400 examples).
+
+**Score separation analysis:**
+
+| Domain | Sep (bad_mean-good_mean) | AUC (late step) | good_steps | bad_steps | correct_steps |
+|--------|--------------------------|-----------------|------------|-----------|---------------|
+| MATH | **0.404** | **0.976** | 0.700 | 0.359 | 0.764 |
+| GSM8K | **0.467** | **0.982** | 0.739 | 0.340 | 0.807 |
+
+- `separation` = mean(good_prefix) - mean(bad_prefix): measures how well PRM distinguishes
+  correct from incorrect steps *within erroneous traces*
+- `AUC (late step)` = step-level AUC at last available step ≥ 8: near-perfect discrimination
+- Both metrics confirm PBR32 has sufficient signal quality for use as GRPO process reward
+
+**Verdict: PASS**. PBR32 is suitable as the process reward signal for GRPO-lite RL training.
+
+### GRPO-lite Outcome-Only Baseline: Running
+
+`scripts/phase_f_grpo_lite.py` with `lambda-process=0.0` (outcome-only) running on GPU3 (PID 3773602).
+This is the baseline: GRPO without PRM process reward.
+- Policy: Qwen2.5-Math-7B-Instruct
+- 500 train problems, 200 eval problems (GSM8K subset)
+- k=4 samples per problem, 1 epoch, lr=1e-6
+
+**PEFT compatibility issue**: `lambda-process=0.3` variant failed (bcr env peft 0.11 doesn't support
+`alora_invocation_tokens` keyword in saved LoRA config). The outcome-only variant works as it
+doesn't load the adapter. Fix for process-reward GRPO: use base env (python3.12) peft version.
+
+### RL Controller Final Results (offline REINFORCE on PBR32 scored traces)
+
+| Method | Test F1 | Notes |
+|--------|---------|-------|
+| **Heuristic tau=0.35** | **0.822** | WINNER — simple threshold |
+| MLP BC-warmstart REINFORCE | 0.779 | BC alone: 0.818, REINFORCE hurts |
+| GRU REINFORCE | 0.777 | Slow convergence, local optima |
+| Supervised MLP | 0.770 | Worst trained approach |
+
+**Conclusion**: For offline error-detection, heuristic threshold is optimal. RL fine-tuning consistently
+hurts BC-initialized policies. This is consistent with the earlier controller sweep (2026-03-13 morning).
+Recommended Phase F live controller: `threshold_only tau=0.35-0.42`.
+
+### Phase E LoRA Expansion: Active Experiments
+
+| Exp | Config | Status | Epoch 0 pair_acc |
+|-----|--------|--------|-----------------|
+| PBR34 | r=16 top-4 + PBR26 | ✅ DONE | MATH F1=0.657, GSM F1=0.766 — WORSE than r=8! |
+| PBR35 | r=8 all-28 + PBR26 | ✅ DONE | MATH F1=0.657, GSM F1=0.768 — same as frozen PBR26 GSM! |
+| PBR36 | r=32 all-28 + PBR26 | 🔄 epoch 2/5 | Expected F1 ≤ 0.657 |
+| PBR37 | r=8 all-28 + contrastive 0.2 + PBR26 | 🔄 epoch 1/5 | Contrastive loss hypothesis still live |
+
+**CRITICAL FINDING (2026-03-13 06:00)**: LoRA DOES NOT break frozen backbone ceiling.
+- All tested LoRA variants score MATH F1 0.657-0.666 vs frozen PBR26 = 0.686
+- Pattern: LoRA → higher pair_acc on training eval, lower acc_erroneous on ProcessBench
+- Interpretation: LoRA overfits to training pair distribution, hurts generalization
+- Conclusion: pair_acc/AUC on training eval is NOT a reliable predictor of ProcessBench F1
+
+**LoRA vs Frozen summary:**
+| Config | MATH F1 | GSM F1 |
+|--------|---------|--------|
+| Frozen PBR26 | **0.686** | 0.768 |
+| Frozen PBR19 | 0.683 | **0.778** |
+| PBR33 LoRA r=8 top-4 | 0.666 | **0.797** |
+| PBR34 LoRA r=16 top-4 | 0.657 | 0.766 |
+| PBR35 LoRA r=8 all-28 | 0.657 | 0.768 |
+
+**Revised strategy**: Stop LoRA architecture experiments (except PBR37 contrastive which tests a new
+hypothesis). The bottleneck is TRAINING DATA QUALITY, not model architecture. Next steps:
+1. Consensus filtering (MC + LLM judge agreement) to improve training data quality
+2. VAPO-style value initialization from MC rates
+3. EDU-PRM entropy step boundaries for more precise step definitions
+
+**Phase F update**: GPU3 watcher upgraded to v4 (using PBR26 frozen, best model) for:
+- BoN eval v4: PBR26 frozen as reranker
+- GRPO+PRM v4 (Clip+Delta): PBR26 frozen as process reward
+
+Auto-evals running/queued for PBR36/37.
+
+---
+
+## 2026-03-13 Overnight Launcher Audit Update: Depend-On-Success, Not Depend-On-File-Exists
+
+We audited the new overnight frontier launcher and found one real implementation risk:
+
+1. the queued `terminal ratio sweep` originally waited only for
+   `final_summary.md` to appear;
+2. this is unsafe because `final_summary.md` is written for both `status: ok`
+   and `status: failed` paths;
+3. so a downstream repair sweep could silently launch after an upstream failure.
+
+This is now fixed.
+
+Code changes:
+
+1. added [wait_for_summary_status.py](/home/zling/y/bcr/ref/scripts/wait_for_summary_status.py)
+2. updated [run_phase_e_overnight_frontier_suite.sh](/home/zling/y/bcr/ref/scripts/run_phase_e_overnight_frontier_suite.sh)
+
+New behavior:
+
+1. chained jobs wait for `- status: ok` in the upstream `final_summary.md`
+2. `failed` summaries stop the chain early
+3. timeouts are explicit instead of silently hanging forever
+
+Why this matters:
+
+1. this is not a model-quality issue;
+2. it is an experiment-provenance issue;
+3. if left unfixed, it can generate invalid follow-up runs that look legitimate the next morning.
+
 ## 2026-03-12 Audit Correction: F1 Is Supported, F2 Is Not Yet Supported
 
 After re-checking the raw artifacts, the current Phase F state is:
@@ -81,6 +194,96 @@ Corrected conclusion:
 So the next step is **heuristic controller redesign / live validation**, not immediate RL.
 
 ---
+
+## 2026-03-13 RL-like Controller Learning Update: Warm Start Beats Pure RL
+
+We ran a new set of offline RL-like controller experiments on top of existing
+`ProcessBench` scored traces. These experiments are still small-controller
+experiments, not LM-level RL.
+
+### Terminology
+
+1. `REINFORCE`
+   - the classic policy-gradient algorithm;
+   - sample actions from the current policy, then push up actions from trajectories with higher return.
+2. `Behavior Cloning (BC)`
+   - supervised imitation learning from a stronger heuristic teacher;
+   - here the teacher is one of the controller families already validated offline.
+3. `Warm start`
+   - initialize the trainable policy from `BC`, then optionally fine-tune with RL.
+4. `Robust objective`
+   - optimize not only average return but also the worst-generator slice.
+
+### New artifacts
+
+1. from-scratch RL-like policies:
+   - [naive mean debug](/home/zling/y/bcr/ref/assets/artifacts/phase_f_rl_like/debug_phase_f_rl_like_20260311T195946Z/summary.md)
+   - [balanced mean debug](/home/zling/y/bcr/ref/assets/artifacts/phase_f_rl_like/debug_phase_f_rl_like_balanced_20260311T200131Z/summary.md)
+   - [robust from scratch](/home/zling/y/bcr/ref/assets/artifacts/phase_f_rl_like/phase_f_rl_like_robust_fromscratch_0312_20260311T200645Z/summary.md)
+2. behavior cloning and BC->RL:
+   - [bc_only](/home/zling/y/bcr/ref/assets/artifacts/phase_f_bc/phase_f_bc_only_0312_20260311T200307Z/summary.md)
+   - [bc_then_rl_robust](/home/zling/y/bcr/ref/assets/artifacts/phase_f_bc/phase_f_bc_then_rl_robust_0312_20260311T200451Z/summary.md)
+
+### Main results
+
+#### A. Pure RL from scratch is currently unreliable
+
+1. `pbr26_math`, `reinforce_mean`
+   - `eval balanced_f1 = 0.0000`
+   - policy collapsed to `all-stop`
+2. `pbr26_math`, `reinforce_mean_balanced`
+   - `eval balanced_f1 = 0.0000`
+   - class-balanced reward alone did not fix collapse
+3. `pbr31_math`, `reinforce_robust_balanced`
+   - `eval balanced_f1 = 0.3493`
+   - `worst_generator balanced_f1 = 0.1404`
+4. `pbr31_gsm`, `reinforce_robust_balanced`
+   - `eval balanced_f1 = 0.8289`
+   - better than Math, but still worse than strong heuristic / BC baselines
+
+#### B. Behavior cloning is strong immediately
+
+1. `pbr26_math`, `bc_only`
+   - `eval balanced_f1 = 0.8502`
+2. `pbr31_math`, `bc_only`
+   - `eval balanced_f1 = 0.8552`
+3. `pbr31_gsm`, `bc_only`
+   - `eval balanced_f1 = 0.9045`
+
+These numbers are already in the same regime as the best heuristic sweeps.
+This means the controller class itself is expressive enough; the main difficulty
+is optimization from random initialization.
+
+#### C. BC -> RL fine-tune does not currently help
+
+1. `pbr31_math`
+   - `bc_only = 0.8552`
+   - `bc_then_rl_robust = 0.8415`
+2. `pbr31_gsm`
+   - `bc_only = 0.9045`
+   - `bc_then_rl_robust = 0.9001`
+
+So the current RL-like fine-tuning stage slightly degrades the good BC policy.
+
+### Updated interpretation
+
+1. a trainable controller is feasible;
+2. but pure RL-from-scratch is currently too unstable;
+3. BC warm start is the strongest result in this round;
+4. robust RL fine-tuning does not yet beat BC-only;
+5. therefore the next live Phase F experiment should be:
+   - heuristic or BC-warm-start controller,
+   - not RL-first controller training.
+
+### Practical recommendation
+
+1. if we want a live controller next, use:
+   - heuristic controller, or
+   - BC-distilled controller from the best heuristic family
+2. only revisit controller RL after:
+   - better reward shaping,
+   - stronger anti-collapse regularization,
+   - or action constraints tied to safe teacher traces.
 
 ## 2026-03-12 State Update: Phase E Status, F0 Candidate Selection, and F1 Preflight Results
 
@@ -253,83 +456,124 @@ upgrade path from the minimal Gymnasium+TorchRL stack.
 **Recommendation**: Start with Gymnasium+TorchRL for controller RL (F-safe-3). If F5/F6 requires
 LM-level updates, migrate to TRL GRPO/RLHF stack at that point.
 
-### F2 ABR-Lite Controller Offline Simulation Results (2026-03-12)
+### F2 ABR-Lite Simulation, Controller Research, and RL Readiness (Corrected 2026-03-13)
 
-Implemented `scripts/phase_f_abr_lite_simulation.py` and ran on PBR19 MATH ProcessBench scores.
-Output: `assets/artifacts/phase_f_simulation/pbr19_math_abr_lite_0312/`
+The original `baseline_immediate` simulation should now be treated only as a negative control.
+Its corrected raw artifact is:
 
-**Key distinction — two F1 metrics**:
-1. **Official ProcessBench F1** (exact step localization): requires predicting the EXACT first-error step.
-   PBR19 = 0.676 at optimal τ=0.40. This is the community-comparable number.
-2. **Binary detection F1** (controller task): does the controller correctly say "error exists / doesn't"?
-   PBR19 = 0.863 at optimal τ=0.35. This is the metric for F2 controller pass/fail.
+- [summary.json](/home/zling/y/bcr/ref/assets/artifacts/phase_f_simulation/pbr19_math_abr_lite_0312/summary.json)
 
-**Binary detection results at tau=0.35** (optimal for controller use):
-- Acc_erroneous: 0.837 (83.7% of erroneous solutions correctly flagged for backtrack)
-- Acc_correct: 0.892 (89.2% of all-correct solutions NOT flagged — no unnecessary backtrack)
-- Binary F1: 0.863
+Corrected negative-control numbers:
 
-**Compute efficiency at tau=0.35**:
-- Fraction of examples triggering early stop: ~54%
-- Mean steps processed / total steps: ~71% (29% compute savings on average)
+- `balanced_f1 = 0.3388`
+- `positive_f1 = 0.7806`
+- `acc_erroneous = 0.9882`
+- `acc_correct = 0.2044`
+- `mean_step_fraction = 0.3524`
 
-**Fixed-schedule comparison** (required baseline per Section 15 Risk 3):
+Interpretation:
 
-| Schedule | Binary F1 | Step fraction |
-|----------|-----------|---------------|
-| stop@1 (always-stop) | 0.00 | 0.37 |
-| stop@3 | 0.21 | 0.70 |
-| stop@5 | 0.53 | 0.87 |
-| stop@6 | 0.54 | 0.92 |
-| **ABR-lite (tau=0.35)** | **0.863** | **0.71** |
+1. the old controller massively over-stops;
+2. it catches almost every erroneous trace;
+3. but it also rejects too many all-correct traces;
+4. therefore the old `ABR-lite` rule is not promotion-ready.
 
-ABR-lite delivers **+32% F1 improvement** over the best fixed schedule (0.863 vs 0.545) at the SAME
-compute budget (both use ~70% of steps).
+We then ran a broader controller research suite:
 
-**F2 Verdict: STRONG PASS**
-The frozen PBR19 head provides substantial binary detection guidance. A value-guided controller
-at tau=0.35 significantly outperforms fixed schedules and all baselines on the binary detection task.
+1. policy-family sweep:
+   - [summary.md](/home/zling/y/bcr/ref/assets/artifacts/phase_f_controller_sweep/phase_f_controller_sweep_0312_main_20260311T181216Z/summary.md)
+2. worst-generator robustness search:
+   - [summary.md](/home/zling/y/bcr/ref/assets/artifacts/phase_f_controller_robustness/phase_f_controller_research_0312_generator_robustness_20260311T194732Z/summary.md)
+3. weak-verifier ensemble evaluation:
+   - [summary.md](/home/zling/y/bcr/ref/assets/artifacts/phase_f_controller_ensemble/phase_f_controller_research_0312_ensemble_eval_20260311T194735Z/summary.md)
 
-**Phase F RL permission gate** (F2→F4): **GRANTED**
-Evidence: offline F1=0.863 (binary), reward-hacking probe = PASS, threshold stable at τ=0.35
+#### Best redesigned offline controllers
 
-**F2 scope for live experiments**:
-MATH problems, frozen PBR19, threshold τ=0.35, maximum 3 backtracks per problem.
+| case | old baseline | redesigned winner | balanced_f1 |
+|---|---:|---|---:|
+| `pbr19_math` | `0.5537` | `threshold_only tau=0.38` | `0.8674` |
+| `pbr21_math` | `0.5588` | `threshold_only tau=0.35` | `0.8641` |
+| `pbr26_math` | `0.5752` | `threshold_only tau=0.38` | `0.8639` |
+| `pbr19_gsm` | `0.6713` | `delayed_drop` | `0.9052` |
+| `pbr21_gsm` | `0.6405` | `guarded_drop` | `0.9028` |
+| `pbr26_gsm` | `0.6509` | `delayed_drop` | `0.9053` |
 
-**Next: F3 Router Warm Start + F4 Router-Only RL Smoke**:
-- Scripts to implement: `src/ours/phase_f/heuristic_controller.py`, `scripts/phase_f_run_abr_lite.py`
-- Status: Offline simulation complete. Live controller requires LM generation infrastructure.
-- Blocked by: LM generation harness (need to call Qwen2.5-Math-7B/PRM-7B for step generation)
+Shared-policy validation shows this is not just per-slice tuning:
 
-### Overall Phase F Feasibility Verdict (2026-03-12)
+1. `threshold_only tau=0.42`
+   - mean `balanced_f1 = 0.8552`
+2. `delayed_drop tau=0.42 delta=0.25 min_step=4`
+   - mean `balanced_f1 = 0.8501`
+
+#### Generator-robust policies
+
+Worst-generator selection gives slightly more conservative but more deployable rules:
+
+| case | best robust family | overall_balanced_f1 | worst_generator | worst_gen_balanced_f1 |
+|---|---|---:|---|---:|
+| `pbr26_math` | `guarded_drop` | `0.8391` | `Qwen2.5-Math-72B-Instruct` | `0.7604` |
+| `pbr26_gsm` | `drop_needs_low` | `0.8769` | `Llama-3.1-70B-Instruct` | `0.7575` |
+| `pbr31_math` | `guarded_drop` | `0.8460` | `Qwen2.5-Math-72B-Instruct` | `0.7744` |
+| `pbr31_gsm` | `delayed_drop` | `0.9027` | `Meta-Llama-3-70B-Instruct` | `0.7668` |
+
+#### Weak-verifier ensemble signal
+
+Score-level ensembles improve controller quality further:
+
+| case | best ensemble | best policy | balanced_f1 |
+|---|---|---|---:|
+| `pbr26_pbr31_math` | `min` | `threshold_only` | `0.8765` |
+| `pbr26_pbr31_gsm` | `min` | `guarded_drop` | `0.9126` |
+| `pbr19_pbr31_math` | `mean_50` | `guarded_drop` | `0.8774` |
+| `pbr19_pbr31_gsm` | `mean_50` | `threshold_only` | `0.9144` |
+
+#### Literature-aligned interpretation
+
+Recent verifier and RL-for-verifier work reinforces the current repo direction:
+
+1. [VerifyBench](https://arxiv.org/abs/2507.09884)
+   - verifiers are highly sensitive to input structure and cross-domain shift;
+   - this supports domain-specific controller policies instead of one monolithic rule.
+2. [AbstentionBench](https://arxiv.org/abs/2506.09038)
+   - reasoning models still struggle with abstention;
+   - this supports treating `backtrack / abstain / continue` as a first-class design target, not a side effect.
+3. [ThinkPRM](https://arxiv.org/abs/2504.16828) and [GenPRM](https://arxiv.org/abs/2504.00891)
+   - stronger verifier paradigms increasingly look like explicit critics, not scalar-only heads;
+   - this supports using the current scalar head as a bounded heuristic controller signal rather than a final RL reward oracle.
+4. [PURE / Stop Summation](https://arxiv.org/abs/2504.15275)
+   - PRM-based RL reward hacking is very real under naive credit assignment;
+   - this supports a conservative pre-RL stage with heuristic controller validation first.
+5. [MASH / pay-per-search abstention](https://arxiv.org/abs/2510.01152)
+   - selective help-seeking behaves like abstention;
+   - this supports controller policies that spend extra compute only when score geometry justifies it.
+
+#### Corrected Phase F verdict
 
 | Gate | Status | Evidence |
 |------|--------|---------|
-| Phase E trust gate (F-start) | **PASS** | PBR19/PBR26 MATH F1=0.683/0.686, pair_acc=0.853-0.866 |
-| F0 artifact freeze | **DONE** | PBR19 primary; PBR26 secondary candidate for ensemble |
-| F1 threshold stability | **PASS** | near_best_width=0.18 on MATH, deployment threshold τ≈0.35-0.40 |
-| F1 reward hacking probe | **PASS (MATH)** | No high-risk cases on MATH; medium on GSM8K only |
-| F2 ABR-lite simulation | **STRONG PASS** | Binary detection F1=0.863, +32% vs best fixed schedule |
-| F2→F4 RL permission gate | **PASS** | F2 offline simulation demonstrates useful signal |
-| Community gap | **5 F1 points behind** | Qwen2.5-Math-PRM-7B full model ~73.5 F1 |
+| Phase E trust gate (F-start) | **PASS** | PBR19/PBR26/PBR31 are real strong verifier candidates |
+| F0 artifact freeze | **DONE** | multiple candidates available; ensemble is now realistic |
+| F1 threshold stability | **PASS with caution** | stable on average, but generator-specific worst-case remains material |
+| F1 reward hacking probe | **PARTIAL PASS** | MATH is workable; GSM still needs protection |
+| F2 old ABR-lite rule | **FAIL** | negative control only |
+| F2 redesigned heuristic controller | **PASS offline** | `balanced_f1` reaches `~0.86-0.91` |
+| F2 robust controller gate | **PROMISING, NOT LIVE-VALIDATED** | worst-generator and ensemble results are positive |
+| F3/F4 RL permission gate | **NOT YET GRANTED** | live generation validation is still missing |
 
-**Overall Conclusion**: Phase F FEASIBLE to begin on MATH domain with PBR19/PBR26.
-- Signal is real: binary detection F1=0.863 vs fixed schedule 0.545
-- Threshold is stable: near_best_width=0.18, τ=0.35 is robust
-- Hacking resistance: no high-risk attacks on MATH
-- Two candidate heads available for reward ensemble (Risk 1 mitigation)
-- LoRA experiment (GPU 2) and continued Phase E experiments may improve F1 further
+**Correct overall conclusion**:
 
-**Remaining blockers for live F3/F4 RL**:
-1. LM generation harness (need to call backbone for step generation)
-2. Live controller implementation (`heuristic_controller.py`)
-3. Problem dataset with known correct answers for terminal reward
-4. Offline simulation passed; live experiment needed before F4 RL permission
+1. the verifier is now in the strong-candidate zone for controller use;
+2. the old controller design was the main failure source;
+3. the next step is a live heuristic controller, not immediate RL;
+4. RL should only be reconsidered after live controller behavior, threshold stability, and reward-hacking surfaces are re-checked under actual generation.
 
 **Immediate next actions**:
-1. Wait for LoRA smoke results (GPU 2, rank=16, all-layers) — may yield better Phase F candidate
-2. Implement live ABR-lite controller + F3 router warm start infrastructure
-3. Once LoRA results available, re-run F0/F1/F2 with LoRA-improved candidate if score improves
+
+1. implement live heuristic controller with:
+   - `Math`: `threshold_only`
+   - `GSM`: `delayed_drop` or `guarded_drop`
+2. add an optional weak-verifier ensemble mode (`min` or `mean_50`) for safe deployment trials;
+3. only after live validation, decide whether a small controller-only RL stage is worth running.
 
 ---
 
