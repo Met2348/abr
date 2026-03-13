@@ -7,15 +7,19 @@
 # 2. select the lowest-margin slice,
 # 3. run pairwise + swap-debias judge only on that slice,
 # 4. merge judge-kept rows back with untouched pairs,
-# 5. retrain one selected-relabel value head and compare against the baseline.
+# 5. retrain one selected-relabel value head,
+# 6. run same-family + ProcessBench eval so the repair is judged on benchmark-facing behavior,
+# 7. compare against the current balanced baseline rather than the older overfit line.
 #
 # 中文
 # ----
-# 1. 先用当前最强的 PRMBench same-source 模型给全量训练 pair 打分，
+# 1. 先用当前更平衡的 PRMBench same-source 基线给全量训练 pair 打分，
 # 2. 选出最低 margin 的困难子集，
 # 3. 只对这部分跑 pairwise + swap-debias judge，
 # 4. 再把 judge 保留的样本并回未触碰训练集，
-# 5. 训练一个 selected-relabel 版本并和 baseline 对照。
+# 5. 训练一个 selected-relabel 版本，
+# 6. 追加 same-family 与 ProcessBench 评测，避免只看同分布 held-out，
+# 7. 默认和 `E46` 平衡基线比，而不是沿用旧的 `E78` 过拟合基线。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,29 +28,36 @@ cd "$REPO_ROOT"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
 RUN_PREFIX="${RUN_PREFIX:-phase_e_prmbench_selected_relabel_$(date +%m%d_%H%M)}"
-PAIR_ARTIFACT_DIR="${PAIR_ARTIFACT_DIR:-assets/artifacts/phase_e_pairs/phase_e_prmbench_acc95_push_0310_2359_e78_prmbench_acc95_joint_overfit_seed42_e78_prmbench_acc95_joint_overfit_seed42_sharedsplit_s42_pairs__ee938d92db9f}"
-BASELINE_VALUE_RUN_DIR="${BASELINE_VALUE_RUN_DIR:-assets/artifacts/phase_e_runs/phase_e_prmbench_acc95_push_0310_2359_e78_prmbench_acc95_joint_overfit_seed42_e78_prmbench_acc95_joint_overfit_seed42_s42_value_20260310T153050Z}"
+PAIR_ARTIFACT_DIR="${PAIR_ARTIFACT_DIR:-assets/artifacts/phase_e_pairs/phase_e_prmbench_acc90_full_0310_1914_e46_prmbench_acc90_mlp_joint_seed3_e46_prmbench_acc90_mlp_joint_seed3_sharedsplit_s42_pairs__8886075f9c6e}"
+BASELINE_VALUE_RUN_DIR="${BASELINE_VALUE_RUN_DIR:-assets/artifacts/phase_e_runs/phase_e_prmbench_acc90_full_0310_1914_e46_prmbench_acc90_mlp_joint_seed3_e46_prmbench_acc90_mlp_joint_seed3_s43_value_20260310T113737Z}"
+BASELINE_SAMEFAMILY_DIR="${BASELINE_SAMEFAMILY_DIR:-assets/artifacts/phase_e_samefamily_eval/phase_e_rltops_0311_1124_prm_e46_samefamily_20260311T032656Z}"
+BASELINE_GSM_EVAL_DIR="${BASELINE_GSM_EVAL_DIR:-assets/artifacts/phase_e_eval/phase_e_rltops_0311_1124_prm_e46_processbench_gsm8k_20260311T032704Z}"
+BASELINE_MATH_EVAL_DIR="${BASELINE_MATH_EVAL_DIR:-assets/artifacts/phase_e_eval/phase_e_rltops_0311_1124_prm_e46_processbench_math_20260311T032713Z}"
 JUDGE_MODEL_PATH="${JUDGE_MODEL_PATH:-assets/models/Qwen2.5-Math-7B-Instruct}"
 SELECTION_SIZE="${SELECTION_SIZE:-64}"
 JUDGE_BATCH_SIZE="${JUDGE_BATCH_SIZE:-4}"
 JUDGE_MAX_INPUT_LENGTH="${JUDGE_MAX_INPUT_LENGTH:-2048}"
 JUDGE_MAX_NEW_TOKENS="${JUDGE_MAX_NEW_TOKENS:-96}"
 MIN_FILTER_CONFIDENCE="${MIN_FILTER_CONFIDENCE:-0.60}"
-SLICE_GPU="${SLICE_GPU:-0}"
+SLICE_GPU="${SLICE_GPU:-1}"
 JUDGE_GPU="${JUDGE_GPU:-1}"
-TRAIN_GPU="${TRAIN_GPU:-0}"
+TRAIN_GPU="${TRAIN_GPU:-1}"
 RECIPE_RISK_POLICY="${RECIPE_RISK_POLICY:-error}"
 MODEL_PATH="${MODEL_PATH:-assets/models/Qwen2.5-7B-Instruct}"
 SLICE_BATCH_SIZE="${SLICE_BATCH_SIZE:-128}"
 SLICE_MAX_LENGTH="${SLICE_MAX_LENGTH:-1024}"
 SLICE_MAX_GPU_MEMORY_GIB="${SLICE_MAX_GPU_MEMORY_GIB:-45}"
 TRAIN_EPOCHS="${TRAIN_EPOCHS:-14}"
-TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-128}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-96}"
 TRAIN_EVAL_BATCH_SIZE="${TRAIN_EVAL_BATCH_SIZE:-128}"
 TRAIN_MAX_LENGTH="${TRAIN_MAX_LENGTH:-1024}"
 TRAIN_MAX_GPU_MEMORY_GIB="${TRAIN_MAX_GPU_MEMORY_GIB:-45}"
 TRAIN_MAX_CPU_MEMORY_GIB="${TRAIN_MAX_CPU_MEMORY_GIB:-96}"
 TRAIN_FEATURE_CACHE_MODE="${TRAIN_FEATURE_CACHE_MODE:-read_write}"
+TRAIN_OBJECTIVE_MODE="${TRAIN_OBJECTIVE_MODE:-joint}"
+TRAIN_RANKING_TARGET_SPACE="${TRAIN_RANKING_TARGET_SPACE:-score}"
+BENCH_EVAL_BATCH_SIZE="${BENCH_EVAL_BATCH_SIZE:-128}"
+BENCH_MAX_SAMPLES="${BENCH_MAX_SAMPLES:-256}"
 
 LOG_DIR="assets/artifacts/phase_e_logs/${RUN_PREFIX}"
 LOG_FILE="${LOG_DIR}/suite.log"
@@ -64,7 +75,7 @@ latest_timestamped_dir() {
 from pathlib import Path
 import sys
 prefix = Path(sys.argv[1])
-matches = sorted(prefix.parent.glob(prefix.name + '__*'))
+matches = sorted(set(prefix.parent.glob(prefix.name + '__*')) | set(prefix.parent.glob(prefix.name + '_*')))
 if not matches:
     raise SystemExit(f'No artifact dir found for prefix: {prefix}')
 print(matches[-1])
@@ -83,6 +94,9 @@ require_path() {
 require_path "$PAIR_ARTIFACT_DIR/train_pairs.jsonl" "PRMBench train pairs"
 require_path "$PAIR_ARTIFACT_DIR/validation_pairs.jsonl" "PRMBench validation pairs"
 require_path "$BASELINE_VALUE_RUN_DIR/manifest.json" "baseline value run"
+require_path "$BASELINE_SAMEFAMILY_DIR/metrics.json" "baseline samefamily eval"
+require_path "$BASELINE_GSM_EVAL_DIR/summary.json" "baseline ProcessBench GSM eval"
+require_path "$BASELINE_MATH_EVAL_DIR/summary.json" "baseline ProcessBench Math eval"
 require_path "$JUDGE_MODEL_PATH" "judge model"
 
 SLICE_RUN_NAME="${RUN_PREFIX}_slice"
@@ -143,7 +157,7 @@ CUDA_VISIBLE_DEVICES="$TRAIN_GPU" "$PYTHON_BIN" -u scripts/phase_e_train_value.p
   --model-path "$MODEL_PATH" \
   --run-name "$TRAIN_RUN_NAME" \
   --output-root assets/artifacts/phase_e_runs \
-  --objective-mode joint \
+  --objective-mode "$TRAIN_OBJECTIVE_MODE" \
   --learning-rate 3e-5 \
   --num-train-epochs "$TRAIN_EPOCHS" \
   --per-device-train-batch-size "$TRAIN_BATCH_SIZE" \
@@ -152,7 +166,7 @@ CUDA_VISIBLE_DEVICES="$TRAIN_GPU" "$PYTHON_BIN" -u scripts/phase_e_train_value.p
   --lambda-ranking 1.0 \
   --lambda-bce 1.0 \
   --ranking-margin 0.02 \
-  --ranking-target-space logit \
+  --ranking-target-space "$TRAIN_RANKING_TARGET_SPACE" \
   --pair-weight-mode none \
   --source-balance none \
   --permutation-mode stable_hash \
@@ -175,29 +189,124 @@ print(matches[-1])
 PY
 )"
 
-"$PYTHON_BIN" - "$BASELINE_VALUE_RUN_DIR" "$SELECTED_VALUE_DIR" "$SLICE_DIR" "$JUDGE_DIR" "$MERGED_DIR" "$SUMMARY_FILE" <<'PY'
+SELECTED_SAMEFAMILY_RUN_NAME="${RUN_PREFIX}_samefamily"
+log "Run same-family trust eval on selected-relabel checkpoint"
+CUDA_VISIBLE_DEVICES="$TRAIN_GPU" "$PYTHON_BIN" -u scripts/phase_e_eval_samefamily_trust.py \
+  --value-run-dir "$SELECTED_VALUE_DIR" \
+  --eval-pairs-jsonl "$MERGED_DIR/validation_pairs.jsonl" \
+  --run-name "$SELECTED_SAMEFAMILY_RUN_NAME" \
+  --output-root assets/artifacts/phase_e_samefamily_eval \
+  --checkpoint-name best \
+  --batch-size "$BENCH_EVAL_BATCH_SIZE" \
+  --max-length "$TRAIN_MAX_LENGTH" \
+  --feature-cache-root assets/artifacts/phase_e_feature_cache \
+  --feature-cache-mode read_write \
+  --feature-cache-lock-timeout-sec 600 \
+  --edge-weight-mode confidence \
+  --require-cuda | tee -a "$LOG_FILE"
+SELECTED_SAMEFAMILY_DIR="$(python - <<PY
+from pathlib import Path
+matches = sorted(Path('assets/artifacts/phase_e_samefamily_eval').glob('${SELECTED_SAMEFAMILY_RUN_NAME}_*'))
+print(matches[-1])
+PY
+)"
+
+for benchmark_id in gsm8k math; do
+  eval_run_name="${RUN_PREFIX}_processbench_${benchmark_id}"
+  log "Run ProcessBench ${benchmark_id} eval on selected-relabel checkpoint"
+  CUDA_VISIBLE_DEVICES="$TRAIN_GPU" "$PYTHON_BIN" -u scripts/phase_e_eval_benchmark.py \
+    --value-run-dir "$SELECTED_VALUE_DIR" \
+    --benchmark-id "processbench_${benchmark_id}" \
+    --run-name "$eval_run_name" \
+    --output-root assets/artifacts/phase_e_eval \
+    --checkpoint-name best \
+    --max-samples "$BENCH_MAX_SAMPLES" \
+    --batch-size "$BENCH_EVAL_BATCH_SIZE" \
+    --max-length "$TRAIN_MAX_LENGTH" \
+    --feature-cache-root assets/artifacts/phase_e_feature_cache \
+    --feature-cache-mode read_write \
+    --feature-cache-lock-timeout-sec 600 \
+    --require-cuda | tee -a "$LOG_FILE"
+done
+SELECTED_GSM_EVAL_DIR="$(python - <<PY
+from pathlib import Path
+matches = sorted(Path('assets/artifacts/phase_e_eval').glob('${RUN_PREFIX}_processbench_gsm8k_*'))
+print(matches[-1])
+PY
+)"
+SELECTED_MATH_EVAL_DIR="$(python - <<PY
+from pathlib import Path
+matches = sorted(Path('assets/artifacts/phase_e_eval').glob('${RUN_PREFIX}_processbench_math_*'))
+print(matches[-1])
+PY
+)"
+
+"$PYTHON_BIN" - "$BASELINE_VALUE_RUN_DIR" "$BASELINE_SAMEFAMILY_DIR" "$BASELINE_GSM_EVAL_DIR" "$BASELINE_MATH_EVAL_DIR" "$SELECTED_VALUE_DIR" "$SELECTED_SAMEFAMILY_DIR" "$SELECTED_GSM_EVAL_DIR" "$SELECTED_MATH_EVAL_DIR" "$SLICE_DIR" "$JUDGE_DIR" "$MERGED_DIR" "$SUMMARY_FILE" <<'PY'
 import json
 import sys
 from pathlib import Path
-baseline_dir, selected_dir, slice_dir, judge_dir, merged_dir, summary_file = [Path(x) for x in sys.argv[1:]]
+
+(
+    baseline_dir,
+    baseline_samefamily_dir,
+    baseline_gsm_eval_dir,
+    baseline_math_eval_dir,
+    selected_dir,
+    selected_samefamily_dir,
+    selected_gsm_eval_dir,
+    selected_math_eval_dir,
+    slice_dir,
+    judge_dir,
+    merged_dir,
+    summary_file,
+) = [Path(x) for x in sys.argv[1:]]
+
 baseline = json.loads((baseline_dir / 'summary.json').read_text())
+baseline_samefamily = json.loads((baseline_samefamily_dir / 'metrics.json').read_text())
+baseline_gsm = json.loads((baseline_gsm_eval_dir / 'summary.json').read_text())
+baseline_math = json.loads((baseline_math_eval_dir / 'summary.json').read_text())
 selected = json.loads((selected_dir / 'summary.json').read_text())
+selected_samefamily = json.loads((selected_samefamily_dir / 'metrics.json').read_text())
+selected_gsm = json.loads((selected_gsm_eval_dir / 'summary.json').read_text())
+selected_math = json.loads((selected_math_eval_dir / 'summary.json').read_text())
 slice_summary = json.loads((slice_dir / 'summary.json').read_text())
 judge_summary = json.loads((judge_dir / 'summary.json').read_text())
 merged_summary = json.loads((merged_dir / 'summary.json').read_text())
+
+def local_metric(metrics: dict) -> float:
+    return float(metrics.get('local_first_bad_edge_accuracy') or metrics.get('local_safe_vs_bad_pair_accuracy') or 0.0)
+
 lines = [
     '# Phase E PRMBench Selected Relabel Suite',
     '',
     f'- baseline_value_run_dir: `{baseline_dir}`',
+    f'- baseline_samefamily_dir: `{baseline_samefamily_dir}`',
+    f'- baseline_gsm_eval_dir: `{baseline_gsm_eval_dir}`',
+    f'- baseline_math_eval_dir: `{baseline_math_eval_dir}`',
     f'- selected_value_run_dir: `{selected_dir}`',
+    f'- selected_samefamily_dir: `{selected_samefamily_dir}`',
+    f'- selected_gsm_eval_dir: `{selected_gsm_eval_dir}`',
+    f'- selected_math_eval_dir: `{selected_math_eval_dir}`',
     f'- slice_dir: `{slice_dir}`',
     f'- judge_dir: `{judge_dir}`',
     f'- merged_dir: `{merged_dir}`',
     '',
-    '| case | heldout_pair_acc | heldout_auc | train_pairs |',
-    '|---|---:|---:|---:|',
-    f"| baseline_e78 | {baseline['eval_pairs']['pair_accuracy']:.4f} | {baseline['eval_pairs']['auc']:.4f} | {baseline['train_pairs']} |",
-    f"| selected_relabel | {selected['eval_pairs']['pair_accuracy']:.4f} | {selected['eval_pairs']['auc']:.4f} | {selected['train_pairs']} |",
+    '| case | heldout_pair_acc | heldout_auc | samefamily_top1 | samefamily_local | pb_gsm_auc | pb_math_auc | train_pairs |',
+    '|---|---:|---:|---:|---:|---:|---:|---:|',
+    (
+        f"| baseline_e46 | {baseline['eval_pairs']['pair_accuracy']:.4f} | {baseline['eval_pairs']['auc']:.4f} | "
+        f"{baseline_samefamily.get('prompt_pool_top1_accuracy', 0.0):.4f} | "
+        f"{local_metric(baseline_samefamily):.4f} | "
+        f"{baseline_gsm['metrics'].get('pair_auc_good_vs_bad', 0.0):.4f} | "
+        f"{baseline_math['metrics'].get('pair_auc_good_vs_bad', 0.0):.4f} | {baseline['train_pairs']} |"
+    ),
+    (
+        f"| selected_relabel | {selected['eval_pairs']['pair_accuracy']:.4f} | {selected['eval_pairs']['auc']:.4f} | "
+        f"{selected_samefamily.get('prompt_pool_top1_accuracy', 0.0):.4f} | "
+        f"{local_metric(selected_samefamily):.4f} | "
+        f"{selected_gsm['metrics'].get('pair_auc_good_vs_bad', 0.0):.4f} | "
+        f"{selected_math['metrics'].get('pair_auc_good_vs_bad', 0.0):.4f} | {selected['train_pairs']} |"
+    ),
     '',
     '## Judge Slice',
     '',
@@ -212,6 +321,11 @@ lines = [
     '',
     f"- num_merged_rows: `{merged_summary['num_merged_rows']}`",
     f"- selected_keep_rate: `{merged_summary['selected_keep_rate'] if merged_summary['selected_keep_rate'] is not None else 'n/a'}`",
+    '',
+    '## Interpretation',
+    '',
+    '- This suite is now benchmark-facing by default: the main question is whether selective relabel improves ProcessBench while preserving PRMBench same-family trust.',
+    '- The baseline is `E46` because it is the current balanced PRMBench candidate; the older `E78` line is not used as the default reference anymore.',
 ]
 summary_file.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 PY

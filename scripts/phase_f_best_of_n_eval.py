@@ -73,13 +73,46 @@ def _extract_gsm8k_gt_answer(gt_answer_text: str) -> str | None:
     return None
 
 
+def _extract_math_gt_answer(answer: str) -> str | None:
+    """Extract GT answer from PRM800K MATH splits (answer field is already clean)."""
+    s = str(answer).strip()
+    return s if s else None
+
+
+def _extract_boxed_answer(solution_text: str) -> str | None:
+    """Extract answer from \\boxed{} in generated solution."""
+    m = re.search(r"\\boxed\{([^}]+)\}", solution_text)
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def _normalize_math_str(s: str) -> str:
+    s = s.strip()
+    s = re.sub(r"\\left|\\right|\\,|\\;|\\!", "", s)
+    s = re.sub(r"\s+", "", s)
+    s = re.sub(r"\\frac\{([^}]+)\}\{([^}]+)\}", r"(\1)/(\2)", s)
+    s = s.replace("\\cdot", "*").replace("\\times", "*")
+    return s.lower()
+
+
 def _answers_match(pred: str | None, gt: str | None) -> bool:
     if pred is None or gt is None:
         return False
     try:
-        return abs(float(pred) - float(gt)) < 1e-3
+        return abs(float(pred.replace(",", "")) - float(gt.replace(",", ""))) < 1e-3
     except ValueError:
-        return pred.strip().lower() == gt.strip().lower()
+        pass
+    pn = _normalize_math_str(pred)
+    gn = _normalize_math_str(gt)
+    if pn == gn:
+        return True
+    try:
+        import ast
+        return abs(float(ast.literal_eval(pn)) - float(ast.literal_eval(gn))) < 1e-3
+    except Exception:
+        pass
+    return False
 
 
 def _split_steps(solution_text: str) -> list[str]:
@@ -267,8 +300,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--value-run-dir", type=Path, required=True, help="Path to Phase E LoRA run dir.")
     p.add_argument("--backbone-path", default="assets/models/Qwen2.5-Math-PRM-7B")
     p.add_argument("--generator-path", default="assets/models/Qwen2.5-Math-7B-Instruct")
+    p.add_argument("--dataset", default="gsm8k", choices=["gsm8k", "math"], help="Dataset: gsm8k (default) or math (PRM800K MATH test split).")
     p.add_argument("--gsm8k-path", default="assets/external_datasets/openai_gsm8k/main/test-00000-of-00001.parquet")
-    p.add_argument("--num-problems", type=int, default=200, help="Number of GSM8K problems to evaluate.")
+    p.add_argument("--math-path", default="assets/external_datasets/openai_prm800k/prm800k/math_splits/test.jsonl")
+    p.add_argument("--num-problems", type=int, default=200, help="Number of problems to evaluate.")
     p.add_argument("--k-samples", type=int, default=4, help="Number of sampled solutions per problem (K).")
     p.add_argument("--max-new-tokens", type=int, default=512, help="Max tokens per generated solution.")
     p.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature.")
@@ -313,14 +348,31 @@ def main(argv: list[str] | None = None) -> None:
     print(f"output_dir       : {out_dir}")
     print("=" * 80)
 
-    # Load GSM8K
-    import pandas as pd
-    df = pd.read_parquet(args.gsm8k_path)
-    df = df.sample(frac=1, random_state=args.seed).head(int(args.num_problems)).reset_index(drop=True)
-    questions = df["question"].tolist()
-    gt_answers_raw = df["answer"].tolist()
-    gt_answers = [_extract_gsm8k_gt_answer(str(a)) for a in gt_answers_raw]
-    print(f"Loaded {len(questions)} GSM8K problems")
+    # Load dataset
+    import random as _random
+    _random.seed(int(args.seed))
+
+    if args.dataset == "math":
+        import json as _json
+        items = []
+        with open(args.math_path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    items.append(_json.loads(line))
+        _random.shuffle(items)
+        items = items[: int(args.num_problems)]
+        questions = [d["problem"] for d in items]
+        gt_answers = [_extract_math_gt_answer(d["answer"]) for d in items]
+        print(f"Loaded {len(questions)} MATH problems from PRM800K test split")
+    else:
+        import pandas as pd
+        df = pd.read_parquet(args.gsm8k_path)
+        df = df.sample(frac=1, random_state=args.seed).head(int(args.num_problems)).reset_index(drop=True)
+        questions = df["question"].tolist()
+        gt_answers_raw = df["answer"].tolist()
+        gt_answers = [_extract_gsm8k_gt_answer(str(a)) for a in gt_answers_raw]
+        print(f"Loaded {len(questions)} GSM8K problems")
 
     # Load value head (PRM)
     print("Loading value head (PRM)...")
@@ -416,8 +468,9 @@ def main(argv: list[str] | None = None) -> None:
             ]
 
             # Correctness of each solution
-            greedy_pred = _extract_gsm8k_answer(greedy_sol)
-            sampled_preds = [_extract_gsm8k_answer(s) for s in sampled_sols]
+            _extract_fn = _extract_boxed_answer if args.dataset == "math" else _extract_gsm8k_answer
+            greedy_pred = _extract_fn(greedy_sol)
+            sampled_preds = [_extract_fn(s) for s in sampled_sols]
             sampled_correct = [_answers_match(p, q_gt) for p in sampled_preds]
 
             # Select best by PRM

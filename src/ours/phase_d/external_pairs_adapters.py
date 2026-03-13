@@ -86,7 +86,10 @@ class PairBuildConfig:
     step_label_pair_mode: str = "first_bad_edge_strict"
     step_label_terminal_anchor_mode: str = "none"
     step_label_terminal_anchor_fraction: float = 0.5
-    r_prm_pair_mode: str = "direct_pair_legacy"
+    # Compact verdict is the safe default because the legacy long-essay contract
+    # is known to create truncation-heavy and optimization-hostile pairs.
+    # `compact_verdict` 作为安全默认值，因为旧的长 essay 合同已知会带来严重截断和训练噪声。
+    r_prm_pair_mode: str = "compact_verdict"
     prmbench_error_step_index_base: str = "auto"
 
     def validate(self) -> None:

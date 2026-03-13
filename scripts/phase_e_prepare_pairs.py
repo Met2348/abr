@@ -83,20 +83,22 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--split-granularity",
         choices=["pair_id", "source_sample"],
-        default="pair_id",
+        default="source_sample",
         help=(
             "How train/validation splitting should be performed. "
-            "`pair_id` reproduces the legacy behavior; `source_sample` keeps all pairs from one raw sample together."
+            "`source_sample` is the repository-safe default because it keeps all pairs from one raw sample together. "
+            "`pair_id` is retained only for legacy reproductions."
         ),
     )
     parser.add_argument(
         "--global-cap-mode",
         choices=["pair_id_head", "balanced_support_bucket"],
-        default="pair_id_head",
+        default="balanced_support_bucket",
         help=(
             "How the final `max_pairs_total` cap should be applied after confidence filtering and dedup. "
-            "`pair_id_head` preserves the legacy deterministic head-of-list behavior; "
-            "`balanced_support_bucket` round-robins over `(source_tag, pair_semantics)` buckets so rare repair semantics survive smoke-time caps."
+            "`balanced_support_bucket` is the repository-safe default because it round-robins over "
+            "`(source_tag, pair_semantics)` buckets so rare repair semantics survive smoke-time caps. "
+            "`pair_id_head` preserves the legacy deterministic head-of-list behavior."
         ),
     )
     parser.add_argument("--max-pairs-total", type=int, default=None)

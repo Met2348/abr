@@ -1,3 +1,96 @@
+## 2026-03-12 22:10 Update
+
+1. `PBR32` same-family is now complete and stronger than we previously knew:
+   - `top1=0.8985`
+   - `local_first_bad=0.9081`
+2. `PBR40C frozen` formal suite completed:
+   - same-family is slightly better than `PBR26`
+   - but Math/GSM benchmark `F1` still do not beat `PBR26/PBR31/PBR32`
+   - RL diag still blocks on `terminal completion`
+3. `implicit PRM v2` has been repaired and now has a real 200-sample Math result:
+   - `pair_auc=0.6885`
+   - `F1_oracle=0.3537`
+   - far below explicit value-head performance, so this line is demoted to diagnostic-only.
+4. `PBR40C LoRA` full formal suite is still running in the background.
+
+## 2026-03-12 21:40 Update
+
+1. 新增了 `PBR44/PBR45` 的自动 follow-up 链：训练一结束，就会自动接 `ProcessBench GSM/Math` 和 `Phase F preflight`，对应 watcher 在 `phase_e_pbr44_pbr45_followup_wait_0312_1750`。
+2. 这轮进一步确认 `offline implicit PRM` 该降级：最新 `pbr38f` 在 Math fixed-threshold 上是 `F1=0.0000`，更像分数动态范围塌掉，不像单纯阈值问题。
+3. 目前最值得读的主线不再是“再加一种数据 recipe”，而是把 `PBR44` 和 `PBR45` 跑完整条验证链后再决定 promotion。
+
+## 2026-03-12 17:33 Update
+
+1. `docs/relatedPapers/` 已再次补齐；当前文档里检测到的 `113` 个 paper-like URL 已全部有本地镜像，缺失数为 `0`。
+2. 论文写作时要区分两个 `PRIME`：
+   - `2502.01456` = implicit-reward RL method
+   - `2602.11570` = verifier benchmark
+3. `scripts/phase_f_grpo_lite.py` 已新增 optional replay-buffer GRPO 入口，对应新的等待队列：
+   - `phase_f_replay_grpo_canary_wait_0312_1732`
+4. 当前 `Phase F` 的最新判断没有变：RL 仍是 selective infra exploration，主线仍是 hybrid verifier + controller / BC。
+
+## 2026-03-12 17:21 Update
+
+1. 新的长报告：
+   - `docs/phased_e_reports_9_20260312T172129+0800.md`
+2. 当前最新结论：
+   - `PBR32` 仍是最强 Math LoRA 候选
+   - `PBR31` 仍是最平衡 same-family / GSM LoRA 候选
+   - `PBR26` 仍是最强 frozen 参考
+3. `PBR38B` 的失败已经被本轮审计查清：
+   - 不是“共识过滤这个方向整体失败”
+   - 而是该数据池把 `local_first_bad_edge` 全部滤掉，并把 terminal 比例抬到了 `22.5%`
+4. 本轮新增了 CPU-only 诊断与数据修复入口：
+   - `scripts/run_phase_e_current_frontier_audit_suite.sh`
+   - `scripts/phase_e_curate_semantic_consensus_pairs.py`
+5. 新的 `PBR40` pair pool 是下一轮训练的正确起点：
+   - `7366 -> 4837`
+   - local 语义保留
+   - terminal 只占 `5.0%`
+
+## 2026-03-12 17:20 Update
+
+1. `Phase F` 新完成的 hybrid usability suite 进一步支持“verifier system / ensemble”路线，而不是单一标量 head：
+   - `math ph1mlp + ph1gated = 0.8926`
+   - `gsm ph2mlp + ph2gated = 0.8815`
+2. `BC->RL` 仍然只能算 selective follow-up：部分切片有增益，但 from-scratch RL-like 依然不稳定，当前默认顺序仍是 `heuristic -> BC -> selective BC->RL`。
+3. `scripts/phase_f_grpo_lite.py` 已升级为 modern TRL / `Dr.GRPO` 入口，并显式检查解释器环境；`scripts/run_phase_f_overnight_suite.sh` 也已安全化，避免旧 artifact 解析和 silent failure 风险。
+4. 目前还挂着两个不抢占 GPU 的自动队列：
+   - `phase_f_hybrid_preflight_wait_0312_1712`
+   - `phase_f_modern_grpo_canary_wait_0312_1712`
+
+## 2026-03-12 Evening Update
+
+1. New long-form D/E/F sourcebook:
+   - `docs/phased_e_reports_7_20260312T170216+0800.md`
+2. New overnight queue:
+   - `scripts/run_phase_e_phase_f_autonomy_overnight_suite.sh`
+3. Current queued research direction:
+   - `PRMBench selected-relabel + Phase F preflight`
+   - `PBR6 LoRA backbone smoke`
+
+## 2026-03-12 Late Afternoon Hybrid Refresh
+
+最新确认的结论：
+
+1. `PH1/PH2` 的 old summary 里 `held_pair=0.0` 只是汇总 bug，不是训练失败；代码和 artifact 都已经修正。
+2. `Math-PRM-7B + PRMBench-local hybrid` 现在是 `Phase E` 最强主线。
+3. `PH2-mlp` 在 full `ProcessBench` fixed@0.5 上更像可部署候选：
+   - GSM `F1@0.5 = 0.7063`
+   - reward-hacking probe 全部 `low`
+   - threshold penalty 很小
+4. `PH1-gated` 更像 Math 特化候选：
+   - Math best-F1 更高（`0.6181@0.400`）
+   - 但 fixed-threshold 稳定性不如 `PH2-mlp`
+5. `PH3_PRM_LOCAL_TA15_MSGRID5_ARCH_SWEEP_SMOKE` 已启动，正在检验能否桥接 `PH1` 与 `PH2` 的优势。
+6. 新的 focused `Phase F` 复核已经把一个容易误判的点澄清了：
+   - `PH2-MLP-Math` 上先前那次 `BC->RL` 小幅正信号，在 teacher-aligned + 3-seed 审计下不再稳健；
+   - 当前更稳的默认顺序仍然是：
+     - heuristic
+     - BC
+     - selective BC->RL
+   - 不能把那一次单点结果当成“RL controller 已经稳定有效”的证据。
+
 # BCR/ABR Research Pipeline (Condensed)
 
 ## 2026-03-12 Midday E/F Refresh

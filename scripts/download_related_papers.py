@@ -43,6 +43,8 @@ from urllib.request import Request, urlopen
 
 URL_PATTERN = re.compile(r"https?://[^\s<>()\]`\"']+")
 ARXIV_ID_PATTERN = re.compile(r"(?P<id>\d{4}\.\d{4,5})(v\d+)?")
+PMLR_CITATION_PDF_PATTERN = re.compile(r'citation_pdf_url" content="(?P<url>[^"\s]+\.pdf(?:\?[^"\s]*)?)"')
+PMLR_HREF_PDF_PATTERN = re.compile(r'href="(?P<url>[^"\s]+\.pdf(?:\?[^"\s]*)?)"')
 
 
 @dataclass(slots=True)
@@ -104,12 +106,26 @@ def _is_paperish_url(url: str) -> bool:
             "aclanthology.org/",
             "openreview.net/forum",
             "openreview.net/pdf",
+            "proceedings.mlr.press/",
             "cdn.openai.com/",
         )
     )
 
 
-def _resolve_pdf_url(url: str) -> str | None:
+def _extract_pmlr_pdf_url(html_text: str) -> str | None:
+    """Extract the canonical PDF URL from a PMLR landing page.
+
+    从 PMLR 论文落地页里提取站点声明的 PDF 链接。
+    """
+
+    for pattern in (PMLR_CITATION_PDF_PATTERN, PMLR_HREF_PDF_PATTERN):
+        match = pattern.search(html_text)
+        if match:
+            return match.group("url")
+    return None
+
+
+def _resolve_pdf_url(url: str, *, timeout_sec: float | None = None) -> str | None:
     parsed = urlparse(url)
     host = parsed.netloc.lower()
     path = parsed.path
@@ -146,6 +162,25 @@ def _resolve_pdf_url(url: str) -> str | None:
                 return f"https://openreview.net/pdf?id={paper_id}"
         return None
 
+    if "proceedings.mlr.press" in host:
+        if path.endswith(".pdf"):
+            return url
+        article_path = path.rstrip("/")
+        if article_path.endswith(".html"):
+            if timeout_sec is not None:
+                try:
+                    landing_text = _http_get_bytes(url, timeout_sec=timeout_sec).decode("utf-8", errors="ignore")
+                except (HTTPError, URLError, TimeoutError, UnicodeDecodeError, ValueError):
+                    landing_text = ""
+                resolved = _extract_pmlr_pdf_url(landing_text) if landing_text else None
+                if resolved:
+                    return resolved
+            slug = article_path.split("/")[-1].removesuffix(".html")
+            volume = article_path.split("/")[-2] if "/" in article_path.strip("/") else ""
+            if volume and slug:
+                return f"https://proceedings.mlr.press/{volume}/{slug}/{slug}.pdf"
+        return None
+
     if "cdn.openai.com" in host and path.endswith(".pdf"):
         return url
 
@@ -172,6 +207,12 @@ def _slugify_filename_from_url(url: str, pdf_url: str) -> str:
         if not slug.endswith(".pdf"):
             slug = f"{slug}.pdf"
         return slug
+
+    if "proceedings.mlr.press" in parsed.netloc.lower() or "proceedings.mlr.press" in pdf_parsed.netloc.lower():
+        basename = Path(pdf_parsed.path).name or "pmlr_paper.pdf"
+        if basename.endswith(".pdf"):
+            return basename
+        return f"{basename}.pdf"
 
     basename = Path(pdf_parsed.path).name or "paper.pdf"
     if basename.endswith(".pdf"):
@@ -224,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
     existing_keys = _build_existing_keys(output_dir)
     entries: list[PaperEntry] = []
     for source_url, origin_paths in sorted(origin_map.items()):
-        pdf_url = _resolve_pdf_url(source_url)
+        pdf_url = _resolve_pdf_url(source_url, timeout_sec=float(args.timeout_sec))
         if not pdf_url:
             entries.append(
                 PaperEntry(

@@ -73,13 +73,42 @@ def _extract_gsm8k_gt(answer_text: str) -> str | None:
     return None
 
 
+def _extract_math_gt(answer: str) -> str | None:
+    """Extract GT answer from PRM800K MATH splits (answer field is already clean)."""
+    s = str(answer).strip()
+    return s if s else None
+
+
+def _normalize_math_str(s: str) -> str:
+    """Normalize a math answer string for comparison."""
+    s = s.strip()
+    s = re.sub(r"\\left|\\right|\\,|\\;|\\!", "", s)
+    s = re.sub(r"\s+", "", s)
+    # Convert \frac{a}{b} -> a/b for numeric eval
+    s = re.sub(r"\\frac\{([^}]+)\}\{([^}]+)\}", r"(\1)/(\2)", s)
+    s = s.replace("\\cdot", "*").replace("\\times", "*")
+    return s.lower()
+
+
 def _answers_match(pred: str | None, gt: str | None) -> bool:
     if pred is None or gt is None:
         return False
     try:
-        return abs(float(pred) - float(gt)) < 1e-3
+        return abs(float(pred.replace(",", "")) - float(gt.replace(",", ""))) < 1e-3
     except ValueError:
-        return pred.strip().lower() == gt.strip().lower()
+        pass
+    # Try normalized string match
+    pn = _normalize_math_str(pred)
+    gn = _normalize_math_str(gt)
+    if pn == gn:
+        return True
+    # Try evaluating simple expressions
+    try:
+        import ast
+        return abs(float(ast.literal_eval(pn)) - float(ast.literal_eval(gn))) < 1e-3
+    except Exception:
+        pass
+    return False
 
 
 def _split_steps(text: str) -> list[str]:
@@ -317,13 +346,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--value-run-dir", type=Path, required=True)
     p.add_argument("--backbone-path", default="assets/models/Qwen2.5-Math-PRM-7B")
     p.add_argument("--policy-path", default="assets/models/Qwen2.5-Math-7B-Instruct")
+    p.add_argument("--dataset", default="gsm8k", choices=["gsm8k", "math"], help="Dataset: gsm8k (default) or math (PRM800K MATH splits).")
     p.add_argument("--gsm8k-train-path", default="assets/external_datasets/openai_gsm8k/main/train-00000-of-00001.parquet")
     p.add_argument("--gsm8k-test-path", default="assets/external_datasets/openai_gsm8k/main/test-00000-of-00001.parquet")
-    p.add_argument("--num-train-problems", type=int, default=500, help="Problems from GSM8K train split.")
-    p.add_argument("--num-eval-problems", type=int, default=200, help="Problems from GSM8K test split for eval.")
+    p.add_argument("--math-train-path", default="assets/external_datasets/openai_prm800k/prm800k/math_splits/train.jsonl")
+    p.add_argument("--math-test-path", default="assets/external_datasets/openai_prm800k/prm800k/math_splits/test.jsonl")
+    p.add_argument("--num-train-problems", type=int, default=500, help="Problems from train split.")
+    p.add_argument("--num-eval-problems", type=int, default=200, help="Problems from test split for eval.")
     p.add_argument("--lambda-process", type=float, default=0.3, help="Process reward weight. 0.0=outcome-only GRPO.")
     p.add_argument("--k-samples", type=int, default=4, help="Number of GRPO rollouts per problem.")
     p.add_argument("--num-train-epochs", type=int, default=1)
+    p.add_argument("--max-steps", type=int, default=-1, help="Optional optimizer-step cap for canaries. <=0 keeps epoch-driven training.")
     p.add_argument("--learning-rate", type=float, default=1e-6)
     p.add_argument("--max-new-tokens", type=int, default=512)
     p.add_argument("--max-scoring-length", type=int, default=1024)
@@ -344,7 +377,129 @@ def _build_parser() -> argparse.ArgumentParser:
             "reward hacking by computing clipped step-to-step deltas. mean_centered: legacy mean(scores)-0.5."
         ),
     )
+    p.add_argument(
+        "--trl-loss-type",
+        default="dapo",
+        help="TRL GRPO loss type. Common choices in recent work are dapo / dr_grpo / grpo.",
+    )
+    p.add_argument(
+        "--trl-scale-rewards",
+        default="group",
+        help="TRL reward scaling mode. Use group / batch / none depending on the stability study.",
+    )
+    p.add_argument("--trl-beta", type=float, default=0.0, help="KL coefficient passed to TRL GRPOConfig(beta=...).")
+    p.add_argument("--trl-epsilon", type=float, default=0.2, help="Lower PPO/GRPO clip coefficient.")
+    p.add_argument("--trl-epsilon-high", type=float, default=None, help="Optional upper clip coefficient for DAPO-style asymmetric clipping.")
+    p.add_argument("--trl-delta", type=float, default=None, help="Optional delta term for clipped objectives that support it.")
+    p.add_argument(
+        "--trl-num-iterations",
+        type=int,
+        default=1,
+        help="Number of policy updates per sampled batch. Keep 1 for lightweight infra canaries.",
+    )
+    p.add_argument(
+        "--trl-importance-sampling-level",
+        default="token",
+        help="TRL importance-sampling level, e.g. token or sequence.",
+    )
+    p.add_argument("--trl-temperature", type=float, default=1.0, help="Sampling temperature used by GRPOTrainer during RL rollouts.")
+    p.add_argument(
+        "--trl-mask-truncated-completions",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Mask truncated completions instead of treating every truncation as a hard negative.",
+    )
+    p.add_argument(
+        "--trl-use-vllm",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use vLLM-backed generation if the runtime supports it.",
+    )
+    p.add_argument(
+        "--trl-use-replay-buffer",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use TRL experimental GRPO-with-replay-buffer to stabilize zero-variance reward groups.",
+    )
+    p.add_argument(
+        "--trl-replay-buffer-size",
+        type=int,
+        default=64,
+        help="Replay buffer size when --trl-use-replay-buffer is enabled.",
+    )
+    p.add_argument(
+        "--trl-vllm-gpu-memory-utilization",
+        type=float,
+        default=0.3,
+        help="vLLM GPU memory utilization budget when --trl-use-vllm is enabled.",
+    )
+    p.add_argument(
+        "--save-only-model",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Reduce disk usage by saving model weights only inside trainer checkpoints.",
+    )
     return p
+
+
+def build_grpo_config_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    """Build one normalized GRPOConfig kwargs dict.
+
+    English
+    -------
+    Keep all TRL-facing knobs in one place so research scripts and unit tests can
+    reason about the exact GRPO variant being used.
+
+    中文
+    ----
+    把所有 TRL 相关配置集中到一个地方，方便研究脚本和单测明确当前到底在跑哪种
+    GRPO 变体，避免参数散落在 `main()` 里难以审计。
+    """
+
+    scale_rewards_raw = str(args.trl_scale_rewards).strip().lower()
+    scale_rewards_value: str | bool
+    if scale_rewards_raw in {"none", "false", "off"}:
+        scale_rewards_value = False
+    else:
+        scale_rewards_value = str(args.trl_scale_rewards)
+
+    kwargs: dict[str, Any] = {
+        "output_dir": str(Path(args.output_root) / f"{args.run_name}_grpo_checkpoints"),
+        "num_train_epochs": int(args.num_train_epochs),
+        "per_device_train_batch_size": int(args.per_device_train_batch_size),
+        "gradient_accumulation_steps": int(args.gradient_accumulation_steps),
+        "learning_rate": float(args.learning_rate),
+        "num_generations": int(args.k_samples),
+        "max_completion_length": int(args.max_new_tokens),
+        "seed": int(args.seed),
+        "logging_steps": 10,
+        "save_steps": int(args.eval_interval_steps),
+        "save_total_limit": 1,
+        "report_to": "none",
+        "bf16": str(args.dtype) == "bfloat16",
+        "gradient_checkpointing": True,
+        "loss_type": str(args.trl_loss_type),
+        "scale_rewards": scale_rewards_value,
+        "beta": float(args.trl_beta),
+        "epsilon": float(args.trl_epsilon),
+        "temperature": float(args.trl_temperature),
+        "importance_sampling_level": str(args.trl_importance_sampling_level),
+        "num_iterations": int(args.trl_num_iterations),
+        "mask_truncated_completions": bool(args.trl_mask_truncated_completions),
+        "save_only_model": bool(args.save_only_model),
+    }
+    if int(args.max_steps) > 0:
+        kwargs["max_steps"] = int(args.max_steps)
+    if args.trl_epsilon_high is not None:
+        kwargs["epsilon_high"] = float(args.trl_epsilon_high)
+    if args.trl_delta is not None:
+        kwargs["delta"] = float(args.trl_delta)
+    if bool(args.trl_use_vllm):
+        kwargs["use_vllm"] = True
+        kwargs["vllm_gpu_memory_utilization"] = float(args.trl_vllm_gpu_memory_utilization)
+    if bool(args.trl_use_replay_buffer):
+        kwargs["replay_buffer_size"] = int(args.trl_replay_buffer_size)
+    return kwargs
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -373,27 +528,59 @@ def main(argv: list[str] | None = None) -> None:
     print("=" * 80)
     print(f"value_run_dir    : {args.value_run_dir}")
     print(f"policy_path      : {args.policy_path}")
+    print(f"dataset          : {args.dataset}")
     print(f"lambda_process   : {args.lambda_process}")
     print(f"k_samples        : {args.k_samples}")
     print(f"num_train        : {args.num_train_problems}")
     print(f"num_eval         : {args.num_eval_problems}")
+    print(f"trl_loss_type    : {args.trl_loss_type}")
+    print(f"trl_scale_rewards: {args.trl_scale_rewards}")
+    print(f"trl_beta         : {args.trl_beta}")
+    print(f"trl_temperature  : {args.trl_temperature}")
+    print(f"trl_use_vllm     : {args.trl_use_vllm}")
+    print(f"trl_replay_buffer: {args.trl_use_replay_buffer}")
     print(f"output_dir       : {out_dir}")
     print("=" * 80)
 
     # Load datasets
-    import pandas as pd
+    import random as _random
+    _random.seed(int(args.seed))
 
-    df_train = pd.read_parquet(args.gsm8k_train_path).sample(
-        frac=1, random_state=int(args.seed)
-    ).head(int(args.num_train_problems)).reset_index(drop=True)
-    df_eval = pd.read_parquet(args.gsm8k_test_path).sample(
-        frac=1, random_state=int(args.seed) + 1
-    ).head(int(args.num_eval_problems)).reset_index(drop=True)
+    if args.dataset == "math":
+        import json as _json
 
-    train_q = df_train["question"].tolist()
-    train_gt = [_extract_gsm8k_gt(str(a)) for a in df_train["answer"].tolist()]
-    eval_q = df_eval["question"].tolist()
-    eval_gt = [_extract_gsm8k_gt(str(a)) for a in df_eval["answer"].tolist()]
+        def _load_math_jsonl(path: str) -> tuple[list[str], list[str | None]]:
+            items = []
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        items.append(_json.loads(line))
+            _random.shuffle(items)
+            qs = [d["problem"] for d in items]
+            gts = [_extract_math_gt(d["answer"]) for d in items]
+            return qs, gts
+
+        all_train_q, all_train_gt = _load_math_jsonl(args.math_train_path)
+        all_eval_q, all_eval_gt = _load_math_jsonl(args.math_test_path)
+        train_q = all_train_q[: int(args.num_train_problems)]
+        train_gt = all_train_gt[: int(args.num_train_problems)]
+        eval_q = all_eval_q[: int(args.num_eval_problems)]
+        eval_gt = all_eval_gt[: int(args.num_eval_problems)]
+    else:
+        import pandas as pd
+
+        df_train = pd.read_parquet(args.gsm8k_train_path).sample(
+            frac=1, random_state=int(args.seed)
+        ).head(int(args.num_train_problems)).reset_index(drop=True)
+        df_eval = pd.read_parquet(args.gsm8k_test_path).sample(
+            frac=1, random_state=int(args.seed) + 1
+        ).head(int(args.num_eval_problems)).reset_index(drop=True)
+
+        train_q = df_train["question"].tolist()
+        train_gt = [_extract_gsm8k_gt(str(a)) for a in df_train["answer"].tolist()]
+        eval_q = df_eval["question"].tolist()
+        eval_gt = [_extract_gsm8k_gt(str(a)) for a in df_eval["answer"].tolist()]
 
     print(f"Loaded {len(train_q)} train + {len(eval_q)} eval problems")
 
@@ -471,26 +658,36 @@ def main(argv: list[str] | None = None) -> None:
     })
 
     # Configure GRPO trainer
-    from trl import GRPOConfig, GRPOTrainer
+    try:
+        from trl import GRPOConfig, GRPOTrainer
+        replay_config_cls = None
+        replay_trainer_cls = None
+        if bool(args.trl_use_replay_buffer):
+            from trl.experimental.grpo_with_replay_buffer import (
+                GRPOWithReplayBufferConfig,
+                GRPOWithReplayBufferTrainer,
+            )
 
-    grpo_config = GRPOConfig(
-        output_dir=str(out_dir / "grpo_checkpoints"),
-        num_train_epochs=int(args.num_train_epochs),
-        per_device_train_batch_size=int(args.per_device_train_batch_size),
-        gradient_accumulation_steps=int(args.gradient_accumulation_steps),
-        learning_rate=float(args.learning_rate),
-        num_generations=int(args.k_samples),
-        max_completion_length=int(args.max_new_tokens),
-        seed=int(args.seed),
-        logging_steps=10,
-        save_steps=int(args.eval_interval_steps),
-        save_total_limit=1,
-        report_to="none",
-        bf16=(str(args.dtype) == "bfloat16"),
-        gradient_checkpointing=True,
-    )
+            replay_config_cls = GRPOWithReplayBufferConfig
+            replay_trainer_cls = GRPOWithReplayBufferTrainer
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "`trl` is required for scripts/phase_f_grpo_lite.py. "
+            f"Current interpreter: {sys.executable}. "
+            "Recommended interpreter: /home/zling/anaconda3/envs/bcr/bin/python3"
+        ) from exc
 
-    trainer = GRPOTrainer(
+    grpo_config_kwargs = build_grpo_config_kwargs(args)
+    print("GRPO config kwargs:")
+    for key in sorted(grpo_config_kwargs):
+        print(f"  - {key}: {grpo_config_kwargs[key]}")
+
+    trainer_variant = "grpo_with_replay_buffer" if bool(args.trl_use_replay_buffer) else "grpo"
+    config_cls = replay_config_cls if bool(args.trl_use_replay_buffer) else GRPOConfig
+    trainer_cls = replay_trainer_cls if bool(args.trl_use_replay_buffer) else GRPOTrainer
+    grpo_config = config_cls(**grpo_config_kwargs)
+
+    trainer = trainer_cls(
         model=policy_model,
         processing_class=policy_tokenizer,
         reward_funcs=reward_fn,
@@ -531,6 +728,9 @@ def main(argv: list[str] | None = None) -> None:
         "train_elapsed_s": float(train_elapsed),
         "value_run_dir": str(args.value_run_dir),
         "policy_path": str(args.policy_path),
+        "python_executable": sys.executable,
+        "trl_variant": trainer_variant,
+        "trl_config": grpo_config_kwargs,
     }
 
     gate_pass = (post_acc - pre_acc) >= 0.01

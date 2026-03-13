@@ -1,3 +1,81 @@
+## 2026-03-12 Late Controller Audit: Teacher-Aligned BC vs BC->RL
+
+This update narrows the live `Phase F` recommendation further.
+
+After the first `PH1/PH2` hybrid usability suite, one result still looked potentially encouraging:
+
+1. `ph2_mlp_math`
+2. `BC->RL`
+3. small apparent gain over the wrapper's `BC-only`
+
+We re-audited that signal with:
+
+1. the slice's own best heuristic teacher
+2. a control teacher from the original wrapper
+3. three seeds
+
+Result:
+
+| case | teacher | mode | mean test balanced_f1 | std |
+|---|---|---|---:|---:|
+| `ph2_mlp_math` | `guarded_drop` | `bc_only` | `0.7292` | `0.1289` |
+| `ph2_mlp_math` | `guarded_drop` | `bc_then_rl` | `0.6929` | `0.0815` |
+| `ph2_mlp_math` | `threshold_only` | `bc_only` | `0.8020` | `0.0273` |
+| `ph1_gated_math` | `drop_needs_low` | `bc_only` | `0.8030` | `0.0690` |
+| `ph1_gated_math` | `drop_needs_low` | `bc_then_rl` | `0.8211` | `0.0490` |
+
+Interpretation:
+
+1. the earlier `ph2_mlp_math` positive `BC->RL` reading should not be treated as stable evidence;
+2. current best practice remains:
+   - heuristic first
+   - BC second
+   - `BC->RL` only as a selective, slice-specific follow-up
+3. this is consistent with the newer verifier / abstention literature:
+   - strong cheap controllers usually come from conservative decision rules and distillation;
+   - RL-style optimization should not be promoted before fixed-threshold and generator-shift behavior is stable.
+
+## 2026-03-12 Late Afternoon Update: Hybrid PRM-Backbone Candidates Enter Phase F Preflight
+
+This update supersedes part of the older `PBR26/PBR31`-only framing.
+
+### What Changed
+
+1. `Math-PRM-7B`-backbone ProcessBench-oriented hybrids (`PH1`, `PH2`) are now real Phase F inputs, not just Phase E curiosities.
+2. The previous `PH1/PH2` suite summaries under-reported held-out quality as `0.0`; this was a summary bug, not a model failure.
+3. Full fixed-threshold ProcessBench eval + full modern preflight are now available for:
+   - `PH2-mlp`
+   - `PH1-gated`
+
+### Current Reading
+
+`PH2-mlp`:
+- GSM fixed `F1@0.5 = 0.7063`
+- Math fixed `F1@0.5 = 0.5528`
+- reward-hacking probes all `low`
+- very small GSM threshold penalty (`best 0.7143 @ 0.42` vs fixed `0.7063 @ 0.50`)
+
+`PH1-gated`:
+- GSM fixed `F1@0.5 = 0.6497`
+- Math fixed `F1@0.5 = 0.5737`
+- stronger Math tuned-threshold ceiling (`best 0.6181 @ 0.40`)
+- reward-hacking probes all `low`
+
+### Updated Phase F Interpretation
+
+1. `PH2-mlp` is currently the best **deployment-facing GSM controller candidate**.
+2. `PH1-gated` is currently the best **Math specialist candidate when threshold retuning is allowed**.
+3. Both are materially cleaner than the older `PBR31` line under superficial reward-hacking probes.
+4. Both still have unresolved generator-shift fragility, so they are **Phase F-usable**, but not yet `RL main-reward safe`.
+
+### Immediate Follow-up
+
+1. Finish `PH3_PRM_LOCAL_TA15_MSGRID5_ARCH_SWEEP_SMOKE`.
+2. Keep Phase F live-controller planning centered on `PH2-mlp` for GSM and `PH1-gated` / `PH2-mlp` comparison for Math.
+3. Do not reopen `selected-relabel` as a mainline investment unless judge retention becomes materially larger than the current ~1% level.
+
+---
+
 # Phase F Plan: Conservative RL on a Frozen Same-Family Value Head
 
 This file defines the official conditional **Phase F** plan.

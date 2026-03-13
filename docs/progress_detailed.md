@@ -1,3 +1,217 @@
+## 2026-03-12 22:10:41 +0800
+
+- Type: PBR40 semantic-consensus formal follow-up + PBR32 same-family completion + implicit-PRM-v2 repair
+- Code changes:
+  - added `scripts/run_phase_e_pbr40_semcons_suite.sh`
+  - added `scripts/phase_f_implicit_prm_eval_v2.py`
+- Main findings:
+  - `PBR32` same-family trust is now fully verified and stronger than the previous frontier matrix showed:
+    - `top1=0.8985`
+    - `local_first_bad=0.9081`
+  - `PBR40C frozen` formal suite completed and gives a narrow but useful conclusion:
+    - same-family is slightly above `PBR26`
+    - benchmark `F1` remains below `PBR26/PBR31/PBR32`
+    - RL diagnosis = `near_rl_ready_but_terminal_gap`
+  - `implicit PRM v2` had two concrete implementation bugs:
+    - reward-head logits were mistakenly treated as vocabulary logits
+    - the summary renderer used the wrong helper signature
+  - after the fixes, the new implicit path now passes a 1-sample smoke and the 200-sample Math audit is running
+  - the 200-sample Math audit then completed with:
+    - `pair_auc=0.6885`
+    - `first_edge=0.7083`
+    - `F1_oracle=0.3537`
+    - which is enough to demote implicit PRM to diagnostic-only for this checkpoint family
+- Runtime follow-up:
+  - completed `phase_e_pbr40c_frozen_0312_2146`
+  - completed `pbr32_samefamily_verify_0312`
+  - launched `phase_e_pbr40c_lora_0312_2146`
+  - completed `pbr32_implicit_v2_math_0312_r4`
+- Validation:
+  - `python -m py_compile scripts/phase_f_implicit_prm_eval_v2.py`
+  - `bash -n scripts/run_phase_e_pbr40_semcons_suite.sh`
+
+## 2026-03-12 21:40:54 +0800
+
+- Type: Phase E candidate auto-followup + verifier/RL blocker refresh
+- Code changes:
+  - added `scripts/run_phase_e_candidate_phase_f_followup_suite.sh`
+  - added `docs/phase_e_phase_f_followup_research_20260312T2140.md`
+- Main findings:
+  - current GPU state is not “fully idle”, but it is now good enough to queue the next high-value chain without抢占 active training: GPU2 becomes the correct handoff target once the old Math GRPO run exits
+  - the clearest current Phase E frontier is no longer generic clean-data retry; it is `PBR44` semantic-consensus vs `PBR45` L2-style clean-data, followed immediately by benchmark-native verification
+  - the latest offline implicit-PRM artifact `pbr38f` confirms that this line should be demoted: fixed-threshold Math `F1=0.0000`, with step-score dynamic range near zero rather than a simple threshold miss
+  - fresh web refresh reinforces the same prioritization: hard-case / domain-specialized verifier curation matters more than one universal scalar head, and replay-buffer / truncation-safe modern GRPO matters more than adding another naive RL branch
+- Fixes / automation:
+  - added a new wrapper that waits for named Phase E run prefixes to finish, then automatically runs `ProcessBench GSM/Math` eval plus `Phase F modern preflight`
+  - launched a GPU2 watcher for `PBR44` vs `PBR45` follow-up so the repo no longer relies on manual “training finished, now remember to eval it” handoffs
+- Runtime follow-up:
+  - launched `phase_e_pbr44_pbr45_followup_wait_0312_1750`
+  - kept existing `phase_f_modern_grpo_canary_wait_0312_1712` and `phase_f_replay_grpo_canary_wait_0312_1732` alive
+- Validation:
+  - `bash -n scripts/run_phase_e_candidate_phase_f_followup_suite.sh`
+
+## 2026-03-12 17:33:52 +0800
+
+- Type: Related-paper sync repair + replay-buffer GRPO extension + web-research correction pass
+- Code changes:
+  - updated `scripts/download_related_papers.py`
+  - updated `scripts/phase_f_grpo_lite.py`
+  - added `tests/unit/test_download_related_papers.py`
+  - updated `tests/unit/test_phase_f_grpo_lite.py`
+  - added `docs/phase_e_phase_f_web_research_refresh_20260312T1733.md`
+  - updated `docs/phase_e_phase_f_autonomous_research_plan_20260312.md`
+- Main findings:
+  - the paper mirror path still had a structural blind spot: `proceedings.mlr.press` landing pages were not recognized, so some cited papers could remain missing even when `docs/relatedPapers/index.json` looked current
+  - after adding PMLR support and rerunning sync, the current docs audit now shows `113` paper-like URLs with `0` missing coverage in `docs/relatedPapers/index.json`
+  - the repo also had a real citation conflict around `PRIME`: `2502.01456` is the implicit-reward RL method, while `2602.11570` is the process-outcome alignment benchmark; one newer planning note had incorrectly pointed `PRIME` to `2502.05795` (`The Curse of Depth in LLMs`)
+  - fresh web+local verification of TRL `0.29.0` shows `GRPOWithReplayBufferTrainer` is available in `trl.experimental`, which directly targets one of our likely Phase F failure modes: low-diversity / low-variance reward groups
+- Fixes:
+  - extended `phase_f_grpo_lite.py` with optional replay-buffer GRPO flags and summary reporting
+  - queued a replay-buffer RL canary on GPU0 without抢占 active jobs
+- Runtime follow-up:
+  - completed related-paper resync (`related_papers_sync_0312_1727_retry`)
+  - launched `phase_f_replay_grpo_canary_wait_0312_1732`
+- Validation:
+  - `python -m py_compile scripts/download_related_papers.py tests/unit/test_download_related_papers.py`
+  - `python -m pytest tests/unit/test_download_related_papers.py`
+  - `python -m py_compile scripts/phase_f_grpo_lite.py tests/unit/test_phase_f_grpo_lite.py`
+  - `python -m pytest tests/unit/test_phase_f_grpo_lite.py tests/unit/test_download_related_papers.py`
+
+## 2026-03-12 17:21:29 +0800
+
+- Type: A-E deep audit + Phase E frontier diagnostics + semantic-consensus data repair
+- Code changes:
+  - updated `src/ours/phase_e/pairs.py`
+  - updated `scripts/phase_d_prepare_external_pairs.py`
+  - updated `scripts/run_phase_e_processbench_transfer_suite.sh`
+  - added `scripts/phase_e_compare_pair_pools.py`
+  - added `scripts/phase_e_analyze_frontier_matrix.py`
+  - added `scripts/run_phase_e_current_frontier_audit_suite.sh`
+  - added `scripts/phase_e_curate_semantic_consensus_pairs.py`
+  - added `tests/unit/test_phase_e_compare_pair_pools.py`
+  - added `tests/unit/test_phase_e_analyze_frontier_matrix.py`
+  - added `tests/unit/test_phase_e_curate_semantic_consensus_pairs.py`
+  - added `docs/phased_e_reports_9_20260312T172129+0800.md`
+- Main findings:
+  - direct Phase D / Phase E entrypoints still had hidden legacy defaults; these are now hardened at both CLI and library levels
+  - new pair-pool audit proved that `PBR38B` did not fail because “consensus filtering is useless”; it failed because the filtered pool deleted `local_first_bad_edge` entirely and raised terminal anchors to `22.5%`
+  - new frontier matrix confirms the current ordering:
+    - `PBR32` best Math-facing LoRA candidate
+    - `PBR31` best balanced same-family / GSM LoRA candidate
+    - `PBR26` strongest frozen reference
+  - new semantics-aware consensus curation artifact `PBR40` now provides the correct next data-side repair:
+    - `7366 -> 4837`
+    - local semantics preserved
+    - terminal fraction reduced to `5.0%`
+- Runtime follow-up:
+  - completed `bash scripts/run_phase_e_current_frontier_audit_suite.sh`
+  - completed `python scripts/phase_e_curate_semantic_consensus_pairs.py ... --run-name phase_e_pbr40_semantic_consensus_v1`
+- Validation:
+  - `PYTHONPATH=src pytest -q tests/unit` → `245 passed`
+  - targeted tests for the new audit / curation scripts passed
+  - `python -m py_compile` on modified Python files passed
+  - `bash -n` on modified shell wrappers passed
+
+## 2026-03-12 17:20:26 +0800
+
+- Type: Phase F GRPO infra modernization + hybrid usability validation + autonomous queue extension
+- Code changes:
+  - updated `scripts/phase_f_grpo_lite.py`
+  - updated `scripts/run_phase_f_overnight_suite.sh`
+  - added `tests/unit/test_phase_f_grpo_lite.py`
+  - added `docs/phased_e_reports_8_20260312T171414+0800.md`
+  - added `docs/phase_e_phase_f_autonomous_research_plan_20260312.md`
+- Main findings:
+  - `phase_f_grpo_lite.py` had an environment-contract gap: the repo default `python` does not expose `trl`, while the active research env `/home/zling/anaconda3/envs/bcr/bin/python3` does; the script now fails loudly with the exact interpreter path and the modern TRL knobs are surfaced explicitly in CLI / summary output
+  - the legacy `run_phase_f_overnight_suite.sh` path was still brittle because it used weak artifact discovery and older GRPO assumptions; it now requires checkpoint markers, uses `set -euo pipefail`, and defaults to the research env python plus a safer modern GRPO argument bundle
+  - the completed `Phase F` hybrid usability suite confirms a stronger “verifier system / ensemble” story than a single universal scalar head: `math ph1mlp+ph1gated` reaches `balanced_f1=0.8926`, `gsm ph2mlp+ph2gated` reaches `0.8815`
+  - controller follow-up remains consistent with earlier audits: warm-started `BC->RL` can help on selected slices, but from-scratch RL-like training is still weak and worst-generator robustness remains unsolved
+  - launched two additional autonomous queues without抢占 shared GPUs: hybrid-candidate preflight on GPU3 and a modern `Dr.GRPO` canary on GPU1
+- Runtime follow-up:
+  - completed `bash scripts/run_phase_f_hybrid_usability_suite.sh`
+  - queued `phase_f_hybrid_preflight_wait_0312_1712`
+  - queued `phase_f_modern_grpo_canary_wait_0312_1712`
+- Validation:
+  - `python -m py_compile scripts/phase_f_grpo_lite.py tests/unit/test_phase_f_grpo_lite.py`
+  - `bash -n scripts/run_phase_f_overnight_suite.sh scripts/run_phase_f_hybrid_usability_suite.sh scripts/run_phase_f_hybrid_preflight_suite.sh`
+  - `python -m pytest tests/unit/test_phase_f_grpo_lite.py tests/unit/test_phase_f_trainable_controller.py tests/unit/test_phase_f_grpo_feasibility.py`
+
+## 2026-03-12 17:40:00 +0800
+
+- Type: Phase F hybrid-controller follow-up + PH2 teacher/mode/seed audit
+- Code changes:
+  - no new code in this sub-pass
+- Main findings:
+  - completed a focused multi-seed follow-up on the new `PH1/PH2` hybrid verifier slices using `scripts/phase_f_behavior_clone_controller.py`
+  - the earlier positive `PH2-mlp Math` `BC->RL` signal does **not** survive a cleaner teacher-aligned audit
+  - once `PH2-mlp Math` is distilled from its actual best heuristic teacher (`guarded_drop`), `BC-only` remains the more reliable choice and `BC->RL` becomes unstable / usually worse
+  - for `PH1-gated Math`, `BC->RL` is roughly neutral-to-slightly positive, but still not enough to justify promoting RL fine-tuning to the default path
+- Runtime follow-up:
+  - ran 15 focused controller-distillation jobs:
+    - `ph2_mlp_math`: `guarded_drop` teacher, `threshold_only` teacher, `bc_only`, `bc_then_rl`, seeds `42/43/44`
+    - `ph1_gated_math`: `drop_needs_low` teacher, `bc_only`, `bc_then_rl`, seeds `42/43/44`
+  - kept the `PH3` and hybrid-preflight GPU watchers alive while this CPU-only audit ran
+- Validation:
+  - all focused runs completed and wrote `summary.json` / `summary.md` under `assets/artifacts/phase_f_bc/`
+
+## 2026-03-12 17:15:00 +0800
+
+- Type: Phase E/F report consolidation + benchmark-facing selected-relabel repair + new overnight autonomy queue
+- Code changes:
+  - updated `scripts/run_phase_e_prmbench_selected_relabel_suite.sh`
+  - added `scripts/run_phase_e_phase_f_autonomy_overnight_suite.sh`
+- Main findings:
+  - the older `PRMBench selected-relabel` path was still anchored to the overfit `E78` baseline and still defaulted to a riskier `logit` target-space assumption; this would have made any overnight repair hard to interpret
+  - the selected-relabel suite is now benchmark-facing by default: it uses `E46` as the balanced baseline, trains under the safe `score + none + pair_acc` family, and appends same-family plus `ProcessBench GSM8K/Math` eval before summarizing
+  - the new autonomy overnight wrapper now queues two literature-guided repair directions without抢占 shared GPUs:
+    1. `PRMBench selected-relabel + Phase F modern preflight`
+    2. `PBR6 LoRA backbone smoke`
+- Rationale:
+  - selected-relabel remains the cleanest conservative data-repair attempt after judge-as-bulk-filter failed
+  - `PBR6` remains one of the few live routes for probing a representation ceiling after frozen-head repairs plateaued
+- Validation:
+  - `bash -n scripts/run_phase_e_prmbench_selected_relabel_suite.sh`
+  - `bash -n scripts/run_phase_e_phase_f_autonomy_overnight_suite.sh`
+- Queue reliability fix:
+  - switched the new overnight wrapper to `nohup`-backed watcher launches after the first draft showed that plain backgrounded watchers can die with the parent shell in non-interactive execution
+
+## 2026-03-12 16:52:30 +0800
+
+- Type: Phase E hybrid summary repair + PH3 bridge launch + full-candidate Phase F preflight
+- Code changes:
+  - updated `scripts/run_phase_e_processbench_hybrid_suite.sh`
+  - updated `scripts/run_phase_f_modern_preflight_suite.sh`
+- Main findings:
+  - `PH1/PH2` had a real summary-layer bug: held-out pair metrics were read from the wrong JSON level, so suite summaries incorrectly showed `0.0` even though the underlying value-head runs were strong
+  - once corrected, `PH1` and `PH2` both show >`0.95` held-out pair accuracy on the curated hybrid artifacts, confirming the new `Math-PRM-7B` hybrid path is not just benchmark overfit
+  - full fixed-threshold ProcessBench evaluation shows a clear split: `PH2-mlp` is the stronger GSM / controller-facing candidate, while `PH1-gated` remains the stronger Math terminal / threshold-tuned candidate
+  - the new full-candidate modern preflight shows both hybrid candidates have much lower superficial reward-hacking exposure than the older `PBR31` line, but generator-shift fragility is still not solved
+- Fixes:
+  - repaired the hybrid suite so `case_results.jsonl` now records `gsm_eval_dir` / `math_eval_dir` and reads held-out metrics from `eval_metrics.json -> eval_pairs`
+  - added `PH3_PRM_LOCAL_TA15_MSGRID5_ARCH_SWEEP_SMOKE` as a bridge recipe between `PH1` and `PH2`
+  - generalized `run_phase_f_modern_preflight_suite.sh` with `CAND_A_ID` / `CAND_B_ID` so the same preflight can audit new hybrid candidates without pretending they are `pbr26/pbr31`
+- Runtime follow-up:
+  - relaunched / rewrote `PH1` and `PH2` summaries with corrected held-out metrics
+  - launched `PH3` smoke on `Qwen2.5-Math-PRM-7B`
+  - ran full ProcessBench fixed-threshold eval for `PH2-mlp` and `PH1-gated`
+  - ran full-candidate `Phase F` modern preflight for `PH2-mlp` vs `PH1-gated`
+
+## 2026-03-12 17:02:00 +0800
+
+- Type: Phase D-F long-form report + PRM-backbone hybrid frontier overnight design
+- Code changes:
+  - added `docs/phased_e_reports_4_20260312T164613+0800.md`
+  - planned new `Phase F` hybrid preflight/usability wrappers for `PH1/PH2/(PH3)` candidates
+  - planned new overnight launcher tying `Phase E` hybrid frontier and `Phase F` controller validation together
+- Main findings:
+  - the new `PH1/PH2 + Math-PRM-7B` line is now the highest-value Phase E frontier, and should replace low-yield `selected-relabel` and `R-PRM` detours as the overnight priority
+  - `Phase F modern preflight` is now trustworthy enough to reuse as a gate on stronger hybrid verifiers, but current `PBR26/PBR31`-named wrappers are too semantically narrow for the new hybrid candidate family
+  - the most valuable next experiments are: `PH3` bridge validation, hybrid-candidate preflight, and hybrid-candidate controller/usability audit
+- Runtime follow-up:
+  - preparing a parallel overnight package on free GPUs for `PH3` plus `Phase F` hybrid audits
+- Validation:
+  - pending after wrapper creation and launch
+
 ## 2026-03-12 16:47:00 +0800
 
 - Type: Phase E/F research refresh + GRPO proxy repair + focused controller experiments

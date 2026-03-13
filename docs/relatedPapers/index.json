@@ -1,13 +1,13 @@
 {
-  "generated_at": "2026-03-12T16:18:14+0800",
-  "run_name": "related_papers_sync_0312_1618",
+  "generated_at": "2026-03-12T17:25:55+0800",
+  "run_name": "related_papers_sync_0312_1727_retry",
   "docs_root": "docs",
   "output_dir": "docs/relatedPapers",
   "download_enabled": true,
   "counts": {
-    "total_urls": 106,
-    "already_present": 101,
-    "downloaded": 5,
+    "total_urls": 114,
+    "already_present": 113,
+    "downloaded": 1,
     "failed": 0,
     "unresolved": 0,
     "pending": 0
@@ -112,8 +112,8 @@
       "origin_paths": [
         "docs/literature_synthesis_20260312_prm_rl_grpo.md"
       ],
-      "status": "downloaded",
-      "note": "path=docs/relatedPapers/2025.findings-acl.747.pdf; sha256=b4c44dd1d318390b4bf44e61d5a959797f7f08f516ff63819f7a301479f39017"
+      "status": "already_present",
+      "note": ""
     },
     {
       "source_url": "https://arxiv.org/abs/1705.07115",
@@ -311,7 +311,8 @@
       "pdf_url": "https://arxiv.org/pdf/2402.03300.pdf",
       "filename": "2402.03300.pdf",
       "origin_paths": [
-        "docs/literature_refresh_20260312_prm_rl.md"
+        "docs/literature_refresh_20260312_prm_rl.md",
+        "docs/phase_e_phase_f_web_research_refresh_20260312.md"
       ],
       "status": "already_present",
       "note": ""
@@ -433,6 +434,7 @@
         "docs/phase_abcdef_audit_research_redesign_20260312.md",
         "docs/phase_e_internet_research_20260311.md",
         "docs/phase_e_rl_ready_research_redesign_20260311.md",
+        "docs/phase_ef_overnight_research_plan_20260313.md",
         "docs/progress_detailed.md",
         "docs/readme_full.md",
         "docs/result_records.md"
@@ -456,7 +458,8 @@
       "filename": "2410.15115.pdf",
       "origin_paths": [
         "docs/literature_synthesis_20260311.md",
-        "docs/literature_synthesis_20260312_prm_rl_grpo.md"
+        "docs/literature_synthesis_20260312_prm_rl_grpo.md",
+        "docs/phase_e_phase_f_web_research_refresh_20260312.md"
       ],
       "status": "already_present",
       "note": ""
@@ -584,7 +587,8 @@
       "filename": "2501.12948.pdf",
       "origin_paths": [
         "docs/literature_refresh_20260312_prm_rl.md",
-        "docs/literature_synthesis_20260311.md"
+        "docs/literature_synthesis_20260311.md",
+        "docs/phase_e_phase_f_web_research_refresh_20260312.md"
       ],
       "status": "already_present",
       "note": ""
@@ -620,7 +624,19 @@
         "docs/literature_synthesis_20260312_prm_rl_grpo.md",
         "docs/phase_E_plan.md",
         "docs/phase_e_phase_f_best_practice_refresh_20260312.md",
+        "docs/phase_e_phase_f_web_research_refresh_20260312.md",
+        "docs/phase_ef_overnight_research_plan_20260313.md",
         "docs/research_survey_processverifier_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2502.05795",
+      "pdf_url": "https://arxiv.org/pdf/2502.05795.pdf",
+      "filename": "2502.05795.pdf",
+      "origin_paths": [
+        "docs/phase_e_phase_f_autonomous_research_plan_20260312.md"
       ],
       "status": "already_present",
       "note": ""
@@ -752,10 +768,11 @@
       "pdf_url": "https://arxiv.org/pdf/2503.14476.pdf",
       "filename": "2503.14476.pdf",
       "origin_paths": [
-        "docs/literature_synthesis_20260312_prm_rl_grpo.md"
+        "docs/literature_synthesis_20260312_prm_rl_grpo.md",
+        "docs/phase_e_phase_f_web_research_refresh_20260312.md"
       ],
-      "status": "downloaded",
-      "note": "path=docs/relatedPapers/2503.14476.pdf; sha256=f01e4fd347530cadd68e5c36b1998532a6d1adb272c817e73b927453c26e9d79"
+      "status": "already_present",
+      "note": ""
     },
     {
       "source_url": "https://arxiv.org/abs/2503.18013",
@@ -772,10 +789,12 @@
       "pdf_url": "https://arxiv.org/pdf/2503.20783.pdf",
       "filename": "2503.20783.pdf",
       "origin_paths": [
-        "docs/literature_synthesis_20260312_prm_rl_grpo.md"
+        "docs/literature_synthesis_20260312_prm_rl_grpo.md",
+        "docs/phase_e_phase_f_web_research_refresh_20260312.md",
+        "docs/phase_ef_overnight_research_plan_20260313.md"
       ],
-      "status": "downloaded",
-      "note": "path=docs/relatedPapers/2503.20783.pdf; sha256=98243d51297f011fb5baad8a70a972d061ffbef618f1d7cfc10deea37c5887d0"
+      "status": "already_present",
+      "note": ""
     },
     {
       "source_url": "https://arxiv.org/abs/2503.21295",
@@ -820,7 +839,11 @@
         "docs/phase_F_plan.md",
         "docs/phase_abcde_impl_audit_and_redesign_20260311.md",
         "docs/phase_abcdef_audit_research_redesign_20260312.md",
+        "docs/phase_e_phase_f_autonomous_research_plan_20260312.md",
         "docs/phase_e_phase_f_best_practice_refresh_20260312.md",
+        "docs/phase_e_phase_f_web_research_refresh_20260312.md",
+        "docs/phase_ef_overnight_research_plan_20260313.md",
+        "docs/phased_e_reports_6_20260312_164400.md",
         "docs/readme_full.md",
         "docs/research_survey_processverifier_20260311.md",
         "docs/result_records.md"
@@ -833,10 +856,11 @@
       "pdf_url": "https://arxiv.org/pdf/2504.05118.pdf",
       "filename": "2504.05118.pdf",
       "origin_paths": [
-        "docs/literature_synthesis_20260312_prm_rl_grpo.md"
+        "docs/literature_synthesis_20260312_prm_rl_grpo.md",
+        "docs/phase_e_phase_f_web_research_refresh_20260312.md"
       ],
-      "status": "downloaded",
-      "note": "path=docs/relatedPapers/2504.05118.pdf; sha256=a10387626b86a8f9a6a80d17e727eb5a5036dc237a81d370c26e60d7c4168457"
+      "status": "already_present",
+      "note": ""
     },
     {
       "source_url": "https://arxiv.org/abs/2504.08481",
@@ -908,6 +932,9 @@
         "docs/phase_e_frontier_paradigms_and_experiments_20260311.md",
         "docs/phase_e_judge_llm_selection_20260311.md",
         "docs/phase_e_paradigm_refresh_experiments_20260311.md",
+        "docs/phase_e_phase_f_autonomous_research_plan_20260312.md",
+        "docs/phase_e_phase_f_web_research_refresh_20260312.md",
+        "docs/phased_e_reports_6_20260312_164400.md",
         "docs/readme_full.md",
         "docs/research_survey_processverifier_20260311.md",
         "docs/result_records.md"
@@ -920,10 +947,11 @@
       "pdf_url": "https://arxiv.org/pdf/2505.11227.pdf",
       "filename": "2505.11227.pdf",
       "origin_paths": [
-        "docs/literature_synthesis_20260312_prm_rl_grpo.md"
+        "docs/literature_synthesis_20260312_prm_rl_grpo.md",
+        "docs/phase_e_phase_f_web_research_refresh_20260312.md"
       ],
-      "status": "downloaded",
-      "note": "path=docs/relatedPapers/2505.11227.pdf; sha256=be8cfec61975a749dd170f5243154e587ee07ed7dd36442197c5a391cad7998b"
+      "status": "already_present",
+      "note": ""
     },
     {
       "source_url": "https://arxiv.org/abs/2505.11966",
@@ -942,6 +970,7 @@
       "origin_paths": [
         "docs/phase_e_frontier_paradigms_and_experiments_20260311.md",
         "docs/phase_e_overnight_frontier_plan_20260313.md",
+        "docs/phase_e_phase_f_overnight_refresh_20260312.md",
         "docs/phase_e_rl_ready_research_redesign_20260311.md",
         "docs/phase_e_updated_literature_redesign_20260311.md",
         "docs/phase_ef_verifier_system_refresh_20260312.md",
@@ -1056,10 +1085,14 @@
         "docs/phase_e_frontier_paradigms_and_experiments_20260311.md",
         "docs/phase_e_literature_refresh_20260311.md",
         "docs/phase_e_overnight_frontier_plan_20260313.md",
+        "docs/phase_e_phase_f_autonomous_research_plan_20260312.md",
         "docs/phase_e_phase_f_best_practice_refresh_20260312.md",
         "docs/phase_e_phase_f_overnight_bestpractice_20260313.md",
+        "docs/phase_e_phase_f_overnight_refresh_20260312.md",
+        "docs/phase_e_phase_f_web_research_refresh_20260312.md",
         "docs/phase_e_rl_ready_research_redesign_20260311.md",
         "docs/phase_ef_verifier_system_refresh_20260312.md",
+        "docs/phased_e_reports_6_20260312_164400.md",
         "docs/readme_full.md",
         "docs/result_records.md"
       ],
@@ -1115,6 +1148,7 @@
       "filename": "2510.01152.pdf",
       "origin_paths": [
         "docs/phase_F_plan.md",
+        "docs/phase_e_phase_f_web_research_refresh_20260312.md",
         "docs/readme_full.md",
         "docs/result_records.md"
       ],
@@ -1130,7 +1164,10 @@
         "docs/phase_e_literature_refresh_20260311.md",
         "docs/phase_e_overnight_frontier_plan_20260313.md",
         "docs/phase_e_paradigm_refresh_experiments_20260311.md",
+        "docs/phase_e_phase_f_autonomous_research_plan_20260312.md",
         "docs/phase_e_phase_f_best_practice_refresh_20260312.md",
+        "docs/phase_e_phase_f_overnight_refresh_20260312.md",
+        "docs/phase_e_phase_f_web_research_refresh_20260312.md",
         "docs/phase_e_rl_ready_research_redesign_20260311.md",
         "docs/phase_e_updated_literature_redesign_20260311.md",
         "docs/phase_ef_verifier_system_refresh_20260312.md",
@@ -1171,7 +1208,10 @@
         "docs/phase_abcdef_audit_research_redesign_20260312.md",
         "docs/phase_e_frontier_paradigms_and_experiments_20260311.md",
         "docs/phase_e_overnight_frontier_plan_20260313.md",
+        "docs/phase_e_phase_f_autonomous_research_plan_20260312.md",
         "docs/phase_e_phase_f_best_practice_refresh_20260312.md",
+        "docs/phase_e_phase_f_overnight_refresh_20260312.md",
+        "docs/phase_e_phase_f_web_research_refresh_20260312.md",
         "docs/phase_e_rl_ready_research_redesign_20260311.md",
         "docs/phase_e_updated_literature_redesign_20260311.md",
         "docs/phase_ef_verifier_system_refresh_20260312.md",
@@ -1189,9 +1229,11 @@
         "docs/phase_abcdef_audit_research_redesign_20260312.md",
         "docs/phase_e_frontier_paradigms_and_experiments_20260311.md",
         "docs/phase_e_overnight_frontier_plan_20260313.md",
+        "docs/phase_e_phase_f_overnight_refresh_20260312.md",
         "docs/phase_e_rl_ready_research_redesign_20260311.md",
         "docs/phase_e_updated_literature_redesign_20260311.md",
         "docs/phase_ef_verifier_system_refresh_20260312.md",
+        "docs/phased_e_reports_6_20260312_164400.md",
         "docs/readme_full.md",
         "docs/result_records.md"
       ],
@@ -1203,7 +1245,10 @@
       "pdf_url": "https://arxiv.org/pdf/2602.17633.pdf",
       "filename": "2602.17633.pdf",
       "origin_paths": [
-        "docs/phase_e_phase_f_best_practice_refresh_20260312.md"
+        "docs/phase_e_phase_f_autonomous_research_plan_20260312.md",
+        "docs/phase_e_phase_f_best_practice_refresh_20260312.md",
+        "docs/phase_e_phase_f_web_research_refresh_20260312.md",
+        "docs/phased_e_reports_6_20260312_164400.md"
       ],
       "status": "already_present",
       "note": ""
@@ -1249,11 +1294,51 @@
       "note": ""
     },
     {
+      "source_url": "https://arxiv.org/pdf/2501.07301",
+      "pdf_url": "https://arxiv.org/pdf/2501.07301.pdf",
+      "filename": "2501.07301.pdf",
+      "origin_paths": [
+        "docs/phase_ef_overnight_research_plan_20260313.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
       "source_url": "https://arxiv.org/pdf/2507.02076",
       "pdf_url": "https://arxiv.org/pdf/2507.02076.pdf",
       "filename": "2507.02076.pdf",
       "origin_paths": [
         "docs/literature_refresh_20260312_prm_rl.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://arxiv.org/pdf/2509.03403",
+      "pdf_url": "https://arxiv.org/pdf/2509.03403.pdf",
+      "filename": "2509.03403.pdf",
+      "origin_paths": [
+        "docs/phase_ef_overnight_research_plan_20260313.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://openreview.net/forum?id=0CajQNVKyB",
+      "pdf_url": "https://openreview.net/pdf?id=0CajQNVKyB",
+      "filename": "openreview_0CajQNVKyB.pdf",
+      "origin_paths": [
+        "docs/phased_e_reports_6_20260312_164400.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://openreview.net/forum?id=3jrWUqoItt",
+      "pdf_url": "https://openreview.net/pdf?id=3jrWUqoItt",
+      "filename": "openreview_3jrWUqoItt.pdf",
+      "origin_paths": [
+        "docs/phased_e_reports_6_20260312_164400.md"
       ],
       "status": "already_present",
       "note": ""
@@ -1313,7 +1398,8 @@
       "pdf_url": "https://openreview.net/pdf?id=omVhYvyTPJ",
       "filename": "openreview_omVhYvyTPJ.pdf",
       "origin_paths": [
-        "docs/phase_e_literature_refresh_20260311.md"
+        "docs/phase_e_literature_refresh_20260311.md",
+        "docs/phased_e_reports_6_20260312_164400.md"
       ],
       "status": "already_present",
       "note": ""
@@ -1324,6 +1410,40 @@
       "filename": "openreview_openreview.pdf",
       "origin_paths": [
         "docs/research_survey_processverifier_20260311.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://proceedings.mlr.press/v267/jia25f.html",
+      "pdf_url": "https://raw.githubusercontent.com/mlresearch/v267/main/assets/jia25f/jia25f.pdf",
+      "filename": "jia25f.pdf",
+      "origin_paths": [
+        "docs/phase_C_fix_value_head.md",
+        "docs/phase_C_plan.md",
+        "docs/readme_full.md"
+      ],
+      "status": "downloaded",
+      "note": "path=docs/relatedPapers/jia25f.pdf; sha256=1260bfc351b97c6b86c403744a785a77899161f3c1e2126f01a93d906aad8f68"
+    },
+    {
+      "source_url": "https://proceedings.mlr.press/v70/guo17a.html",
+      "pdf_url": "http://proceedings.mlr.press/v70/guo17a/guo17a.pdf",
+      "filename": "guo17a.pdf",
+      "origin_paths": [
+        "docs/phase_C_plan.md",
+        "docs/readme_full.md"
+      ],
+      "status": "already_present",
+      "note": ""
+    },
+    {
+      "source_url": "https://proceedings.mlr.press/v80/chen18a.html",
+      "pdf_url": "http://proceedings.mlr.press/v80/chen18a/chen18a.pdf",
+      "filename": "chen18a.pdf",
+      "origin_paths": [
+        "docs/phase_C_plan.md",
+        "docs/readme_full.md"
       ],
       "status": "already_present",
       "note": ""

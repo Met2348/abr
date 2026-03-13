@@ -211,14 +211,18 @@ def _compute_step_scores_implicit(
 
 
 def _load_processbench_jsonl(path: Path) -> list[dict]:
-    """Load ProcessBench JSONL file."""
-    examples = []
+    """Load ProcessBench JSON or JSONL file."""
     with path.open() as f:
+        first_char = f.read(1)
+    with path.open() as f:
+        if first_char == "[":
+            return json.load(f)
+        examples = []
         for line in f:
             line = line.strip()
             if line:
                 examples.append(json.loads(line))
-    return examples
+        return examples
 
 
 def _compute_processbench_f1(
@@ -306,11 +310,23 @@ def main(argv: list[str] | None = None) -> None:
     print()
 
     # Load base (reference) model
+    # Use Qwen2ForCausalLM (not AutoModel/Qwen2ForProcessRewardModel) so that
+    # model_out.logits = token-level vocabulary logits [1, T, V] (not scalar PRM rewards).
+    # The PRM checkpoint contains lm_head.weight; CausalLM loads it correctly.
     print("Loading reference (base) model...")
-    from transformers import AutoModel, AutoTokenizer
+    from transformers import AutoTokenizer
 
-    load_kwargs = {"dtype": dtype, "low_cpu_mem_usage": True, "trust_remote_code": True}
-    ref_model = AutoModel.from_pretrained(args.base_model_path, **load_kwargs)
+    try:
+        from transformers import Qwen2ForCausalLM
+
+        _ModelCls = Qwen2ForCausalLM
+    except ImportError:
+        from transformers import AutoModelForCausalLM
+
+        _ModelCls = AutoModelForCausalLM  # type: ignore[assignment]
+
+    load_kwargs = {"torch_dtype": dtype, "low_cpu_mem_usage": True, "trust_remote_code": True, "ignore_mismatched_sizes": True}
+    ref_model = _ModelCls.from_pretrained(args.base_model_path, **load_kwargs)
     ref_model.eval()
     ref_model.to(device)
     tokenizer = AutoTokenizer.from_pretrained(args.base_model_path, trust_remote_code=True)
@@ -318,7 +334,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # Load LoRA model (separate copy of base + adapter)
     print("Loading LoRA model...")
-    lora_model = AutoModel.from_pretrained(args.base_model_path, **load_kwargs)
+    lora_model = _ModelCls.from_pretrained(args.base_model_path, **load_kwargs)
     adapter_dir = args.lora_run_dir / "best_adapter"
     if adapter_dir.exists():
         from ours.phase_e.runtime import attach_peft_adapter_for_inference
@@ -343,7 +359,12 @@ def main(argv: list[str] | None = None) -> None:
     scored = []
     for i, ex in enumerate(examples):
         # Extract solution text and error location
-        solution = ex.get("solution", ex.get("reasoning", ex.get("text", "")))
+        # ProcessBench format: steps is a list; join to reconstruct solution text
+        raw_steps = ex.get("steps")
+        if isinstance(raw_steps, list):
+            solution = "\n\n".join(raw_steps)
+        else:
+            solution = ex.get("solution", ex.get("reasoning", ex.get("text", "")))
         # ProcessBench format: error_location = first error step index (0-based), -1 if all correct
         error_loc = ex.get("error_location", ex.get("label", -1))
         if error_loc is None:

@@ -300,11 +300,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--corruption-selection-policy",
         choices=["legacy", "cqr_balanced"],
-        default="legacy",
+        default="cqr_balanced",
         help=(
             "Corruption candidate selection policy. "
-            "`legacy` preserves the historical deterministic behavior; "
-            "`cqr_balanced` enables CQR semantic expansion and per-prefix balancing."
+            "`cqr_balanced` is the repository-safe default because it enables CQR semantic expansion "
+            "and per-prefix balancing. `legacy` preserves the historical deterministic behavior."
         ),
     )
     parser.add_argument(

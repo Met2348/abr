@@ -106,7 +106,12 @@ resolve_group() {
       )
       SUITE_MAX_PAIRS_PER_SOURCE="${SUITE_MAX_PAIRS_PER_SOURCE:-}"
       SUITE_MAX_PAIRS_TOTAL="${SUITE_MAX_PAIRS_TOTAL:-}"
-      SUITE_PAIR_GLOBAL_CAP_MODE="${SUITE_PAIR_GLOBAL_CAP_MODE:-pair_id_head}"
+      # The transfer-repair matrix is supposed to answer the current research
+      # question, not replay the legacy file-order cap. Keep rare repair buckets
+      # alive by default unless a legacy reproduction explicitly overrides it.
+      # 这个 transfer-repair matrix 的目标是回答当前研究问题，而不是复现旧的
+      # 文件顺序截断。默认保留稀疏修复 bucket，除非显式传 legacy 覆盖。
+      SUITE_PAIR_GLOBAL_CAP_MODE="${SUITE_PAIR_GLOBAL_CAP_MODE:-balanced_support_bucket}"
       SUITE_BENCH_MAX_SAMPLES="${SUITE_BENCH_MAX_SAMPLES:-}"
       SUITE_TRAIN_EPOCHS="${SUITE_TRAIN_EPOCHS:-}"
       SUITE_TRAIN_BATCH_SIZE="${SUITE_TRAIN_BATCH_SIZE:-}"

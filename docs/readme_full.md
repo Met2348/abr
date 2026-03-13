@@ -1,3 +1,353 @@
+## 2026-03-12 22:10:41 +0800
+
+### New note from this pass
+
+1. `scripts/run_phase_e_pbr40_semcons_suite.sh`
+2. `scripts/phase_f_implicit_prm_eval_v2.py`
+
+### Commands run in this sub-pass
+
+```bash
+python -m py_compile scripts/phase_f_implicit_prm_eval_v2.py
+bash -n scripts/run_phase_e_pbr40_semcons_suite.sh
+
+CUDA_VISIBLE_DEVICES=0 \
+PYTHON_BIN=/home/zling/anaconda3/envs/bcr/bin/python \
+ACTIVE_PHASE_E_PBR40_MODE=frozen \
+RUN_PREFIX=phase_e_pbr40c_frozen_0312_2146 \
+bash scripts/run_phase_e_pbr40_semcons_suite.sh
+
+CUDA_VISIBLE_DEVICES=1 \
+PYTHON_BIN=/home/zling/anaconda3/envs/bcr/bin/python \
+ACTIVE_PHASE_E_PBR40_MODE=lora \
+RUN_PREFIX=phase_e_pbr40c_lora_0312_2146 \
+bash scripts/run_phase_e_pbr40_semcons_suite.sh
+
+CUDA_VISIBLE_DEVICES=2 \
+/home/zling/anaconda3/envs/bcr/bin/python -u scripts/phase_e_eval_samefamily_trust.py \
+  --value-run-dir assets/artifacts/phase_e_runs/phase_e_pbr32_lora_mathprm_alllayers_pbr12data_s42_20260311T152656Z \
+  --eval-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_pbr12_dpo_plus_mathms_pairs__70b9f8db5f31/validation_pairs.jsonl \
+  --run-name pbr32_samefamily_verify_0312 \
+  --output-root assets/artifacts/phase_e_samefamily_eval \
+  --batch-size 32 \
+  --max-length 1024 \
+  --device-map auto \
+  --max-gpu-memory-gib 32 \
+  --feature-cache-mode read_write \
+  --require-cuda
+
+CUDA_VISIBLE_DEVICES=3 \
+/home/zling/anaconda3/envs/bcr/bin/python -u scripts/phase_f_implicit_prm_eval_v2.py \
+  --lora-run-dir assets/artifacts/phase_e_runs/phase_e_pbr32_lora_mathprm_alllayers_pbr12data_s42_20260311T152656Z \
+  --base-model-path assets/models/Qwen2.5-Math-PRM-7B \
+  --benchmark-path assets/external_datasets/qwen_processbench/math.json \
+  --run-name pbr32_implicit_v2_math_0312_r4 \
+  --output-root assets/artifacts/phase_f_implicit_prm_v2 \
+  --beta 0.5 \
+  --fixed-threshold 0.0 \
+  --max-length 1024 \
+  --max-samples 200 \
+  --device-map auto \
+  --max-gpu-memory-gib 32 \
+  --require-cuda
+```
+
+### Result snapshot
+
+1. `PBR32` same-family is now complete:
+   - `top1=0.8985`
+   - `local_first_bad=0.9081`
+   - path: `assets/artifacts/phase_e_samefamily_eval/pbr32_samefamily_verify_0312_20260312T134859Z/`
+2. `PBR40C frozen` formal suite is complete:
+   - held-out `pair_acc=0.8610`, `auc=0.8115`
+   - same-family `top1=0.8632`, `local_first_bad=0.8715`
+   - GSM `auc=0.9174`, `F1=0.7745`
+   - Math `auc=0.8852`, `F1=0.6561`
+   - RL diag: `assessment=near_rl_ready_but_terminal_gap`
+3. interpretation:
+   - `PBR40C frozen` is a valid repaired-data baseline
+   - but it does **not** beat `PBR26/PBR31/PBR32`
+   - the blocker is no longer “global ranking collapse”; it is mainly `same-family gate` plus `terminal completion`
+4. `implicit PRM v2` is now engineering-valid:
+   - the earlier fake-zero path was caused by real implementation bugs
+   - 1-sample smoke now completes at `assets/artifacts/phase_f_implicit_prm_v2/pbr32_implicit_v2_smoke1_r3_20260312T140604Z/`
+5. `implicit PRM v2` 200-sample Math audit is now complete:
+   - `pair_auc=0.6885`
+   - `first_edge=0.7083`
+   - `F1_fixed@0.0=0.0438`
+   - `F1_oracle=0.3537`
+   - path: `assets/artifacts/phase_f_implicit_prm_v2/pbr32_implicit_v2_math_0312_r4_20260312T141314Z/`
+6. still running:
+   - `PBR40C LoRA` full formal suite
+   - latest visible progress: `epoch=0 global_step=40 avg_loss=0.016225`
+
+## 2026-03-12 21:40:54 +0800
+
+### New note from this pass
+
+1. `docs/phase_e_phase_f_followup_research_20260312T2140.md`
+
+### Commands run in this sub-pass
+
+```bash
+bash -n scripts/run_phase_e_candidate_phase_f_followup_suite.sh
+python -u scripts/wait_for_gpu_idle_and_launch.py   --gpu-id 2   --max-used-mib 4096   --max-util 10   --poll-seconds 180   --log-file assets/artifacts/phase_e_logs/phase_e_pbr44_pbr45_followup_wait_0312_1750/watch.log   --workdir /home/zling/y/bcr/ref   --command 'PYTHON_BIN=/home/zling/anaconda3/bin/python3 RUN_PREFIX=phase_e_pbr44_pbr45_followup_0312_1750 GPU_DEVICE=2 CAND_A_ID=pbr44 CAND_B_ID=pbr45 CAND_A_RUN_PREFIX=phase_e_pbr44_lora_semcons_v1_s42 CAND_B_RUN_PREFIX=phase_e_pbr45_lora_pbr12_l2style_s42 bash scripts/run_phase_e_candidate_phase_f_followup_suite.sh'
+```
+
+### Result snapshot
+
+1. new auto-followup watcher is live on GPU2:
+   - `assets/artifacts/phase_e_logs/phase_e_pbr44_pbr45_followup_wait_0312_1750/watch.log`
+2. current interpretation of the latest implicit-PRM artifact tightened further:
+   - `pbr38f` fixed-threshold Math `F1=0.0000`
+   - the issue looks like near-zero score dynamic range, not just threshold choice.
+3. current Phase E promotion priority is now explicit:
+   - read `PBR44` / `PBR45` all the way through benchmark eval and preflight before launching another wide data recipe sweep.
+
+## 2026-03-12 17:33:52 +0800
+
+### New docs from this pass
+
+1. `docs/phase_e_phase_f_web_research_refresh_20260312T1733.md`
+2. updated `docs/phase_e_phase_f_autonomous_research_plan_20260312.md`
+
+### Commands run in this sub-pass
+
+```bash
+python -m py_compile scripts/download_related_papers.py tests/unit/test_download_related_papers.py
+python -m pytest tests/unit/test_download_related_papers.py
+python -u scripts/download_related_papers.py --docs-root docs --output-dir docs/relatedPapers --include-root-readme --download --run-name related_papers_sync_0312_1724
+python -u scripts/download_related_papers.py --docs-root docs --output-dir docs/relatedPapers --include-root-readme --download --run-name related_papers_sync_0312_1727_retry
+python -m py_compile scripts/phase_f_grpo_lite.py tests/unit/test_phase_f_grpo_lite.py
+python -m pytest tests/unit/test_phase_f_grpo_lite.py tests/unit/test_download_related_papers.py
+python -m pytest tests/unit/test_phase_f_grpo_lite.py tests/unit/test_download_related_papers.py tests/unit/test_phase_f_trainable_controller.py tests/unit/test_phase_f_grpo_feasibility.py
+python -u scripts/wait_for_gpu_idle_and_launch.py   --gpu-id 0   --max-used-mib 4096   --max-util 10   --poll-seconds 180   --log-file assets/artifacts/phase_f_logs/phase_f_replay_grpo_canary_wait_0312_1732/watch.log   --workdir /home/zling/y/bcr/ref   --command 'TRL_EXPERIMENTAL_SILENCE=1 /home/zling/anaconda3/envs/bcr/bin/python3 -u scripts/phase_f_grpo_lite.py --value-run-dir assets/artifacts/phase_e_runs/phase_e_pbr32_lora_mathprm_alllayers_pbr12data_s42_20260311T152656Z --backbone-path assets/models/Qwen2.5-Math-PRM-7B --policy-path assets/models/Qwen2.5-Math-7B-Instruct --dataset gsm8k --num-train-problems 96 --num-eval-problems 48 --lambda-process 0.3 --k-samples 4 --num-train-epochs 1 --max-steps 24 --learning-rate 1e-6 --max-new-tokens 512 --per-device-train-batch-size 1 --gradient-accumulation-steps 8 --output-root assets/artifacts/phase_f_grpo --run-name phase_f_replay_grpo_canary_0312_1732 --dtype bfloat16 --require-cuda --seed 42 --reward-shaping clip_delta --trl-loss-type dr_grpo --trl-scale-rewards batch --trl-beta 0.04 --trl-epsilon 0.2 --trl-mask-truncated-completions --trl-temperature 1.0 --save-only-model --trl-use-replay-buffer --trl-replay-buffer-size 64'
+# confirmed alive via `ps` and watch log after launch
+```
+
+### Result snapshot
+
+1. `docs/relatedPapers/` now covers all currently detected paper-like URLs in `docs/**/*.md` (`113/113`, missing `0`).
+2. `phase_f_grpo_lite.py` now supports a replay-buffer variant via TRL experimental APIs.
+3. a new replay-buffer canary watcher is live on GPU0:
+   - `assets/artifacts/phase_f_logs/phase_f_replay_grpo_canary_wait_0312_1732/watch.log`
+4. writing-time caution:
+   - distinguish `PRIME-RL implicit rewards` (`2502.01456`) from the `PRIME` verifier benchmark (`2602.11570`).
+
+## 2026-03-12 17:21:29 +0800
+
+### New long-form sourcebook
+
+1. `docs/phased_e_reports_9_20260312T172129+0800.md`
+
+### Code audit fixes in this pass
+
+1. `Phase E` and `Phase D` direct entrypoints no longer silently inherit the most dangerous legacy defaults:
+   - `src/ours/phase_e/pairs.py`
+   - `scripts/phase_d_prepare_external_pairs.py`
+   - `scripts/run_phase_e_processbench_transfer_suite.sh`
+2. New diagnostics added:
+   - `scripts/phase_e_compare_pair_pools.py`
+   - `scripts/phase_e_analyze_frontier_matrix.py`
+   - `scripts/run_phase_e_current_frontier_audit_suite.sh`
+3. New data-curation repair added:
+   - `scripts/phase_e_curate_semantic_consensus_pairs.py`
+
+### Commands run in this pass
+
+```bash
+PYTHONPATH=src pytest -q tests/unit
+PYTHONPATH=src pytest -q tests/unit/test_safe_defaults_scripts.py tests/unit/test_phase_e_pairs.py tests/unit/test_phase_d_external_pairs.py
+PYTHONPATH=src pytest -q tests/unit/test_phase_e_compare_pair_pools.py tests/unit/test_phase_e_analyze_frontier_matrix.py tests/unit/test_phase_e_curate_semantic_consensus_pairs.py
+python -m py_compile scripts/phase_e_compare_pair_pools.py scripts/phase_e_analyze_frontier_matrix.py scripts/phase_e_curate_semantic_consensus_pairs.py scripts/phase_d_prepare_external_pairs.py src/ours/phase_e/pairs.py
+bash -n scripts/run_phase_e_current_frontier_audit_suite.sh scripts/run_phase_e_processbench_transfer_suite.sh
+bash scripts/run_phase_e_current_frontier_audit_suite.sh
+python scripts/phase_e_curate_semantic_consensus_pairs.py \
+  --train-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_pbr26_dpo_plus_ms_full_pairs__b17437d10dfc/train_pairs.jsonl \
+  --validation-pairs-jsonl assets/artifacts/phase_e_pairs/phase_e_pbr26_dpo_plus_ms_full_pairs__b17437d10dfc/validation_pairs.jsonl \
+  --run-name phase_e_pbr40_semantic_consensus_v1
+python scripts/phase_e_compare_pair_pools.py \
+  --run-name phase_e_semantic_consensus_compare \
+  --pair-dir PBR26 assets/artifacts/phase_e_pairs/phase_e_pbr26_dpo_plus_ms_full_pairs__b17437d10dfc \
+  --pair-dir PBR38B assets/artifacts/phase_e_pairs/phase_e_pbr38b_consensus_filtered_pairs \
+  --pair-dir PBR40 assets/artifacts/phase_e_pairs/phase_e_pbr40_semantic_consensus_v1_20260312T092021Z
+```
+
+### Current conclusions from this pass
+
+1. `PBR38B` failed for a concrete data reason, not a vague “consensus filtering doesn’t work” reason:
+   - its train pool dropped `local_first_bad_edge` entirely,
+   - terminal anchors rose to `22.5%`,
+   - held-out collapsed to `pair_acc=0.5481 / auc=0.5253`.
+2. Current frontier remains:
+   - `PBR32` = best Math-facing LoRA candidate
+   - `PBR31` = best balanced same-family / GSM LoRA candidate
+   - `PBR26` = strongest frozen reference
+3. New curated pool `PBR40` is the correct next data-side repair:
+   - `7366 -> 4837` train pairs
+   - preserves `local_first_bad_edge=3580`
+   - keeps `terminal_fraction=0.050`
+4. Full unit suite after the fixes:
+   - `245 passed`
+
+## 2026-03-12 17:20:26 +0800
+
+### New report / planning docs
+
+1. `docs/phased_e_reports_8_20260312T171414+0800.md`
+2. `docs/phase_e_phase_f_autonomous_research_plan_20260312.md`
+
+### Commands run in this pass
+
+```bash
+python -m py_compile scripts/phase_f_grpo_lite.py tests/unit/test_phase_f_grpo_lite.py
+bash -n scripts/run_phase_f_overnight_suite.sh scripts/run_phase_f_hybrid_usability_suite.sh scripts/run_phase_f_hybrid_preflight_suite.sh
+python -m pytest tests/unit/test_phase_f_grpo_lite.py tests/unit/test_phase_f_trainable_controller.py tests/unit/test_phase_f_grpo_feasibility.py
+bash scripts/run_phase_f_hybrid_usability_suite.sh
+python -u scripts/wait_for_gpu_idle_and_launch.py   --gpu-id 3   --max-used-mib 4096   --max-util 10   --poll-seconds 180   --log-file assets/artifacts/phase_f_logs/phase_f_hybrid_preflight_wait_0312_1712/watch.log   --workdir /home/zling/y/bcr/ref   --command 'RUN_PREFIX=phase_f_hybrid_preflight_wait_0312_1712 GPU_DEVICE=3 bash scripts/run_phase_f_hybrid_preflight_suite.sh'
+python -u scripts/wait_for_gpu_idle_and_launch.py   --gpu-id 1   --max-used-mib 4096   --max-util 10   --poll-seconds 180   --log-file assets/artifacts/phase_f_logs/phase_f_modern_grpo_canary_wait_0312_1712/watch.log   --workdir /home/zling/y/bcr/ref   --command '/home/zling/anaconda3/envs/bcr/bin/python3 -u scripts/phase_f_grpo_lite.py --value-run-dir assets/artifacts/phase_e_runs/phase_e_pbr32_lora_mathprm_alllayers_pbr12data_s42_20260311T152656Z --backbone-path assets/models/Qwen2.5-Math-PRM-7B --policy-path assets/models/Qwen2.5-Math-7B-Instruct --dataset gsm8k --num-train-problems 96 --num-eval-problems 48 --lambda-process 0.3 --k-samples 4 --num-train-epochs 1 --max-steps 24 --learning-rate 1e-6 --max-new-tokens 512 --per-device-train-batch-size 1 --gradient-accumulation-steps 8 --output-root assets/artifacts/phase_f_grpo --run-name phase_f_modern_grpo_canary_0312_1712 --dtype bfloat16 --require-cuda --seed 42 --reward-shaping clip_delta --trl-loss-type dr_grpo --trl-scale-rewards batch --trl-beta 0.04 --trl-epsilon 0.2 --trl-mask-truncated-completions --trl-temperature 1.0 --save-only-model'
+```
+
+### Result snapshot
+
+1. `Phase F` hybrid usability suite finished and strengthened the ensemble story:
+   - `math ph1mlp + ph1gated = 0.8926`
+   - `gsm ph2mlp + ph2gated = 0.8815`
+2. `BC->RL` remains selective rather than general:
+   - can help on `ph1_gated_math`,
+   - roughly ties on `ph2_mlp_gsm`,
+   - from-scratch `RL-like` still collapses on the harder Math slice.
+3. Two autonomous queues are active:
+   - hybrid preflight watcher on GPU3,
+   - modern GRPO canary watcher on GPU1.
+
+## 2026-03-12 Late Follow-Up: PH2 Teacher-Aligned BC vs BC->RL Audit
+
+This pass closed the main ambiguity left by the first `PH1/PH2` hybrid usability suite.
+
+At that point, one result still looked tentatively positive:
+
+1. `ph2_mlp_math`
+2. `BC->RL`
+3. test `balanced_f1 = 0.8320`
+4. vs the earlier wrapper `BC-only` result `0.7304`
+
+That was potentially important, but also methodologically weak because the wrapper had used a convenience teacher, not the slice's own best controller family.
+
+### Focused follow-up design
+
+We reran a teacher-aligned multi-seed audit with:
+
+1. `ph2_mlp_math`
+   - true best heuristic teacher from controller sweep:
+     - `guarded_drop`
+     - `{"tau_low": 0.3, "delta": 0.25, "tau_guard": 0.5, "min_step": 4}`
+   - plus the old wrapper teacher as control:
+     - `threshold_only`
+     - `{"tau": 0.42}`
+2. `ph1_gated_math`
+   - true best heuristic teacher:
+     - `drop_needs_low`
+     - `{"tau": 0.38, "delta": 0.2, "tau_drop": 0.45}`
+3. modes:
+   - `bc_only`
+   - `bc_then_rl`
+4. seeds:
+   - `42 / 43 / 44`
+
+Artifacts are under:
+
+1. `assets/artifacts/phase_f_bc/phase_f_focus_ph2_guarded_bc_s*_20260312T*/`
+2. `assets/artifacts/phase_f_bc/phase_f_focus_ph2_guarded_bcrl_s*_20260312T*/`
+3. `assets/artifacts/phase_f_bc/phase_f_focus_ph2_thresh_bc_s*_20260312T*/`
+4. `assets/artifacts/phase_f_bc/phase_f_focus_ph1_drop_bc_s*_20260312T*/`
+5. `assets/artifacts/phase_f_bc/phase_f_focus_ph1_drop_bcrl_s*_20260312T*/`
+
+### Aggregated result
+
+| case | teacher | mode | mean test balanced_f1 | std |
+|---|---|---|---:|---:|
+| `ph2_mlp_math` | `guarded_drop` | `bc_only` | `0.7292` | `0.1289` |
+| `ph2_mlp_math` | `guarded_drop` | `bc_then_rl` | `0.6929` | `0.0815` |
+| `ph2_mlp_math` | `threshold_only` | `bc_only` | `0.8020` | `0.0273` |
+| `ph1_gated_math` | `drop_needs_low` | `bc_only` | `0.8030` | `0.0690` |
+| `ph1_gated_math` | `drop_needs_low` | `bc_then_rl` | `0.8211` | `0.0490` |
+
+### Interpretation
+
+1. The earlier `ph2_mlp_math` positive `BC->RL` signal does **not** survive a cleaner audit.
+2. On that slice, the stronger conclusion is now:
+   - `BC-only` is still the safer default;
+   - `BC->RL` is unstable and should not be promoted.
+3. `ph1_gated_math` remains a mild exception where `BC->RL` can be neutral-to-slightly-positive.
+4. Therefore the current controller progression should remain:
+   - heuristic family selection
+   - BC distillation
+   - selective BC->RL follow-up only after slice-specific teacher-aligned validation
+
+## 2026-03-12 Evening DEF Consolidation + Overnight Queue
+
+New primary materials and commands for this round:
+
+1. detailed long-form report:
+   - `docs/phased_e_reports_7_20260312T170216+0800.md`
+2. overnight plan note:
+   - `docs/phase_e_phase_f_overnight_refresh_20260312.md`
+3. new queue wrapper:
+   - `scripts/run_phase_e_phase_f_autonomy_overnight_suite.sh`
+
+Direct queue command:
+
+```bash
+RUN_PREFIX=phase_e_phase_f_auto_$(date +%m%d_%H%M) \
+GPU_RELABEL=1 \
+GPU_LORA=3 \
+bash scripts/run_phase_e_phase_f_autonomy_overnight_suite.sh
+```
+
+What this queues:
+1. `PRMBench selected-relabel + Phase F modern preflight`
+2. `PBR6 LoRA backbone smoke`
+
+Why these two:
+1. selected-relabel is still the cleanest conservative data-repair attempt after bulk judge-filter failed;
+2. `PBR6` remains one of the strongest open probes for a backbone-representation ceiling.
+
+## 2026-03-12 Afternoon PRM-Backbone Hybrid Promotion
+
+This round produced the first clean, corrected `PH1/PH2` hybrid summaries and a full-candidate `Phase F` preflight on the new `Math-PRM-7B` backbone line.
+
+Most important updates:
+
+1. `PH1` / `PH2` suite summaries were previously under-reporting held-out quality as `0.0` due to a JSON-path bug. This is now fixed both in code and in the already-written artifacts.
+2. Corrected held-out metrics show both groups are genuinely strong on their curated pair artifacts:
+   - `PH1 mlp`: held pair `0.9554`, held AUC `0.9347`
+   - `PH1 gated_mlp`: held pair `0.9509`, held AUC `0.9421`
+   - `PH2 mlp`: held pair `0.9508`, held AUC `0.9389`
+   - `PH2 gated_mlp`: held pair `0.9621`, held AUC `0.9430`
+3. Full fixed-threshold `ProcessBench` results now separate the two leading directions clearly:
+   - `PH2-mlp` is the better GSM / controller-facing candidate
+   - `PH1-gated` is the stronger Math threshold-tuned candidate
+4. Full modern preflight shows both hybrid candidates are far cleaner under superficial reward-hacking probes than the older `PBR31` line, but generator-shift fragility remains unresolved.
+5. A new bridge experiment, `PH3_PRM_LOCAL_TA15_MSGRID5_ARCH_SWEEP_SMOKE`, is running to test whether a lighter grid auxiliary can combine the GSM gains of `PH2` with the stronger Math terminal behavior of `PH1`.
+
+Key artifacts from this round:
+
+1. `assets/artifacts/phase_e_logs/phase_e_prmbackbone_hybrid_ph1_live_0312/final_summary.md`
+2. `assets/artifacts/phase_e_logs/phase_e_prmbackbone_hybrid_ph2_live_0312/final_summary.md`
+3. `assets/artifacts/phase_e_eval/phase_e_ph2mlp_full_gsm_fixed05_0312_20260312T084934Z/`
+4. `assets/artifacts/phase_e_eval/phase_e_ph2mlp_full_math_fixed05_0312_20260312T084943Z/`
+5. `assets/artifacts/phase_e_eval/phase_e_ph1gated_full_gsm_fixed05_0312_20260312T085057Z/`
+6. `assets/artifacts/phase_e_eval/phase_e_ph1gated_full_math_fixed05_0312_20260312T085106Z/`
+7. `assets/artifacts/phase_f_logs/phase_f_hybrid_preflight_full_0312/final_summary.md`
+8. `assets/artifacts/phase_e_logs/phase_e_prmbackbone_hybrid_ph3_live_0312_dbg/suite.log`
+
+Practical interpretation:
+
+1. `PH2-mlp` currently looks like the best `Phase F` starting point if the downstream objective is a fixed-threshold controller on GSM-style reasoning.
+2. `PH1-gated` is still worth retaining for Math-oriented routes where a tuned threshold is acceptable.
+3. The repo should keep prioritizing `Math-PRM-7B + benchmark-oriented hybrid curation`; this has overtaken `selected-relabel` and the older weak-backbone transfer lines.
+
 # OURS Research Project (Independent from external BCR code)
 
 ## 2026-03-12 Midday E/F Audit Refresh

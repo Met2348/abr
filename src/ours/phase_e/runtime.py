@@ -184,6 +184,20 @@ def attach_peft_adapter_for_inference(model: Any, adapter_path: Path):
         weights = torch.load(str(bin_path), map_location="cpu", weights_only=True)
     else:
         raise FileNotFoundError(f"No adapter weights found in {adapter_path}")
+    # Remap legacy key format: older PEFT saves used `lora_A.weight` (no adapter name),
+    # but current PEFT (≥0.7) expects `lora_A.default.weight` (`.default.` inserted).
+    # If zero keys matched and the first saved key looks like `lora_A.weight`, remap.
+    model_keys = set(model.state_dict().keys())
+    needs_remap = any((".lora_A.weight" in k or ".lora_B.weight" in k) for k in weights)
+    has_default = any(".lora_A.default.weight" in k for k in model_keys)
+    if needs_remap and has_default:
+        import re
+        remapped = {}
+        for k, v in weights.items():
+            # `lora_A.weight` → `lora_A.default.weight`, same for lora_B
+            k2 = re.sub(r"\.(lora_[AB])\.weight$", r".\1.default.weight", k)
+            remapped[k2] = v
+        weights = remapped
     model.load_state_dict(weights, strict=False)
     return model
 

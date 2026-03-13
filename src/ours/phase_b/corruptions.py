@@ -38,7 +38,10 @@ class CorruptionBuildConfig:
     max_corruptions_per_prefix: int = 1
     # `legacy`: 旧版 deterministic 逻辑，通常以简单算子翻转/step_drop 为主。
     # `cqr_balanced`: CQR 平衡策略，优先保留语义型 corruption，并限制 step_drop 占比。
-    selection_policy: str = "legacy"
+    # Use `cqr_balanced` as the safe default so direct callers do not silently
+    # fall back to the older geometry when they forget to set the flag.
+    # 默认走 `cqr_balanced`，避免 direct 调用漏传参数时静默退回旧监督几何。
+    selection_policy: str = "cqr_balanced"
     # 在 cqr_balanced 下，尽量保证每个 prefix 至少有若干“非 step_drop”样本。
     min_non_step_drop_per_prefix: int = 1
     # 在 cqr_balanced 下，限制 step_drop 样本数，避免 fallback 主导训练信号。

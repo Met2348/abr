@@ -72,6 +72,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--validation-ratio", type=float, default=0.1)
+    parser.add_argument(
+        "--split-granularity",
+        choices=["pair_id", "source_sample"],
+        default="source_sample",
+        help=(
+            "How train/validation splitting should be performed. "
+            "`source_sample` is the safe default because all sibling pairs from the same raw trajectory stay together. "
+            "`pair_id` is retained only for legacy reproductions."
+        ),
+    )
     parser.add_argument("--max-pairs-total", type=int, default=None)
     parser.add_argument("--max-pairs-per-source", type=int, default=None)
     parser.add_argument("--min-pair-confidence", type=float, default=0.0)
@@ -100,6 +110,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--r-prm-split",
         choices=["train", "validation", "both"],
         default="train",
+    )
+    parser.add_argument(
+        "--r-prm-pair-mode",
+        choices=["direct_pair_legacy", "compact_verdict", "compact_correctness"],
+        default="compact_verdict",
+        help=(
+            "How R-PRM rows should be converted into canonical pairs. "
+            "`compact_verdict` is the safe default; `direct_pair_legacy` is retained only for legacy diagnostics."
+        ),
     )
     parser.add_argument(
         "--prmbench-preview-path",
@@ -147,6 +166,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = _build_parser().parse_args(argv)
     if not (0.0 < float(args.validation_ratio) < 0.5):
         raise ValueError("--validation-ratio must be in (0, 0.5)")
+    if str(args.split_granularity) not in {"pair_id", "source_sample"}:
+        raise ValueError("--split-granularity must be one of {'pair_id', 'source_sample'}")
     if args.max_pairs_total is not None and int(args.max_pairs_total) <= 0:
         raise ValueError("--max-pairs-total must be > 0")
     if args.max_pairs_per_source is not None and int(args.max_pairs_per_source) <= 0:
@@ -181,6 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         max_token_overlap=float(args.max_token_overlap),
         max_pairs_per_sample=int(args.max_pairs_per_sample),
         step_label_pair_mode=str(args.step_label_pair_mode),
+        r_prm_pair_mode=str(args.r_prm_pair_mode),
     )
     config.validate()
 
@@ -189,6 +211,7 @@ def main(argv: list[str] | None = None) -> int:
             "run_name": str(args.run_name),
             "seed": int(args.seed),
             "validation_ratio": float(args.validation_ratio),
+            "split_granularity": str(args.split_granularity),
             "max_pairs_total": args.max_pairs_total,
             "max_pairs_per_source": args.max_pairs_per_source,
             "min_pair_confidence": float(args.min_pair_confidence),
@@ -243,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"run_dir          : {run_dir}")
     print(f"seed             : {args.seed}")
     print(f"validation_ratio : {args.validation_ratio}")
+    print(f"split_granularity: {args.split_granularity}")
     print(f"max_pairs_total  : {args.max_pairs_total}")
     print(f"max_pairs_source : {args.max_pairs_per_source}")
     print(f"min_confidence   : {args.min_pair_confidence}")
@@ -317,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
         rows=dedup_rows,
         seed=int(args.seed),
         validation_ratio=float(args.validation_ratio),
+        split_granularity=str(args.split_granularity),
     )
 
     _write_jsonl(train_path, [row.to_dict() for row in train_rows])
@@ -345,6 +370,7 @@ def main(argv: list[str] | None = None) -> int:
             "max_pairs_total": args.max_pairs_total,
             "validation_ratio": float(args.validation_ratio),
             "seed": int(args.seed),
+            "split_granularity": str(args.split_granularity),
         },
     }
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -418,19 +444,55 @@ def _split_train_validation(
     rows: list[ExternalPairRecord],
     seed: int,
     validation_ratio: float,
+    split_granularity: str = "source_sample",
 ) -> tuple[list[ExternalPairRecord], list[ExternalPairRecord]]:
+    """Split rows deterministically while keeping sibling pairs together when possible.
+
+    English
+    -------
+    `pair_id` splitting is kept only for legacy reproduction. The safer default
+    is `source_sample`, which hashes a stable raw-sample key so multiple pairs
+    derived from one trajectory cannot leak across train/validation.
+
+    中文
+    ----
+    `pair_id` 切分只保留给历史复现实验。更安全的默认值是 `source_sample`：
+    它会对稳定的原始样本键做哈希，这样同一条轨迹衍生出的多个 pair 不会被
+    拆到 train/validation 两边。
+    """
+    if split_granularity not in {"pair_id", "source_sample"}:
+        raise ValueError("`split_granularity` must be one of {'pair_id', 'source_sample'}")
     train_rows: list[ExternalPairRecord] = []
     val_rows: list[ExternalPairRecord] = []
-    for row in rows:
-        if _is_validation_pair(pair_id=row.pair_id, seed=seed, ratio=validation_ratio):
-            val_rows.append(row)
-        else:
-            train_rows.append(row)
+    if split_granularity == "pair_id":
+        for row in rows:
+            if _is_validation_pair(pair_id=row.pair_id, seed=seed, ratio=validation_ratio):
+                val_rows.append(row)
+            else:
+                train_rows.append(row)
+    else:
+        grouped_rows: dict[str, list[ExternalPairRecord]] = {}
+        for row in rows:
+            split_group_id = _split_group_id_for_row(row)
+            grouped_rows.setdefault(split_group_id, []).append(row)
+        for split_group_id, group_rows in sorted(grouped_rows.items()):
+            if _is_validation_pair(pair_id=split_group_id, seed=seed, ratio=validation_ratio):
+                val_rows.extend(group_rows)
+            else:
+                train_rows.extend(group_rows)
     if not train_rows and val_rows:
         train_rows.append(val_rows.pop())
     if not val_rows and train_rows:
         val_rows.append(train_rows.pop())
     return train_rows, val_rows
+
+
+def _split_group_id_for_row(row: ExternalPairRecord) -> str:
+    metadata = dict(row.metadata or {})
+    raw_group = metadata.get("split_group_id")
+    if isinstance(raw_group, str) and raw_group.strip():
+        return f"{row.source_tag}:{raw_group.strip()}"
+    return f"{row.source_tag}:pair:{row.pair_id}"
 
 
 def _is_validation_pair(*, pair_id: str, seed: int, ratio: float) -> bool:

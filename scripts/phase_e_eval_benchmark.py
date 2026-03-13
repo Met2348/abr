@@ -109,12 +109,23 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--max-length", type=int, default=None)
     parser.add_argument(
+        "--processbench-f1-threshold-policy",
+        choices=["fixed", "oracle_sweep"],
+        default="fixed",
+        help=(
+            "How ProcessBench F1 thresholding should be handled. "
+            "`fixed` is the repository-safe default and uses --processbench-f1-threshold "
+            "(falling back to 0.5 when omitted). `oracle_sweep` is only for controlled diagnostics."
+        ),
+    )
+    parser.add_argument(
         "--processbench-f1-threshold",
         type=float,
         default=None,
         help=(
-            "Optional fixed threshold for ProcessBench F1. "
-            "If unset, the benchmark metric reports the optimistic oracle sweep threshold."
+            "Optional fixed threshold for ProcessBench F1 when "
+            "--processbench-f1-threshold-policy=fixed. "
+            "If omitted in fixed mode, the script uses the repository-safe default 0.5."
         ),
     )
     parser.add_argument(
@@ -195,6 +206,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--max-length must be > 8")
     if int(args.processbench_f1_threshold_candidates) <= 0:
         raise ValueError("--processbench-f1-threshold-candidates must be > 0")
+    normalized_threshold_policy = str(args.processbench_f1_threshold_policy).strip().lower()
+    if normalized_threshold_policy == "fixed":
+        if args.processbench_f1_threshold is None:
+            args.processbench_f1_threshold = 0.5
+    elif normalized_threshold_policy == "oracle_sweep":
+        if args.processbench_f1_threshold is not None:
+            raise ValueError(
+                "--processbench-f1-threshold must be omitted when "
+                "--processbench-f1-threshold-policy=oracle_sweep"
+            )
+    else:
+        raise ValueError(
+            "--processbench-f1-threshold-policy must be one of {'fixed', 'oracle_sweep'}"
+        )
     if args.max_gpu_memory_gib is not None and int(args.max_gpu_memory_gib) <= 0:
         raise ValueError("--max-gpu-memory-gib must be > 0")
     if args.max_cpu_memory_gib is not None and int(args.max_cpu_memory_gib) <= 0:
@@ -341,6 +366,11 @@ def main(argv: list[str] | None = None) -> int:
     # 1. ProcessBench 需要先把一题展开成多个 prefix
     # 2. PRMBench_Preview 则直接对 chosen/rejected pair 打分
     if benchmark_spec.benchmark_type == "processbench":
+        processbench_f1_threshold = (
+            float(args.processbench_f1_threshold)
+            if str(args.processbench_f1_threshold_policy).strip().lower() == "fixed"
+            else None
+        )
         metrics, scored_rows, truncation_diagnostics = _eval_processbench(
             benchmark_path=benchmark_path,
             max_samples=args.max_samples,
@@ -349,7 +379,7 @@ def main(argv: list[str] | None = None) -> int:
             value_head=value_head,
             batch_size=int(args.batch_size),
             max_length=int(max_length),
-            processbench_f1_threshold=args.processbench_f1_threshold,
+            processbench_f1_threshold=processbench_f1_threshold,
             processbench_f1_threshold_candidates=int(args.processbench_f1_threshold_candidates),
             max_truncation_over_limit_fraction=float(args.max_truncation_over_limit_fraction),
             feature_cache_root=Path(args.feature_cache_root),
@@ -400,6 +430,7 @@ def main(argv: list[str] | None = None) -> int:
         "truncation_diagnostics": truncation_diagnostics,
         "feature_cache_stats": feature_cache_stats,
         "model_load_elapsed_sec": float(load_elapsed),
+        "processbench_f1_threshold_policy": str(args.processbench_f1_threshold_policy),
     }
     manifest = {
         "artifact_stage": "phase_e_benchmark_eval_v1",
@@ -408,6 +439,7 @@ def main(argv: list[str] | None = None) -> int:
         "benchmark_spec": benchmark_spec.to_dict(),
         "benchmark_path": str(benchmark_path),
         "checkpoint_resolution": checkpoint_resolution,
+        "processbench_f1_threshold_policy": str(args.processbench_f1_threshold_policy),
         "processbench_f1_threshold": (
             None if args.processbench_f1_threshold is None else float(args.processbench_f1_threshold)
         ),
